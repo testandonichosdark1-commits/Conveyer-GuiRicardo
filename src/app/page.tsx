@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useT } from "./_i18n";
 import { AvatarSelect } from "./_components/AvatarSelect";
+import { VoiceSelect, type VoiceLite } from "./_components/VoiceSelect";
 
 interface AvatarLite {
   id: number;
@@ -37,6 +38,8 @@ export default function CreerVideoPage() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [channelId, setChannelId] = useState<number | null>(null);
   const [avatarId, setAvatarId] = useState<number | null>(null);
+  const [voiceId, setVoiceId] = useState<string | null>(null);
+  const [voiceboxProfiles, setVoiceboxProfiles] = useState<VoiceLite[]>([]);
   const [visualMode, setVisualMode] = useState<VisualMode>("mix");
   const [realPercent, setRealPercent] = useState(50);
   // Set only via applyChannel (from the selected channel's footage_source_tiers) —
@@ -49,6 +52,8 @@ export default function CreerVideoPage() {
   // Whether a saved draft already chose the avatar — so the avatars fetch below
   // doesn't auto-select the first one over the user's restored choice.
   const draftChoseAvatar = useRef(false);
+  // Same idea for the voice — don't clobber a restored pick with the global default.
+  const draftChoseVoice = useRef(false);
   const restored = useRef(false);
 
   // Restore an in-progress draft when returning to this page (navigating to
@@ -62,6 +67,7 @@ export default function CreerVideoPage() {
       if (typeof d.script === "string") setScript(d.script);
       if (d.channelId === null || typeof d.channelId === "number") setChannelId(d.channelId);
       if (d.avatarId === null || typeof d.avatarId === "number") { setAvatarId(d.avatarId); draftChoseAvatar.current = true; }
+      if (d.voiceId === null || typeof d.voiceId === "string") { setVoiceId(d.voiceId); draftChoseVoice.current = true; }
       if (d.visualMode === "ai" || d.visualMode === "real" || d.visualMode === "mix") setVisualMode(d.visualMode);
       if (Number.isFinite(d.realPercent)) setRealPercent(d.realPercent);
       if (d.footageSourceTiers === null || typeof d.footageSourceTiers === "string") setFootageSourceTiers(d.footageSourceTiers);
@@ -79,9 +85,9 @@ export default function CreerVideoPage() {
   useEffect(() => {
     if (!restored.current) return;
     try {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify({ title, script, channelId, avatarId, visualMode, realPercent, avatarPercent, sceneTransitions, footageSourceTiers }));
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ title, script, channelId, avatarId, voiceId, visualMode, realPercent, avatarPercent, sceneTransitions, footageSourceTiers }));
     } catch { /* quota / private mode */ }
-  }, [title, script, channelId, avatarId, visualMode, realPercent, avatarPercent, sceneTransitions, footageSourceTiers]);
+  }, [title, script, channelId, avatarId, voiceId, visualMode, realPercent, avatarPercent, sceneTransitions, footageSourceTiers]);
 
   useEffect(() => {
     fetch("/api/avatars")
@@ -97,12 +103,25 @@ export default function CreerVideoPage() {
       .then((r) => (r.ok ? r.json() : null))
       .then((rows: Channel[] | null) => { if (Array.isArray(rows)) setChannels(rows); })
       .catch(() => {});
+    // Voicebox voice profiles (empty array if VOICEBOX_DIR isn't set — not an error).
+    fetch("/api/voices/voicebox")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((rows: VoiceLite[] | null) => { if (Array.isArray(rows)) setVoiceboxProfiles(rows); })
+      .catch(() => {});
     // Seed the on-screen "Seconds per visual" default from the global setting, so the
     // visible control is the single source of truth (initialized from the global, not
     // a hardcoded 4.5 and not a stale draft). The user can still override it per run.
+    // Same idea for the default voice (VOICEBOX_PROFILE_ID) — the user can still
+    // override it per run below.
     fetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
-      .then((s) => { const n = Number(s?.SECONDS_PER_VISUAL); if (Number.isFinite(n) && n > 0) setSecondsPerVisual(n); })
+      .then((s) => {
+        const n = Number(s?.SECONDS_PER_VISUAL);
+        if (Number.isFinite(n) && n > 0) setSecondsPerVisual(n);
+        if (!draftChoseVoice.current && typeof s?.VOICEBOX_PROFILE_ID === "string" && s.VOICEBOX_PROFILE_ID.trim()) {
+          setVoiceId(s.VOICEBOX_PROFILE_ID.trim());
+        }
+      })
       .catch(() => {});
   }, []);
 
@@ -132,6 +151,7 @@ export default function CreerVideoPage() {
           title: title.trim() || undefined,
           script,
           avatarId,
+          voiceId,
           channelId,
           visualMode,
           realPercent: visualMode === "mix" ? realPercent : undefined,
@@ -239,6 +259,19 @@ export default function CreerVideoPage() {
             );
           })()}
         </div>
+
+        {voiceboxProfiles.length > 0 && (
+          <div>
+            <label className="label">{tr("Voix (Voicebox)", "Voice (Voicebox)")}</label>
+            <VoiceSelect voices={voiceboxProfiles} value={voiceId} onChange={setVoiceId} />
+            <div className="faint" style={{ fontSize: 12, marginTop: 5 }}>
+              {tr("« Default voice » utilise ", "\"Default voice\" uses ")}
+              <code>VOICEBOX_PROFILE_ID</code>
+              {tr(" (réglages) ou la voix de la chaîne. ", " (settings) or the channel's voice. ")}
+              <Link href="/voices">{tr("Gérer les voix →", "Manage voices →")}</Link>
+            </div>
+          </div>
+        )}
 
         {/* Everything below is optional — a picked channel already sets it.
             Collapsed by default so the common flow is just script + avatar +

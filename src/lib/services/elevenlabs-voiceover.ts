@@ -136,6 +136,12 @@ export async function synthesizeVoiceover(
   if (provider === "elevenlabs") {
     return synthesizeElevenLabs(runId, script, outDir, opts);
   }
+  if (provider === "voicebox") {
+    // Dynamic import: voicebox-voiceover.ts imports alignWords back from this
+    // module, so a static top-level import here would be circular.
+    const { synthesizeVoicebox } = await import("./voicebox-voiceover");
+    return synthesizeVoicebox(runId, script, outDir, opts);
+  }
   return synthesizeViaProvider(runId, script, outDir, provider, opts);
 }
 
@@ -168,7 +174,7 @@ async function synthesizeViaProvider(
  * falls back to a proportional even split (so a run never fails just because no
  * Groq key is set).
  */
-async function alignWords(runId: string, mp3Path: string, script: string, durationSec: number): Promise<WordTiming[]> {
+export async function alignWords(runId: string, mp3Path: string, script: string, durationSec: number): Promise<WordTiming[]> {
   const groqKey = getSetting("GROQ_API_KEY");
   if (groqKey) {
     try {

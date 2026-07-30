@@ -315,6 +315,16 @@ export const ALL_GROUPS: Group[] = [
         desc: "ai33pro voice_id — MUST include the provider prefix from their Voice Library: elevenlabs_, minimax_, clone_, edge_, kokoro_, vbee_ or fishaudio_. A channel profile's voice_id overrides this per channel.",
         examples: "elevenlabs_hpp4J3VqNfWAUOO0d1Us  ·  minimax_male-qn-qingse  ·  edge_vi-VN-HoaiMyNeural",
       },
+      {
+        key: "VOICEBOX_DIR",
+        desc: "Path to a local github.com/jamiepine/voicebox checkout. Required when VOICEOVER_PROVIDER=voicebox (free, local TTS + voice cloning — Kokoro presets or your own cloned voice, no API key). Run `npm run setup:voicebox -- \"<path>\"` once after cloning, then create/preview voice profiles on the Voices page.",
+        examples: "Mac: /Users/you/dev/voicebox  ·  Windows: D:\\dev\\voicebox",
+      },
+      {
+        key: "VOICEBOX_PROFILE_ID",
+        desc: "Default Voicebox voice profile id (created on the Voices page). Required when VOICEOVER_PROVIDER=voicebox. A run/channel voice override takes precedence.",
+        examples: "Pick one on /voices, or via VoicePicker on the Settings/Parametres page",
+      },
     ],
   },
   {

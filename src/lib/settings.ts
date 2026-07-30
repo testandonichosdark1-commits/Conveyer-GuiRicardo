@@ -91,7 +91,9 @@ export const SETTING_KEYS = [
   "STOCK_FOOTAGE_MIN_DURATION",// seconds — skip stock stingers shorter than this
 
   // ── Avatar documentary mode ───────────────────────────────────────
-  "VOICEOVER_PROVIDER",        // elevenlabs (direct, word-timestamps) | genaipro | 69labs | heygen | minimax | ai33pro
+  "VOICEOVER_PROVIDER",        // elevenlabs (direct, word-timestamps) | genaipro | 69labs | heygen | minimax | ai33pro | voicebox
+  "VOICEBOX_DIR",              // path to a local github.com/jamiepine/voicebox checkout (free, local TTS + voice cloning). Required when VOICEOVER_PROVIDER=voicebox.
+  "VOICEBOX_PROFILE_ID",       // default Voicebox voice profile id (created on /voices). A run/channel voice override takes precedence.
   "ELEVENLABS_VOICE_ID",       // ElevenLabs narration voice_id (the script voiceover)
   "ELEVENLABS_MODEL",          // eleven_multilingual_v2 (default) | eleven_flash_v2_5
   "ELEVENLABS_RETRIES",        // retries for the voiceover call on TRANSIENT failures (500/503/429/timeout/network) before the run fails. Permanent 4xx (bad key/voice/quota) fail fast. attempts = retries + 1. 0 = one-shot. Default 3 (clamped 0–8).
@@ -374,6 +376,8 @@ export const DEFAULTS: Record<SettingKey, string> = {
 
   // Avatar documentary mode
   VOICEOVER_PROVIDER: "elevenlabs",
+  VOICEBOX_DIR: "",
+  VOICEBOX_PROFILE_ID: "",
   ELEVENLABS_VOICE_ID: "",
   ELEVENLABS_MODEL: "eleven_multilingual_v2",
   ELEVENLABS_RETRIES: "3",

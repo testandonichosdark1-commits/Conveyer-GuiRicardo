@@ -5,7 +5,7 @@
  * safe to import from client components (no DB/server imports).
  */
 
-export type VoiceProviderId = "elevenlabs" | "genaipro" | "69labs" | "heygen" | "minimax" | "ai33pro";
+export type VoiceProviderId = "elevenlabs" | "genaipro" | "69labs" | "heygen" | "minimax" | "ai33pro" | "voicebox";
 
 export interface VoiceProviderMeta {
   id: VoiceProviderId;
@@ -30,6 +30,7 @@ export const VOICE_PROVIDERS: VoiceProviderMeta[] = [
   { id: "heygen", label: "HeyGen", selectLabel: "HeyGen", apiKey: "HEYGEN_API_KEY", voiceIdKey: "HEYGEN_VOICE_ID", voicesEndpoint: "hg" },
   { id: "minimax", label: "MiniMax", selectLabel: "MiniMax", apiKey: "MINIMAX_API_KEY", voiceIdKey: "MINIMAX_VOICE_ID", extraKeys: [{ key: "MINIMAX_GROUP_ID", label: "MiniMax — Group ID" }] },
   { id: "ai33pro", label: "ai33pro", selectLabel: "ai33pro (ElevenLabs / Minimax / Clone / Edge / Kokoro / Vbee / FishAudio)", apiKey: "AI33PRO_API_KEY", voiceIdKey: "AI33PRO_VOICE_ID" },
+  { id: "voicebox", label: "Voicebox", selectLabel: "Voicebox (free, local — Kokoro / Chatterbox)", apiKey: "VOICEBOX_DIR", voiceIdKey: "VOICEBOX_PROFILE_ID" },
 ];
 
 const DEFAULT_VOICE_PROVIDER = VOICE_PROVIDERS[0]; // elevenlabs

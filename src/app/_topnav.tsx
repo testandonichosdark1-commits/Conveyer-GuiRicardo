@@ -207,7 +207,7 @@ export function TopNav({ user }: { user: NavUser }) {
             </Link>
           ))}
         </nav>
-        {user && <UserMenu email={user.email} />}
+        {user?.email && <UserMenu email={user.email} />}
       </div>
 
       {/* Hamburger (only visible < 1024px via .topnav-burger). */}
@@ -237,7 +237,7 @@ export function TopNav({ user }: { user: NavUser }) {
                 {item.beta && <BetaTag />}
               </Link>
             ))}
-            {user && (
+            {user?.email && (
               <div style={{ borderTop: "1px solid var(--border)", marginTop: 6, paddingTop: 10, display: "grid", gap: 8 }}>
                 <div style={{ fontSize: 12.5, color: "var(--fg-muted)", padding: "0 4px", wordBreak: "break-all" }}>
                   {user.email}

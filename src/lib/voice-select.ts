@@ -5,10 +5,13 @@
  * pipeline consumes the run, so the two cases are centralized here (and covered by
  * voice-select.test.ts) to keep them from being re-crossed by a future refactor:
  *
- *  - The STUDIO pipeline narrates with ElevenLabs, so its stored voice may ONLY be
- *    an ElevenLabs voice (a channel's `voice_id`). A preset's HeyGen voice must
- *    never land here — sending a HeyGen id to ElevenLabs returns `voice_not_found`.
- *    null → the pipeline falls back to the global ELEVENLABS_VOICE_ID setting.
+ *  - The STUDIO pipeline narrates via VOICEOVER_PROVIDER (ElevenLabs, Voicebox,
+ *    ...), so its stored voice may ONLY be an id that provider understands (a
+ *    channel's `voice_id`, or an explicit per-run pick from Create Video). A
+ *    preset's HeyGen voice must never land here — sending a HeyGen id to
+ *    ElevenLabs returns `voice_not_found`. null → the pipeline falls back to
+ *    the active provider's own global voice setting (e.g. ELEVENLABS_VOICE_ID
+ *    or VOICEBOX_PROFILE_ID).
  *
  *  - The LEGACY pipeline drives `TTS_PROVIDER` (default HeyGen), where the preset's
  *    HeyGen voice (`heygen_voice_id`) is exactly the right value.

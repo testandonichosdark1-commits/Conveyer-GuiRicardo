@@ -41,6 +41,7 @@ interface Body {
   visualPrompt?: string;
   sceneTransitions?: boolean;
   footageSourceTiers?: string | null;
+  voiceId?: string | null;
 }
 
 export async function POST(req: Request) {
@@ -134,10 +135,12 @@ export async function POST(req: Request) {
     );
   }
 
-  // Per-channel ElevenLabs narration voice — the ONLY source of preset_voice_id for
-  // the studio pipeline (never a preset's HeyGen voice). null → the pipeline uses
-  // the global ELEVENLABS_VOICE_ID.
-  const studioVoice = studioRunVoiceId(channel);
+  // Narration voice for the studio pipeline — an explicit per-run pick (e.g. a
+  // Voicebox profile id from the Create Video page) wins over the channel's
+  // default voice_id. Never a preset's HeyGen voice — that pipeline is legacy-
+  // only (see voice-select.ts). null → the pipeline falls back to the active
+  // VOICEOVER_PROVIDER's global voice setting.
+  const studioVoice = body.voiceId?.trim() || studioRunVoiceId(channel);
   if (studioVoice) {
     setVoiceSnapshot.run(studioVoice, id);
   }

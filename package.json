@@ -9,7 +9,8 @@
     "start": "next start",
     "test": "vitest run",
     "postinstall": "node scripts/fix-native-binaries.mjs",
-    "fix-bins": "node scripts/fix-native-binaries.mjs"
+    "fix-bins": "node scripts/fix-native-binaries.mjs",
+    "setup:voicebox": "node scripts/setup-voicebox.mjs"
   },
   "engines": {
     "node": ">=20.0.0"

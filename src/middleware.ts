@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { updateSession } from "@/lib/supabase/middleware";
 import { isAdmin } from "@/lib/supabase/roles";
+import { isSupabaseConfigured } from "@/lib/supabase/env";
 
 /**
  * The ONE place auth is enforced. No page or API route implements its own check.
@@ -14,6 +15,9 @@ import { isAdmin } from "@/lib/supabase/roles";
  *  - Admin gate: the Settings surfaces expose provider API keys, so a non-admin
  *    hitting /parametres|/settings|/advanced is redirected to /, and
  *    /api/settings returns 401.
+ *  - No Supabase env configured (no .env.local yet) → gate is skipped entirely.
+ *    This is a single-operator local tool; auth is opt-in by setting
+ *    NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY.
  *
  * Cookie note: updateSession refreshes the session cookie onto its response. When
  * we redirect/deny instead, we copy those cookies onto our own response so the
@@ -34,6 +38,8 @@ function withCookies(from: NextResponse, to: NextResponse): NextResponse {
 }
 
 export async function middleware(request: NextRequest) {
+  if (!isSupabaseConfigured()) return NextResponse.next();
+
   const { pathname, search } = request.nextUrl;
   const { response, user } = await updateSession(request);
 

@@ -19,7 +19,7 @@ export function VoicePicker({
 }: {
   label: string;
   settingKey: string;
-  which: "el" | "hg";
+  which: "el" | "hg" | "vb";
   val: Val;
   set: Set;
 }) {
@@ -30,13 +30,22 @@ export function VoicePicker({
   async function loadVoices() {
     setLoading(true);
     try {
-      const r = await fetch(`/api/voices/${which === "el" ? "elevenlabs" : "heygen"}`);
+      const endpoint = which === "el" ? "elevenlabs" : which === "hg" ? "heygen" : "voicebox";
+      const r = await fetch(`/api/voices/${endpoint}`);
       const j = await r.json().catch(() => ({}));
       if (!r.ok) {
-        alert(`${tr("Impossible de charger les voix", "Couldn't load voices")} : ${j.error || r.statusText}`);
+        alert(`${tr("Impossible de charger les voix", "Couldn't load voices")} : ${(j as { error?: string }).error || r.statusText}`);
         return;
       }
-      setVoices(j.voices ?? []);
+      if (which === "vb") {
+        // Voicebox returns its own raw profile list (id/name/engine), not the
+        // { voices: [{voice_id,name}] } shape the other two providers use.
+        type VbProfile = { id: string; name: string; default_engine: string | null; preset_engine: string | null; voice_type: string };
+        const profiles = (Array.isArray(j) ? j : []) as VbProfile[];
+        setVoices(profiles.map((p) => ({ voice_id: p.id, name: `${p.name} (${p.default_engine || p.preset_engine || p.voice_type})` })));
+      } else {
+        setVoices((j as { voices?: Voice[] }).voices ?? []);
+      }
     } finally {
       setLoading(false);
     }

@@ -4,6 +4,7 @@ import { TopNav } from "./_topnav";
 import { LangProvider } from "./_i18n";
 import { createClient } from "@/lib/supabase/server";
 import { isAdmin } from "@/lib/supabase/roles";
+import { isSupabaseConfigured } from "@/lib/supabase/env";
 
 export const metadata = {
   title: "Faceless Video Generator",
@@ -26,13 +27,17 @@ const themeScript = `try{if(localStorage.getItem('theme')==='light'){document.do
 export default async function RootLayout({ children }: { children: ReactNode }) {
   // Resolve the current user once for the whole shell — the middleware already
   // gates access, so this only drives the nav (user menu + admin-only Settings).
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  const navUser = user
-    ? { email: user.email ?? "", isAdmin: isAdmin(user) }
-    : null;
+  // No Supabase env configured → no login system at all (see middleware.ts);
+  // treat as a trusted local admin so Settings stays reachable, but with no
+  // email/session, so the nav's account menu (Logout) stays hidden.
+  let navUser: { email: string; isAdmin: boolean } | null = { email: "", isAdmin: true };
+  if (isSupabaseConfigured()) {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    navUser = user ? { email: user.email ?? "", isAdmin: isAdmin(user) } : null;
+  }
 
   return (
     <html lang="en">

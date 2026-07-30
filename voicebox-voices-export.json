@@ -1,0 +1,23 @@
+[
+  { "name": "Alloy (US - Feminina)", "engine": "kokoro", "presetVoiceId": "af_alloy" },
+  { "name": "Aoede (US - Feminina)", "engine": "kokoro", "presetVoiceId": "af_aoede" },
+  { "name": "Bella (US - Feminina)", "engine": "kokoro", "presetVoiceId": "af_bella" },
+  { "name": "Heart (US - Feminina)", "engine": "kokoro", "presetVoiceId": "af_heart" },
+  { "name": "Jessica (US - Feminina)", "engine": "kokoro", "presetVoiceId": "af_jessica" },
+  { "name": "Kore (US - Feminina)", "engine": "kokoro", "presetVoiceId": "af_kore" },
+  { "name": "Nicole (US - Feminina)", "engine": "kokoro", "presetVoiceId": "af_nicole" },
+  { "name": "Nova (US - Feminina)", "engine": "kokoro", "presetVoiceId": "af_nova" },
+  { "name": "River (US - Feminina)", "engine": "kokoro", "presetVoiceId": "af_river" },
+  { "name": "Sarah (US - Feminina)", "engine": "kokoro", "presetVoiceId": "af_sarah" },
+  { "name": "Sky (US - Feminina)", "engine": "kokoro", "presetVoiceId": "af_sky" },
+  { "name": "Adam (US - Masculina)", "engine": "kokoro", "presetVoiceId": "am_adam" },
+  { "name": "Echo (US - Masculina)", "engine": "kokoro", "presetVoiceId": "am_echo" },
+  { "name": "Eric (US - Masculina)", "engine": "kokoro", "presetVoiceId": "am_eric" },
+  { "name": "Fenrir (US - Masculina)", "engine": "kokoro", "presetVoiceId": "am_fenrir" },
+  { "name": "Liam (US - Masculina)", "engine": "kokoro", "presetVoiceId": "am_liam" },
+  { "name": "Michael (US - Masculina)", "engine": "kokoro", "presetVoiceId": "am_michael" },
+  { "name": "Onyx (US - Masculina)", "engine": "kokoro", "presetVoiceId": "am_onyx" },
+  { "name": "Puck (US - Masculina)", "engine": "kokoro", "presetVoiceId": "am_puck" },
+  { "name": "Santa (US - Masculina)", "engine": "kokoro", "presetVoiceId": "am_santa" },
+  { "name": "Daniel (M)", "engine": "kokoro", "presetVoiceId": "bm_daniel" }
+]

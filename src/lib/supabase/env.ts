@@ -8,6 +8,16 @@
  * exact member expressions into the browser bundle, so they can't be read via a
  * dynamic `process.env[name]` lookup.
  */
+/**
+ * True when both Supabase env vars are present. Used to let the app run
+ * gate-free on a bare local checkout (no .env.local yet) instead of hard
+ * failing — this is a single-operator local tool, so auth is opt-in: set
+ * both vars to turn the login gate back on.
+ */
+export function isSupabaseConfigured(): boolean {
+  return Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL) && Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
+}
+
 export function getSupabaseEnv(): { url: string; anonKey: string } {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
