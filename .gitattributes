@@ -1,0 +1,30 @@
+# Auto-detect text files and normalize line endings.
+* text=auto
+
+# Shell scripts and .command files MUST stay LF — otherwise they won't run on macOS/Linux.
+*.sh    text eol=lf
+*.command text eol=lf
+
+# Windows batch files stay CRLF.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# JSON/JS/TS/TSX/MD use LF on all platforms (matches our development workflow).
+*.json  text eol=lf
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.md    text eol=lf
+*.css   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# Binary files — never modify
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.mp3   binary
+*.mp4   binary
+*.zip   binary
+*.ico   binary
