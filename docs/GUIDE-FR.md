@@ -81,7 +81,7 @@ Optionnelles (recommandées) :
 1. **Récupérez le projet** :
    - Le plus simple : sur la page GitHub, bouton vert **« Code » → « Download ZIP »**,
      puis décompressez le dossier où vous voulez (ex. Documents).
-   - (Avancé : `git clone https://github.com/Bander4ik/Conveyer-Patrice.git`)
+   - (Avancé : `git clone https://github.com/testandonichosdark1-commits/Conveyer-GuiRicardo.git`)
 2. **Installez les dépendances** (une fois) :
    - **Mac** : double-cliquez **`install.command`** dans le dossier.
      *(Si macOS bloque : clic droit → Ouvrir → Ouvrir.)*

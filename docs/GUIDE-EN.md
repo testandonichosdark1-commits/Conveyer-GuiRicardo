@@ -79,7 +79,7 @@ Optional (recommended):
 1. **Get the project**:
    - Easiest: on the GitHub page, green **"Code" → "Download ZIP"** button, then
      unzip the folder wherever you like (e.g. Documents).
-   - (Advanced: `git clone https://github.com/Bander4ik/Conveyer-Patrice.git`)
+   - (Advanced: `git clone https://github.com/testandonichosdark1-commits/Conveyer-GuiRicardo.git`)
 2. **Install the dependencies** (once):
    - **Mac**: double-click **`install.command`** in the folder.
      *(If macOS blocks it: right-click → Open → Open.)*
