@@ -939,11 +939,23 @@ const GENERIC_DESCRIPTORS = new Set(
  *   retry 1 → entity + up to 2 meaningful words
  *   retry 2 → entity only (or entity + 1 meaningful word when the entity is a
  *             single token, to retain product identity)
+ *
+ * Long descriptive phrases with NO generic-descriptor token at all (common in
+ * archival queries, e.g. "1930s American home kitchen early refrigerator") hit
+ * a degenerate case: the "leading run of non-generic tokens" swallows the
+ * ENTIRE query as one protected entity, `meaningful` is empty, and the result
+ * is byte-identical to the input at every level — retries silently become
+ * no-ops (the caller skips them as "identical to a prior attempt", so a beat
+ * that claims 3 real-search attempts only ever tries 1). The positional
+ * fallback below guarantees every level actually shrinks the query, trimming
+ * from the front while always preserving the LAST token — usually the
+ * depicted noun (e.g. "refrigerator") — so the broadened query stays anchored
+ * to the actual subject instead of drifting to unrelated content.
  */
 function broadenQuery(query: string, level: number): string {
   if (level <= 0) return query;
   const tokens = query.split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) return query;
+  if (tokens.length <= 1) return query;
 
   const isGeneric = (t: string) => GENERIC_DESCRIPTORS.has(t.toLowerCase());
 
@@ -958,13 +970,23 @@ function broadenQuery(query: string, level: number): string {
   // 3. Keep entity + fewer meaningful words each retry; retry 2 is aggressive.
   const keepRest = level === 1 ? 2 : entity.length >= 2 ? 0 : 1;
 
-  const chosen = entity.length
+  let chosen = entity.length
     ? [...entity, ...meaningful.slice(0, keepRest)]
     : meaningful.slice(0, level === 1 ? 4 : 2);
 
-  // No leading entity and no meaningful words → last-resort position trim.
-  if (chosen.length === 0) return tokens.slice(0, level === 1 ? 4 : 2).join(" ") || query;
-  return chosen.join(" ");
+  // Degenerate case: no candidate words, OR the "entity" run ate every token
+  // (no generic-descriptor boundary anywhere in the query) — vocabulary-based
+  // broadening is a no-op. Fall back to a positional trim that always keeps
+  // the final token (the likely head noun) and drops one more leading word
+  // per retry level, so level 1 and level 2 are always distinct from the
+  // original AND from each other.
+  if (chosen.length === 0 || chosen.length >= tokens.length) {
+    const keep = Math.max(2, tokens.length - level);
+    const last = tokens[tokens.length - 1];
+    const front = tokens.slice(0, Math.max(1, keep - 1));
+    chosen = front[front.length - 1] === last ? front : [...front, last];
+  }
+  return chosen.join(" ") || query;
 }
 
 const SOURCE_POOL_PER_PROVIDER = 5; // candidates pulled from each source
@@ -2638,6 +2660,17 @@ async function acquireAi(
  * Acquire the visual mp4 for one beat. Real beats try the configured providers,
  * then fall back to AI. AI beats go straight to generation.
  */
+// Archival-only source priority: specialist archival libraries (Archive.org,
+// Wikimedia, Openverse) tried BEFORE general stock (Pexels/Pixabay), with
+// YouTube demoted to the final fallback instead of going first. Contemporary/
+// conceptual beats are untouched — they keep going straight to Pexels/Pixabay,
+// which already perform well for modern topics and would gain nothing from
+// probing archival-specialist sources first. Gated by ARCHIVAL_SOURCE_PRIORITY
+// (default on); only applied when the caller didn't already pass explicit
+// per-channel sourceTiers (an operator's manual tier config always wins).
+const ARCHIVAL_TIER_1 = ["archive", "wikimedia", "openverse"];
+const ARCHIVAL_TIER_2 = ["pexels", "pixabay"];
+
 export async function acquireVisual(
   runId: string,
   beat: Beat,
@@ -2666,19 +2699,42 @@ export async function acquireVisual(
       const archival = beat.footageKind === "archival";
       const contemporary = beat.footageKind === "contemporary";
       const legacyEntity = beat.footageKind === undefined && beat.queryType === "entity";
+      const archivalPriority = archival && getSetting("ARCHIVAL_SOURCE_PRIORITY") !== "0";
       // Y1 — YT_PREFER widens YouTube-first onto contemporary beats (entity+generic);
       // conceptual is never footage_kind=contemporary so it stays AI. Archival/legacy
       // unchanged. Off by default → byte-identical to Patch A until the flag is set.
+      // When archivalPriority is active, archival no longer goes YouTube-first — it
+      // sits behind the archival-tier stock chain, so YouTube becomes the final
+      // fallback (via acquireReal's own end-of-chain YouTube call) instead of the
+      // opening move.
       const ytPrefer = getSetting("YT_PREFER") === "1";
       const youtubeFirst =
-        getSetting("YT_ROUTING") === "1" && (archival || legacyEntity || (ytPrefer && contemporary));
+        getSetting("YT_ROUTING") === "1" && ((archival && !archivalPriority) || legacyEntity || (ytPrefer && contemporary));
       if (youtubeFirst) {
         const why = archival ? "footage_kind=archival" : contemporary ? "footage_kind=contemporary (YT_PREFER)" : "legacy entity proxy";
         log(runId, "debug", `Beat ${beat.index}: YouTube-first (${why})`, { stage: "visual" });
       }
-      const real = await acquireReal(runId, beat, beatDurSec, outPath, usedIds, opts.resolution, opts.videoContext, youtubeFirst, opts.topicPool, opts.sourceTiers);
+      const sourceTiers =
+        archivalPriority && !(opts.sourceTiers && opts.sourceTiers.length)
+          ? [ARCHIVAL_TIER_1, ARCHIVAL_TIER_2]
+          : opts.sourceTiers;
+      if (archivalPriority && sourceTiers !== opts.sourceTiers) {
+        log(runId, "debug", `Beat ${beat.index}: archival source priority — archive/wikimedia/openverse → pexels/pixabay → YouTube`, { stage: "visual" });
+      }
+      const real = await acquireReal(runId, beat, beatDurSec, outPath, usedIds, opts.resolution, opts.videoContext, youtubeFirst, opts.topicPool, sourceTiers);
       if (real) return real;
       // Reason (poolIsWeak / exhausted-after-3-attempts) is logged inside acquireReal.
+      // Real footage (including the final YouTube fallback) is fully exhausted.
+      // REAL_EXHAUSTED_NO_AI (default on): don't spend an AI generation on a beat
+      // that was planned as "real" — throw instead, so the pipeline's existing
+      // no-black-screens step reuses the nearest beat's visual. This keeps the
+      // AI ratio close to what the operator actually configured, instead of every
+      // real-search miss silently inflating AI usage. AI-planned beats (source
+      // !== "real") and the stock-impossibility route above are unaffected.
+      if (getSetting("REAL_EXHAUSTED_NO_AI") !== "0") {
+        log(runId, "warn", `Beat ${beat.index}: real footage exhausted (incl. YouTube) — AI fallback disabled, will reuse a neighbouring visual`, { stage: "visual" });
+        throw new Error(`Beat ${beat.index}: real footage exhausted — AI fallback disabled (REAL_EXHAUSTED_NO_AI)`);
+      }
     }
   }
   return acquireAi(runId, beat, beatDurSec, outPath, opts.aiStyle, opts.resolution, opts.videoContext);

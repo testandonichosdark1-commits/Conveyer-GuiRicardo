@@ -143,6 +143,8 @@ export const SETTING_KEYS = [
   "SMART_ASSIGN",              // 0 (positional spread) | 1 (content-aware real/AI assignment by queryType+aiMedia)
   "TOPIC_POOL",                // 0 (off — one provider search per beat) | 1 (Topic Pool Retrieval: beats sharing a topicKey reuse ONE gathered candidate pool per attempt, cutting provider searches; per-beat vision scoring + usedIds allocation unchanged). Default 0.
   "PLAN_QUERY_TRIM",           // WI-13: 1 = strip non-depictable abstract/economic tails (e.g. "scaling energy output") from the footage query so search isn't pulled off-topic. 0 = off. Default 1.
+  "ARCHIVAL_SOURCE_PRIORITY",  // 0 (off) | 1 (default on). For footage_kind=archival beats only: try Archive.org/Wikimedia/Openverse before Pexels/Pixabay, and demote YouTube from first-try to final fallback. Contemporary/conceptual beats unaffected. Ignored when the channel already sets an explicit footage_source_tiers.
+  "REAL_EXHAUSTED_NO_AI",      // 0 (old behavior: real-search miss falls back to AI generation) | 1 (default on). When a "real"-planned beat exhausts every real source (incl. YouTube), skip AI and reuse a neighbouring beat's visual instead — keeps actual AI usage close to the configured ratio instead of every real-search miss silently inflating it.
   "YT_ROUTING",                // 0 (legacy: YouTube = end-fallback for all real beats) | 1 (entity beats → YouTube-first, generic → no YouTube)
   "YT_DEBUG",                  // 0 (off) | 1 (diagnostics: log YouTube segment/scoring metadata + save scored frames to DATA_DIR/debug_frames)
   "YT_SEGMENT",                // 0 (blind offset) | 1 (Phase 1A: localize the download window via the video's CHAPTERS; falls back to offset on no match)
@@ -426,6 +428,8 @@ export const DEFAULTS: Record<SettingKey, string> = {
   // Per-beat vision scoring + usedIds allocation are unchanged.
   TOPIC_POOL: "1",
   PLAN_QUERY_TRIM: "1",
+  ARCHIVAL_SOURCE_PRIORITY: "1",
+  REAL_EXHAUSTED_NO_AI: "1",
   YT_ROUTING: "1",
   YT_DEBUG: "0",
   YT_SEGMENT: "0",
