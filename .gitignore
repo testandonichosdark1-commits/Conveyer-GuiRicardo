@@ -1,0 +1,15 @@
+node_modules
+.next
+out
+.env
+.env.local
+data/*.db
+data/runs
+data/runs/*
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude/

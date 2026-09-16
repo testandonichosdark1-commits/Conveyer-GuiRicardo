@@ -1,0 +1,595 @@
+@import "tailwindcss";
+
+/* ───────────────────────────────────────────────────────────────────────
+   Conveyer Grok — premium dark design system
+   Apple-grade: deep neutral surfaces, hairline borders, soft shadows,
+   smooth transitions, a single violet accent.
+   ─────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Surfaces — neutral dark */
+  --bg: #0b0b0d;
+  --bg-deep: #08080a;
+  --surface: #141416;
+  --surface-2: #1c1c1f;
+  --surface-hover: #232327;
+  --field: #0f0f11;
+
+  /* Borders */
+  --border: #26262a;
+  --border-strong: #35353b;
+
+  /* Text */
+  --fg: #f2f2f3;
+  --fg-muted: #9a9aa0;
+  --fg-faint: #636368;
+
+  /* Accent — red */
+  --accent: #e23636;
+  --accent-hover: #ee4b4b;
+  --accent-press: #c62a2a;
+  --accent-soft: rgba(226, 54, 54, 0.14);
+  --accent-ring: rgba(226, 54, 54, 0.38);
+
+  /* Semantic */
+  --success: #4ade80;
+  --success-soft: rgba(74, 222, 128, 0.13);
+  --warning: #fcd34d;
+  --warning-soft: rgba(252, 211, 77, 0.13);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.13);
+
+  /* Elevation */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 16px 44px rgba(0, 0, 0, 0.55);
+
+  /* Radius */
+  --r-sm: 7px;
+  --r: 11px;
+  --r-lg: 16px;
+
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    Roboto, ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.011em;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+/* ── Scrollbar ─────────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+  border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #45454f;
+}
+
+/* ── Typography ────────────────────────────────────────────────────────── */
+h1 {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 4px;
+}
+h2 {
+  font-size: 16.5px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  margin: 0 0 6px;
+}
+h3 {
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0 0 4px;
+}
+a {
+  color: var(--accent-hover);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+code,
+.mono {
+  font-family: "SF Mono", ui-monospace, "JetBrains Mono", "Cascadia Code",
+    Menlo, Consolas, monospace;
+}
+
+/* ── Buttons ───────────────────────────────────────────────────────────── */
+.btn,
+.btn-secondary,
+.btn-ghost,
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 9px 16px;
+  border-radius: var(--r-sm);
+  font-size: 13.5px;
+  font-weight: 600;
+  font-family: inherit;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease),
+    transform 0.08s var(--ease), opacity 0.15s var(--ease);
+  white-space: nowrap;
+  user-select: none;
+}
+.btn:active,
+.btn-secondary:active,
+.btn-ghost:active,
+.btn-danger:active {
+  transform: scale(0.975);
+}
+.btn:disabled,
+.btn-secondary:disabled,
+.btn-ghost:disabled,
+.btn-danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+.btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-secondary,
+.btn-ghost {
+  background: var(--surface-2);
+  color: var(--fg);
+  border-color: var(--border);
+}
+.btn-secondary:hover:not(:disabled),
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.btn-ghost {
+  background: transparent;
+}
+
+.btn-danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: rgba(248, 113, 113, 0.25);
+}
+.btn-danger:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.2);
+}
+
+.btn-sm {
+  padding: 6px 11px;
+  font-size: 12.5px;
+}
+
+/* ── Cards ─────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 18px;
+}
+.card-inset {
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
+/* ── Form controls ─────────────────────────────────────────────────────── */
+.input,
+.textarea,
+.select,
+select.input {
+  background: var(--field);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 9px 12px;
+  width: 100%;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13.5px;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  outline: none;
+}
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--fg-faint);
+}
+.input:focus,
+.textarea:focus,
+.select:focus,
+select.input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.textarea {
+  font-family: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas,
+    monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  resize: vertical;
+}
+.label {
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 550;
+  display: block;
+  margin-bottom: 5px;
+  letter-spacing: -0.005em;
+}
+
+/* ── Status tags ───────────────────────────────────────────────────────── */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.tag-pending {
+  background: var(--surface-hover);
+  color: var(--fg-muted);
+}
+.tag-running {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.tag-done {
+  background: var(--success-soft);
+  color: var(--success);
+}
+.tag-error {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.tag-cancelled {
+  background: var(--surface-hover);
+  color: var(--fg-faint);
+}
+.tag-interrupted {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+/* A run that finished but didn't deliver what was asked for. Deliberately NOT the
+   green .tag-done: at a glance in the list it must not read as a clean success. */
+.tag-degraded {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+/* ── Badges (small inline chips) ───────────────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.badge-accent {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+}
+.badge-success {
+  background: var(--success-soft);
+  color: var(--success);
+}
+.badge-neutral {
+  background: var(--surface-hover);
+  color: var(--fg-muted);
+}
+
+/* ── Helpers ───────────────────────────────────────────────────────────── */
+.muted {
+  color: var(--fg-muted);
+}
+.faint {
+  color: var(--fg-faint);
+}
+.divider {
+  height: 1px;
+  background: var(--border);
+  border: 0;
+  margin: 16px 0;
+}
+.hover-row {
+  transition: background 0.13s var(--ease);
+}
+.hover-row:hover {
+  background: var(--surface-hover);
+}
+
+/* ── Light theme ───────────────────────────────────────────────────────────
+   Activated by data-theme="light" on <html>. Every page consumes the tokens
+   below, so the whole UI re-themes from these overrides. */
+html[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-deep: #f6f6f8;
+  --surface: #ffffff;
+  --surface-2: #f1f1f3;
+  --surface-hover: #ebebee;
+  --field: #ffffff;
+
+  --border: #e4e4e7;
+  --border-strong: #d2d2d6;
+
+  --fg: #1d1d1f;
+  --fg-muted: #65656b;
+  --fg-faint: #9a9aa0;
+
+  --accent: #e23636;
+  --accent-hover: #c62a2a;
+  --accent-press: #ad2020;
+  --accent-soft: rgba(226, 54, 54, 0.09);
+  --accent-ring: rgba(226, 54, 54, 0.28);
+
+  --success: #15803d;
+  --success-soft: rgba(21, 128, 61, 0.1);
+  --warning: #b45309;
+  --warning-soft: rgba(180, 83, 9, 0.11);
+  --danger: #dc2626;
+  --danger-soft: rgba(220, 38, 38, 0.09);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.07), 0 1px 1px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.09);
+  --shadow-lg: 0 16px 44px rgba(0, 0, 0, 0.13);
+}
+
+/* Cards lift off the background on light theme (border alone isn't enough
+   when card and page are both white-ish). */
+html[data-theme="light"] .card {
+  box-shadow: var(--shadow-sm);
+}
+html[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #c9c9cf;
+}
+html[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: #b4b4bc;
+}
+
+/* ── Costs runs table: wider-than-dashboard breakout (desktop only) ──
+   The dashboard cards/filters/description stay in the 1000px content container;
+   the table breaks out to a wider, viewport-centered container so more columns are
+   visible. min(1800px, 95vw) keeps it ≤ viewport (no page scrollbar) and lets it
+   shrink gracefully; the negative left margin re-centers it on the (centered) page.
+   Gated to ≥768px so the mobile layout is unchanged. */
+@media (min-width: 768px) {
+  .costs-table-wide {
+    --costs-w: min(1800px, 95vw);
+    width: var(--costs-w);
+    margin-left: calc(50% - var(--costs-w) / 2);
+  }
+}
+
+/* ── Costs runs table: always-reachable horizontal scrolling (desktop only) ──
+   The whole table scrolls as one piece. A horizontal scrollbar is pinned to the
+   BOTTOM of the viewport so it's reachable from any vertical position; the table
+   itself is grab-and-drag pannable. Gated to ≥768px, so the mobile table keeps its
+   original plain native-scroll behavior. */
+.costs-hscroll {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -6px 10px -8px rgba(0, 0, 0, 0.4);
+  scrollbar-width: auto; /* Firefox: normal-width bar */
+}
+.costs-hscroll > div {
+  height: 1px;
+}
+/* Force a persistent classic scrollbar even on macOS overlay-scrollbar systems. */
+.costs-hscroll::-webkit-scrollbar {
+  height: 12px;
+  -webkit-appearance: none;
+}
+.costs-hscroll::-webkit-scrollbar-track {
+  background: var(--surface-2);
+}
+.costs-hscroll::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 6px;
+}
+.costs-hscroll::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-faint);
+}
+@media (max-width: 767px) {
+  .costs-hscroll {
+    display: none;
+  }
+}
+@media (min-width: 768px) {
+  /* Whole table pans by dragging; the native scrollbar is hidden (the bottom bar is
+     the single visible control) while the container stays scrollable (trackpad/drag). */
+  .costs-scroll-host {
+    cursor: grab;
+    scrollbar-width: none;
+  }
+  .costs-scroll-host::-webkit-scrollbar {
+    display: none;
+  }
+  .costs-scroll-host.costs-dragging {
+    cursor: grabbing;
+    user-select: none;
+  }
+  /* hairline divider at the start of each column group — subtle, non-dominant */
+  .costs-group-sep {
+    border-left: 1px solid var(--border);
+  }
+}
+/* The Title link keeps a pointer cursor even though the table shows the grab cursor. */
+.costs-scroll-host a {
+  cursor: pointer;
+}
+
+/* ===================================================================== *
+ * Responsive support (added without touching desktop).
+ * Breakpoints:  phone < 768px   ·   tablet 768–1023px   ·   desktop ≥ 1024px
+ * Every base rule below reproduces the current desktop value, and all
+ * adaptations are gated `max-width: 1023px` / `max-width: 767px`, so the
+ * desktop (≥1024px) rendering is unchanged by construction.
+ * ===================================================================== */
+
+/* Main content wrapper (was inline on layout.tsx). Base = the old inline values. */
+.app-main {
+  width: 100%;
+  max-width: 1000px;
+  padding: 30px 28px 80px;
+}
+@media (max-width: 767px) {
+  .app-main {
+    padding: 22px 16px 64px;
+  }
+}
+
+/* Responsive form/layout grids. Base values equal the inline grids they replace,
+   so desktop + tablet keep the multi-column layout; only phones stack. */
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.grid-3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+}
+@media (max-width: 767px) {
+  .grid-2,
+  .grid-3 {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Top navigation: desktop pill row ≥1024px, hamburger + dropdown below. */
+.topnav-links {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.topnav-burger {
+  display: none; /* desktop: hidden */
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+@media (max-width: 1023px) {
+  .topnav-links {
+    display: none;
+  }
+  .topnav-burger {
+    display: inline-flex;
+  }
+}
+.topnav-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 18;
+  background: rgba(0, 0, 0, 0.45);
+}
+.topnav-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px 14px;
+  background: var(--bg-deep);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+}
+
+/* Costs filters: base = the desktop 4-column grid; phones stack to one column. */
+.costs-filters {
+  grid-template-columns: minmax(180px, 2fr) repeat(2, minmax(120px, 1fr)) minmax(140px, 1fr);
+}
+@media (max-width: 767px) {
+  .costs-filters {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Sticky page toolbars (settings/advanced). Sticky on desktop; static below 1024
+   so they don't overlap the also-sticky top nav (both were pinned at top:0). */
+.page-toolbar {
+  position: sticky;
+  top: 0;
+}
+@media (max-width: 1023px) {
+  .page-toolbar {
+    position: static;
+  }
+}
+
+/* Jobs list rows: on phones let the row wrap so the title gets a full first line
+   and the action buttons drop to a second line instead of crushing the title. */
+@media (max-width: 767px) {
+  .jobs-row {
+    flex-wrap: wrap;
+  }
+  .jobs-row-main {
+    flex: 1 1 100%;
+  }
+}
+
+/* Touch polish: enlarge small buttons' tap target on phones (desktop unchanged). */
+@media (max-width: 767px) {
+  .btn-sm {
+    padding: 9px 13px;
+  }
+}
