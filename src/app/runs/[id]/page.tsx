@@ -476,10 +476,17 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
         ).getTime();
         const elapsedMs = Math.max(0, nowMs - startedAtMs);
         const fraction = totalBeats > 0 ? touchedBeats.size / totalBeats : 0;
+        // Capped below 1: once every beat has been touched (169/169) the run is still
+        // busy assembling/muxing, which the beat count can't see. Without the cap,
+        // fraction hitting exactly 1 zeroed the extrapolation's denominator gap and the
+        // ETA vanished back to "Estimating…" right when the operator most wants a
+        // number. Capping keeps the same formula live through assembly — it settles to
+        // a small residual that drifts with elapsed time instead of freezing/disappearing.
+        const etaFraction = Math.min(fraction, 0.99);
         // Below ~2% progress the elapsed/fraction extrapolation swings wildly (e.g. one
         // beat out of 200 could imply anywhere from 3 minutes to 3 hours) — show
         // "Estimating…" instead of a number nobody should trust yet.
-        const etaMs = fraction > 0.02 && fraction < 1 ? elapsedMs / fraction - elapsedMs : null;
+        const etaMs = etaFraction > 0.02 ? elapsedMs / etaFraction - elapsedMs : null;
         return (
           <div
             className="card"
