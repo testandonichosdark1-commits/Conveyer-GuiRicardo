@@ -1,19 +1,8 @@
 import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
-import os from "node:os";
+import { DATA_DIR } from "./data-dir";
 
-/**
- * Data dir holds the SQLite database (settings, run records, logs).
- * Lives outside the project source tree so Turbopack file-watcher doesn't try
- * to scan SQLite shm/wal files (which can be locked on Windows).
- *
- * Override via FACELESS_STUDIO_DATA_DIR environment variable.
- * Isolated from other local apps so they can coexist without DB collisions.
- */
-const DATA_DIR =
-  process.env.FACELESS_STUDIO_DATA_DIR ??
-  path.join(os.homedir(), ".faceless-studio");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const db = new Database(path.join(DATA_DIR, "studio.db"));
