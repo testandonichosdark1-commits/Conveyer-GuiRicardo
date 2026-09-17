@@ -1,15 +1,9 @@
 import path from "node:path";
-import os from "node:os";
 import fs from "node:fs";
 import db from "./db";
+import { DATA_DIR } from "./data-dir";
 
-/**
- * DATA_DIR is where the SQLite database lives (settings, run records, logs).
- * We keep it in the user's home so Turbopack file-watcher (in the project
- * folder) doesn't see lock-prone files.
- */
-export const DATA_DIR =
-  process.env.FACELESS_STUDIO_DATA_DIR ?? path.join(os.homedir(), ".faceless-studio");
+export { DATA_DIR };
 
 /**
  * Root for run output folders (audio, images, animations, clips, final.mp4).
