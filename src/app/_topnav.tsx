@@ -101,8 +101,21 @@ export function TopNav() {
       <Link href="/" style={{ display: "flex", alignItems: "center", gap: 9, textDecoration: "none" }}>
         <span style={{ fontSize: 17 }}>🎬</span>
         <span style={{ fontWeight: 700, fontSize: 15, color: "var(--fg)", letterSpacing: "-0.01em" }}>
-          Faceless Video Generator
+          Faceless Video Generator Housekeeper
         </span>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/avatars/housekeeper.png"
+          alt="Housekeeper"
+          style={{
+            width: 26,
+            height: 26,
+            borderRadius: "50%",
+            objectFit: "cover",
+            border: "1px solid var(--border-strong)",
+            flexShrink: 0,
+          }}
+        />
       </Link>
 
       {/* Desktop pill nav (≥1024px). Hidden below 1024 via .topnav-links. */}
