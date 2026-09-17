@@ -146,9 +146,10 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
   // visual/avatar-stage line means work has started on it — a beat generates many such
   // lines while it's being worked on (searches, scoring, retries), so "seen at least
   // once" lags only slightly behind "fully done", close enough for a rough ETA.
-  const { totalBeats, touchedBeats } = useMemo(() => {
+  const { totalBeats, touchedBeats, assembleStartMs } = useMemo(() => {
     const planned = new Set<number>();
     const touched = new Set<number>();
+    let assembleStartMs: number | null = null;
     for (const l of logs) {
       const m = /^Beat (\d+): planner /.exec(l.message);
       if (m) planned.add(Number(m[1]));
@@ -156,8 +157,15 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
         const t = /^Beat (\d+)/.exec(l.message);
         if (t) touched.add(Number(t[1]));
       }
+      // First "assemble" line ("Compositing N beats…") marks the moment beat-touch
+      // progress stops meaning anything — every beat is already done and the run is
+      // rendering/muxing instead. Used below to switch the ETA to a measured
+      // per-beat assembly rate instead of the (by-then-meaningless) beat fraction.
+      if (assembleStartMs === null && l.stage === "assemble") {
+        assembleStartMs = new Date(l.ts).getTime();
+      }
     }
-    return { totalBeats: planned.size, touchedBeats: touched };
+    return { totalBeats: planned.size, touchedBeats: touched, assembleStartMs };
   }, [logs]);
 
   // Auto-scroll to the newest line ONLY when the user is already at the bottom,
@@ -476,17 +484,31 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
         ).getTime();
         const elapsedMs = Math.max(0, nowMs - startedAtMs);
         const fraction = totalBeats > 0 ? touchedBeats.size / totalBeats : 0;
-        // Capped below 1: once every beat has been touched (169/169) the run is still
-        // busy assembling/muxing, which the beat count can't see. Without the cap,
-        // fraction hitting exactly 1 zeroed the extrapolation's denominator gap and the
-        // ETA vanished back to "Estimating…" right when the operator most wants a
-        // number. Capping keeps the same formula live through assembly — it settles to
-        // a small residual that drifts with elapsed time instead of freezing/disappearing.
-        const etaFraction = Math.min(fraction, 0.99);
-        // Below ~2% progress the elapsed/fraction extrapolation swings wildly (e.g. one
-        // beat out of 200 could imply anywhere from 3 minutes to 3 hours) — show
-        // "Estimating…" instead of a number nobody should trust yet.
-        const etaMs = etaFraction > 0.02 ? elapsedMs / etaFraction - elapsedMs : null;
+        let etaMs: number | null;
+        if (assembleStartMs !== null) {
+          // Beat-touch progress is meaningless here — every beat is done and ffmpeg is
+          // compositing/muxing them. That phase doesn't track beats at all, so estimate
+          // it from its own measured rate instead: across 16 completed runs, wall time
+          // from the first "Compositing N beats" line to the run's last log line
+          // averaged ~2.6s/beat (9303s / 3546 beats total, 2.2–3.5s/beat per run) —
+          // count DOWN from that budget using time actually spent in this phase so far,
+          // rather than the old fixed 1%-of-elapsed guess that stayed pinned at ~20–30s
+          // while assembly ran for several more minutes. Still a rough average (real
+          // per-run rate varies ±35%), but it lands in the right ballpark instead of off
+          // by 10-20x like the old formula did.
+          const ASSEMBLY_SEC_PER_BEAT = 2.62;
+          const budgetMs = totalBeats * ASSEMBLY_SEC_PER_BEAT * 1000;
+          const spentMs = nowMs - assembleStartMs;
+          etaMs = Math.max(0, budgetMs - spentMs);
+        } else {
+          // Below ~2% progress the elapsed/fraction extrapolation swings wildly (e.g. one
+          // beat out of 200 could imply anywhere from 3 minutes to 3 hours) — show
+          // "Estimating…" instead of a number nobody should trust yet. Capped below 1 so
+          // the brief gap between the last beat being touched and the assemble stage
+          // actually starting doesn't zero the denominator and flash "Estimating…".
+          const etaFraction = Math.min(fraction, 0.99);
+          etaMs = etaFraction > 0.02 ? elapsedMs / etaFraction - elapsedMs : null;
+        }
         return (
           <div
             className="card"
