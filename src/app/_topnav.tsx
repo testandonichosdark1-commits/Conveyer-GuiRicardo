@@ -101,7 +101,7 @@ export function TopNav() {
       <Link href="/" style={{ display: "flex", alignItems: "center", gap: 9, textDecoration: "none" }}>
         <span style={{ fontSize: 17 }}>🎬</span>
         <span style={{ fontWeight: 700, fontSize: 15, color: "var(--fg)", letterSpacing: "-0.01em" }}>
-          Faceless Video Generator
+          Faceless Video Generator - 3.0 Finn
         </span>
       </Link>
 
