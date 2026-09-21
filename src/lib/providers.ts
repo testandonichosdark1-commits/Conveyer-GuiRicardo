@@ -169,7 +169,7 @@ export function providerVoiceLabel(id: string | null | undefined): string {
   return `${voiceProviderMeta(id).label} Voice ID`;
 }
 
-export type AiProviderId = "kie" | "69labs" | "magnific" | "runware" | "higgsfield";
+export type AiProviderId = "kie" | "69labs" | "magnific" | "runware" | "higgsfield" | "flow_browser";
 export type AiMedia = "image" | "video";
 
 /** One selectable generation model. `id` is the exact provider string persisted to the setting. */
@@ -190,7 +190,8 @@ export interface AiMediaCatalog {
 export interface AiProviderMeta {
   id: AiProviderId;
   selectLabel: string;
-  apiKey: string;
+  /** API credential setting. Browser-backed providers deliberately have none. */
+  apiKey?: string;
   /**
    * Per-media model catalogs. A media block is PRESENT only if the provider can
    * generate that media — so the UI renders the Image select only when `image`
@@ -213,6 +214,14 @@ export const AI_PROVIDERS: AiProviderMeta[] = [
     apiKey: "KIE_API_KEY",
     image: { key: "KIE_IMAGE_MODEL", models: [{ id: "google/nano-banana", label: "Nano Banana", recommended: true }] },
     video: { key: "KIE_VIDEO_MODEL", models: [{ id: "veo3_fast", label: "Veo 3 Fast", recommended: true }] },
+  },
+  {
+    id: "flow_browser",
+    selectLabel: "Google Flow (browser — experimental)",
+    image: {
+      key: "FLOW_IMAGE_MODEL",
+      models: [{ id: "nano-banana-pro", label: "Nano Banana Pro", recommended: true }],
+    },
   },
   {
     id: "69labs",

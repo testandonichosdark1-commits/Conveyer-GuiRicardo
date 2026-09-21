@@ -15,6 +15,7 @@ import { FootageSources } from "./_components/FootageSources";
 import { FallbackAiMedia } from "./_components/FallbackAiMedia";
 import { AdvancedSection } from "./_components/AdvancedSection";
 import { CharacterReferenceField } from "./_components/CharacterReferenceField";
+import { FlowBrowserBlock } from "./_components/FlowBrowserBlock";
 
 export default function ParametresPage() {
   const tr = useT();
@@ -61,6 +62,8 @@ export default function ParametresPage() {
 
         {/* Dynamic provider keys — only the selected providers' fields */}
         <ProviderAiFields provider={aiProvider} val={val} set={set} />
+
+        {aiProvider === "flow_browser" && <FlowBrowserBlock val={val} set={set} />}
 
         {aiProvider === "kie" && (
           <div style={{ display: "grid", gap: 12, padding: 12, border: "1px solid var(--border)", borderRadius: 10 }}>
@@ -304,7 +307,7 @@ export default function ParametresPage() {
           {/* AI media (KIE_AI_MEDIA) moved to the Run page, shown contextually per visual mode. */}
           <SettingsField label={tr("Secondes par visuel (durée d'un plan par défaut)", "Seconds per visual (default beat length)")} settingKey="SECONDS_PER_VISUAL" val={val} set={set} placeholder="4.5" />
           <SettingsField label={tr("Style images IA par défaut", "Default AI image style")} settingKey="AI_IMAGE_STYLE" val={val} set={set} />
-          {aiProvider === "kie" && <CharacterReferenceField />}
+          {(aiProvider === "kie" || aiProvider === "flow_browser") && <CharacterReferenceField provider={aiProvider} />}
           <SettingsField label={tr("Pixabay — clé API (optionnel)", "Pixabay — API key (optional)")} settingKey="PIXABAY_API_KEY" val={val} set={set} />
           {/* Web (Google) footage source — its two keys live here, next to the other footage keys
               and right above the source checkboxes that enable it. Leave empty to disable web search. */}

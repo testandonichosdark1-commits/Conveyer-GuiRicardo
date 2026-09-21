@@ -46,6 +46,24 @@ Live logs stream on the run page; the finished MP4 appears there (and on the **J
 
 > 💡 Most users should follow the friendly **[step-by-step guide](./docs/GUIDE-EN.md)** instead of this quick start.
 
+### Experimental: Nano Banana through the Google Flow browser
+
+Settings → **AI provider** → **Google Flow (browser — experimental)** runs image
+beats through an operator-owned, persistent Chrome session instead of an image API.
+Save the exact Flow project URL, leave paid fallback disabled if you want Flow-only
+generation, then click **Open Flow / test session** and complete Google login once.
+The connection test creates no image and spends no credits. During a run, generations
+are serialized, captured as full-size PNG files, validated, and handed to the existing
+Ken Burns/FFmpeg pipeline. Google may still require login verification, change the Flow
+UI, or enforce credits/quotas; this browser adapter cannot bypass those controls.
+
+For a recurring housekeeper/female presenter, expand **Advanced (optional)** in
+Settings and upload **Character reference image**. The portrait is attached to Flow
+only when the beat mentions a woman, housekeeper, room attendant, female hotel worker,
+or female pronouns. Object/detail beats are generated without the portrait. Use a clear
+single-person JPEG/PNG/WebP (10 MB maximum), and keep the dedicated Flow project open
+while the run is active.
+
 ---
 
 ## Stack

@@ -23,6 +23,7 @@ import {
 import { generateMagnificImageUrl, generateMagnificVideoUrl, downloadMagnific, magnificConfigured } from "./magnific";
 import { generateHiggsfieldImageUrl, generateHiggsfieldVideoUrl, downloadHiggsfield, higgsfieldConfigured } from "./higgsfield";
 import { generateRunwareImage, downloadRunware } from "./runware";
+import { FlowBrowserError, generateFlowImage } from "./flow-browser";
 import { storyblocksSearch, reserveDownload as sbReserveDownload, resolveStoryblocksFile } from "./storyblocks";
 import { recordStoryblocksDownload, recordGoogleCseQuery, recordGemini, recordKieImage, recordKieVeo, recordLabs69, recordLabs69Image, recordMagnificImage, recordMagnificVideo, recordHiggsfieldImage, recordHiggsfieldVideo, recordRunwareImage } from "./cost-ledger";
 import { callGemini } from "./gemini-models";
@@ -3288,7 +3289,13 @@ export function keepPositiveClauses(clauses: string): string {
  */
 export function beatWantsCharacterReference(beat: Pick<Beat, "aiPrompt" | "visualQuery" | "text">): boolean {
   const scene = [beat.aiPrompt, beat.visualQuery, beat.text].filter(Boolean).join(" ");
-  return /\b(?:woman|women|female|housekeeper|housekeeping\s+(?:attendant|staff)|room\s+attendant|maid|cleaning\s+lady|professional\s+cleaner|cleaning\s+professional|hotel\s+(?:attendant|worker|staff)|hospitality\s+professional|she|her|hers)\b/i.test(scene);
+  const explicitCharacter = /\b(?:woman|women|female|housekeeper|housekeeping\s+(?:attendant|staff)|room\s+attendant|maid|cleaning\s+lady|professional\s+cleaner|cleaning\s+professional|cleaning\s+worker|hotel\s+(?:attendant|worker|staff|employee)|hospitality\s+professional|worker|employee|staff\s+member|she|her|hers)\b/i;
+  // A configured portrait represents the channel's first-person presenter. Embodied
+  // actions are a useful signal even when the narration says only “I” and the planner
+  // omits “housekeeper” from its visual prompt. Avoid generic “I think / I know” so the
+  // portrait is not forced into explanatory object shots.
+  const embodiedFirstPerson = /\bI\s+(?:saw|noticed|looked|stepped|walked|entered|checked|cleaned|wiped|found|reached|picked|opened|closed|touched|examined|watched|worked|held|removed|sprayed)\b/i;
+  return explicitCharacter.test(scene) || embodiedFirstPerson.test(scene);
 }
 
 const CHARACTER_REFERENCE_INSTRUCTION =
@@ -3310,10 +3317,13 @@ async function acquireAi(
   // "image"/"video" pin the media; undefined = normal AI mode, media resolved as always.
   mediaOverride?: "image" | "video"
 ): Promise<VisualResult> {
-  const provider = (getSetting("AI_PROVIDER") || "kie").toLowerCase();
+  let provider = (getSetting("AI_PROVIDER") || "kie").toLowerCase();
+  const selectedFlowBrowser = provider === "flow_browser";
+  const flowFallbackToKie = selectedFlowBrowser && getSetting("FLOW_FALLBACK_PROVIDER").toLowerCase() === "kie";
   const style = (aiStyle ?? getSetting("AI_IMAGE_STYLE")) || "";
   const configuredCharacterRef = (getSetting("AI_CHARACTER_REFERENCE_PATH") || "").trim();
-  const useCharacterRef = provider === "kie" && !!configuredCharacterRef && beatWantsCharacterReference(beat);
+  const providerSupportsCharacterRef = provider === "kie" || provider === "flow_browser";
+  const useCharacterRef = providerSupportsCharacterRef && !!configuredCharacterRef && beatWantsCharacterReference(beat);
   const characterReferencePath = useCharacterRef && fs.existsSync(configuredCharacterRef) ? configuredCharacterRef : "";
   if (useCharacterRef && !characterReferencePath) {
     log(runId, "warn", `Beat ${beat.index}: character reference is configured but the local image is missing — using text-to-image`, { stage: "visual" });
@@ -3381,7 +3391,11 @@ async function acquireAi(
   const threshold = Math.max(0, Math.min(100, Number(getSetting("AI_MATCH_THRESHOLD") || getSetting("REAL_MATCH_THRESHOLD") || "75")));
   // Regenerate until the image clears the threshold, capped so an impossible
   // scene can't loop forever (then the best of the attempts is kept).
-  const maxAttempts = Math.max(1, Math.min(8, Number(getSetting("AI_REGEN_ATTEMPTS") || "5")));
+  const maxAttempts = Math.max(1, Math.min(8, Number(
+    selectedFlowBrowser
+      ? (getSetting("FLOW_REGEN_ATTEMPTS") || "1")
+      : (getSetting("AI_REGEN_ATTEMPTS") || "5")
+  )));
 
   // Magnific AI — one more AI b-roll backend (Mystic images + Ken Burns, or Hailuo
   // video). Used both as the CHOSEN provider (AI_PROVIDER=magnific) and, when
@@ -3519,6 +3533,72 @@ async function acquireAi(
     }
   }
 
+  if (provider === "flow_browser") {
+    // The browser adapter is intentionally image-only and serialized inside
+    // flow-browser.ts. Even though studio-pipeline requests several beats in parallel,
+    // prompts/downloads can never cross. A videos-only fallback must not silently turn
+    // into a still; if the operator enabled kie fallback, the normal kie branch below
+    // remains able to honor it.
+    if (mediaOverride === "video") {
+      throw new FlowBrowserError("Google Flow browser is image-only, but this fallback beat requires video.", "config");
+    }
+
+    let best: { path: string; score: number } | null = null;
+    let flowError: Error | null = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const tmpImg = path.join(os.tmpdir(), `flow_${runId.slice(0, 8)}_${beat.index}_${attempt}.png`);
+      try {
+        const flowPrompt = characterReferencePath
+          ? `${buildPrompt(VARIANTS[attempt % VARIANTS.length])}, ${CHARACTER_REFERENCE_INSTRUCTION}`
+          : buildPrompt(VARIANTS[attempt % VARIANTS.length]);
+        log(
+          runId,
+          "info",
+          `Beat ${beat.index}: Google Flow/Nano Banana generation started (${attempt + 1}/${maxAttempts})${characterReferencePath ? " — character reference active" : ""}`,
+          { stage: "visual" }
+        );
+        await generateFlowImage(
+          runId,
+          flowPrompt,
+          tmpImg,
+          getSetting("FLOW_ASPECT_RATIO") || aspect,
+          characterReferencePath ? { referenceImagePath: characterReferencePath } : undefined
+        );
+      } catch (e) {
+        flowError = e as Error;
+        try { fs.unlinkSync(tmpImg); } catch {}
+        log(runId, "warn", `Beat ${beat.index}: Google Flow browser failed (${(e as Error).message.slice(0, 180)})`, { stage: "visual" });
+        break; // UI/login failures are not improved by submitting the same prompt again.
+      }
+      const score = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, tmpImg);
+      if (!best || score > best.score) {
+        if (best) { try { fs.unlinkSync(best.path); } catch {} }
+        best = { path: tmpImg, score };
+      } else {
+        try { fs.unlinkSync(tmpImg); } catch {}
+      }
+      if (score >= threshold) break;
+      if (attempt < maxAttempts - 1) {
+        log(runId, "info", `Beat ${beat.index}: Flow image scored ${score}% (<${threshold}) — regenerating ${attempt + 1}/${maxAttempts - 1}`, { stage: "visual" });
+      }
+    }
+    if (best) {
+      kenBurns(best.path, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+      try { fs.unlinkSync(best.path); } catch {}
+      log(runId, "info", `Beat ${beat.index}: AI still via Google Flow/Nano Banana Pro + Ken Burns — match ${best.score}%`, { stage: "visual" });
+      return { path: outPath, kind: "ai", provider: "flow:nano-banana-pro" };
+    }
+
+    if (!flowFallbackToKie) {
+      // Fail closed: "Nano Banana through Flow only" must never drift into Grok,
+      // Cloudflare, Pollinations, Meta, Magnific, or another paid model.
+      if (flowError instanceof FlowBrowserError) throw flowError;
+      throw new FlowBrowserError(`Beat ${beat.index}: Google Flow produced no image and paid fallback is disabled.`, "capture");
+    }
+    log(runId, "warn", `Beat ${beat.index}: Flow unavailable — using the configured kie.ai Nano Banana fallback`, { stage: "visual" });
+    provider = "kie";
+  }
+
   if (provider === "kie") {
     const { media, reason } = resolveAiMedia(beat, mediaOverride);
     log(runId, "debug", `Beat ${beat.index}: AI media = ${media} (reason=${reason})`, { stage: "visual" });
@@ -3557,7 +3637,7 @@ async function acquireAi(
     // Cloudflare -> Pollinations Z-Image -> Meta Muse -> kie.ai/Nano Banana.
     // Every intermediate image goes through the same Gemini quality gate. Character-reference
     // scenes deliberately skip the chain and stay on Nano Banana Edit for identity consistency.
-    if (!characterReferencePath) {
+    if (!characterReferencePath && !selectedFlowBrowser) {
       if (cloudflareImageConfigured() && !cloudflareDisabledRuns.has(runId)) {
         const cfImg = path.join(os.tmpdir(), `cf_${runId.slice(0, 8)}_${beat.index}.png`);
         try {
@@ -3710,6 +3790,11 @@ async function acquireAi(
       try { fs.unlinkSync(best.path); } catch {}
       log(runId, "info", `Beat ${beat.index}: AI still via kie.ai/nano-banana + Ken Burns — match ${best.score}%`, { stage: "visual" });
       return { path: outPath, kind: "ai", provider: "kie:nano-banana" };
+    }
+    if (selectedFlowBrowser) {
+      // The only permitted fallback for Flow mode is kie.ai Nano Banana. If it also
+      // fails, stop here instead of reaching the universal Grok/provider chain below.
+      throw new FlowBrowserError(`Beat ${beat.index}: Flow and kie.ai Nano Banana fallback both failed.`, "capture");
     }
     // WI-6 — kie.ai produced nothing (e.g. sustained "internal error"); don't lose the beat —
     // fall through to the 69labs/Grok engine below before giving up (throws only if THAT fails too).

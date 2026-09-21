@@ -24,6 +24,7 @@ import { beginRun, endRun } from "./run-lifecycle";
 import { noteCreditExhausted } from "./services/credit-exhaustion";
 import { joinDegraded, type DegradeCode } from "./degraded";
 import { beginStoryblocksRun } from "./services/storyblocks";
+import { FlowBrowserError } from "./services/flow-browser";
 
 /**
  * AVATAR DOCUMENTARY pipeline.
@@ -476,6 +477,7 @@ export async function runStudioPipeline(
             credits.set(beat.index, creditFrom(beat.index, res));
           } catch (e) {
             if (e instanceof CancelledError) throw e; // cancel aborts the beat — never fall back to more work
+            if (e instanceof FlowBrowserError) throw e; // Flow-only mode fails closed; never reuse an unrelated image
             log(runId, "warn", `Beat ${beat.index} visual failed (${(e as Error).message.slice(0, 120)}) — will reuse a neighbour`, {
               stage: "visual",
             });
@@ -518,6 +520,7 @@ export async function runStudioPipeline(
                 credits.set(beat.index, creditFrom(beat.index, res));
               } catch (e) {
                 if (e instanceof CancelledError) throw e; // cancel aborts the beat
+                if (e instanceof FlowBrowserError) throw e;
                 visualPath = null; // filled from the nearest good visual after all beats resolve
               }
             }
@@ -833,6 +836,7 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
               regenVisual++;
             } catch (e) {
               if (e instanceof CancelledError) throw e;
+              if (e instanceof FlowBrowserError) throw e;
               log(runId, "warn", `Beat ${beat.index} visual failed (${(e as Error).message.slice(0, 120)}) — will reuse a neighbour`, {
                 stage: "visual",
               });
@@ -880,6 +884,7 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
                     regenVisual++;
                   } catch (e2) {
                     if (e2 instanceof CancelledError) throw e2;
+                    if (e2 instanceof FlowBrowserError) throw e2;
                     visualPath = null;
                   }
                 }

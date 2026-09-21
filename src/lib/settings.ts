@@ -157,8 +157,23 @@ export const SETTING_KEYS = [
   "YT_DLP_PATH",               // path to yt-dlp(.exe) if not on PATH
   "YT_DLP_CC_ONLY",            // DEPRECATED — CC gating removed; retained for backward compat but no longer read. Default "0".
 
-  // ── AI provider (kie.ai nano-banana/Veo, or 69labs Grok) ──────────
-  "AI_PROVIDER",               // kie | 69labs — engine for AI b-roll + avatar-from-text image
+  // ── AI provider (Flow browser, kie.ai nano-banana/Veo, or 69labs Grok) ─────
+  "AI_PROVIDER",               // flow_browser | kie | 69labs | ... — engine for AI b-roll
+  "FLOW_PROJECT_URL",          // Exact Google Flow project URL opened by the browser worker
+  "FLOW_BROWSER_PROFILE_DIR",  // Persistent Chrome profile. Empty = DATA_DIR/flow-browser-profile
+  "FLOW_BROWSER_CHANNEL",      // Playwright browser channel. Default chrome (uses installed Google Chrome)
+  "FLOW_BROWSER_EXECUTABLE",   // Optional absolute browser executable path (advanced)
+  "FLOW_BROWSER_HEADLESS",     // 0 = visible (recommended), 1 = headless
+  "FLOW_CDP_PORT",             // localhost debugging port used to attach to normal Chrome
+  "FLOW_GENERATION_TIMEOUT_SEC", // Max wait for one generated image
+  "FLOW_FALLBACK_PROVIDER",    // none | kie — what to do if the Flow UI fails
+  "FLOW_IMAGE_MODEL",          // Model label/id expected in Flow (Nano Banana Pro)
+  "FLOW_ASPECT_RATIO",         // Image aspect ratio selected/validated by the worker
+  "FLOW_REGEN_ATTEMPTS",       // Flow generations per beat after visual quality scoring (default 1)
+  "FLOW_PROMPT_SELECTOR",      // Optional CSS selector override for Flow prompt box
+  "FLOW_GENERATE_SELECTOR",    // Optional CSS selector override for Flow Generate button
+  "FLOW_REFERENCE_FILE_SELECTOR", // Optional CSS selector for Flow's character-reference file input
+  "FLOW_REFERENCE_REMOVE_SELECTOR", // Optional CSS selector for removing a stale Flow reference attachment
   "KIE_API_KEY",               // kie.ai API key (nano-banana images, Veo video)
   "KIE_IMAGE_MODEL",           // kie.ai image model id (nano-banana)
   "KIE_VIDEO_MODEL",           // kie.ai video model id (Veo)
@@ -577,6 +592,21 @@ export const DEFAULTS: Record<SettingKey, string> = {
 
   // AI provider
   AI_PROVIDER: "kie",
+  FLOW_PROJECT_URL: "https://labs.google/fx/tools/flow",
+  FLOW_BROWSER_PROFILE_DIR: "",
+  FLOW_BROWSER_CHANNEL: "chrome",
+  FLOW_BROWSER_EXECUTABLE: "",
+  FLOW_BROWSER_HEADLESS: "0",
+  FLOW_CDP_PORT: "9223",
+  FLOW_GENERATION_TIMEOUT_SEC: "240",
+  FLOW_FALLBACK_PROVIDER: "none",
+  FLOW_IMAGE_MODEL: defaultAiModel("flow_browser", "image"),
+  FLOW_ASPECT_RATIO: "16:9",
+  FLOW_REGEN_ATTEMPTS: "1",
+  FLOW_PROMPT_SELECTOR: "",
+  FLOW_GENERATE_SELECTOR: "",
+  FLOW_REFERENCE_FILE_SELECTOR: "",
+  FLOW_REFERENCE_REMOVE_SELECTOR: "",
   KIE_API_KEY: "",
   KIE_IMAGE_MODEL: defaultAiModel("kie", "image"), // = "google/nano-banana"
   KIE_VIDEO_MODEL: defaultAiModel("kie", "video"), // = "veo3_fast"

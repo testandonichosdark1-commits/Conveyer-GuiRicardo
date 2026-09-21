@@ -24,6 +24,7 @@ const KEY_LABELS: Record<string, [fr: string, en: string]> = {
 export function ProviderAiFields({ provider, val, set }: { provider: string; val: Val; set: Set }) {
   const tr = useT();
   const meta = aiProviderMeta(provider);
+  if (!meta.apiKey) return null; // local/browser provider — no credential field
   if (meta.id === "magnific") return null; // configured in the persistent Magnific block below
   if (meta.id === "higgsfield") return null; // two-part key (id + secret) lives in HiggsfieldBlock
 

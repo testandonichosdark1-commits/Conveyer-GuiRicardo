@@ -64,8 +64,8 @@ export async function GET() {
   }
 }
 
-/** Upload/replace the default character portrait. The file stays local; kie.ai gets
- * a temporary copy only when a matching AI beat actually needs image-to-image. */
+/** Upload/replace the default character portrait. The file stays local; the selected
+ * Nano Banana provider receives it only when a matching AI beat needs the character. */
 export async function POST(req: Request) {
   ensureInit();
   let form: FormData;

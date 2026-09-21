@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useT } from "@/app/_i18n";
 
-export function CharacterReferenceField() {
+export function CharacterReferenceField({ provider = "kie" }: { provider?: string }) {
   const tr = useT();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [hasImage, setHasImage] = useState(false);
@@ -106,7 +106,7 @@ export function CharacterReferenceField() {
             )}
           </div>
           <div className="faint" style={{ fontSize: 11.5 }}>
-            JPEG / PNG / WebP · max 10 MB · kie.ai Nano Banana Edit
+            JPEG / PNG / WebP · max 10 MB · {provider === "flow_browser" ? "Google Flow / Nano Banana" : "kie.ai Nano Banana Edit"}
           </div>
         </div>
       </div>
