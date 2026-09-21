@@ -141,23 +141,38 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
   }, [run?.status]);
 
   // Progress estimate derived from the log stream itself — no backend change needed.
-  // `planner` lines are emitted exactly once per beat during planning, so the count of
-  // distinct beat indices there is the total. A beat index appearing in ANY later
-  // visual/avatar-stage line means work has started on it — a beat generates many such
-  // lines while it's being worked on (searches, scoring, retries), so "seen at least
-  // once" lags only slightly behind "fully done", close enough for a rough ETA.
-  const { totalBeats, touchedBeats } = useMemo(() => {
+  // `Beat N: domain=...` (studio-plan.ts) is emitted exactly once per broll/split beat
+  // UNCONDITIONALLY — unlike the `Beat N: planner ai_media=/query_type=/...` debug lines,
+  // which only fire when Gemini actually answered that field for that beat. When Gemini
+  // is unavailable (bad key, quota, outage) the planner falls back to keyword planning for
+  // every beat and NONE of those conditional lines are ever written — so matching on them
+  // left totalBeats stuck at 0 and the ETA stuck on "Estimating…" for an entire run that
+  // was otherwise progressing normally. `domain=` runs on both the Gemini and the
+  // keyword-fallback path, so it can't go missing that way.
+  // A beat index appearing in ANY later visual/avatar-stage line means work has started on
+  // it — a beat generates many such lines while it's being worked on (searches, scoring,
+  // retries), so "seen at least once" lags only slightly behind "fully done", close enough
+  // for a rough ETA.
+  const { totalBeats, touchedBeats, assembleStartMs } = useMemo(() => {
     const planned = new Set<number>();
     const touched = new Set<number>();
+    let assembleStartMs: number | null = null;
     for (const l of logs) {
-      const m = /^Beat (\d+): planner /.exec(l.message);
+      const m = /^Beat (\d+): domain=/.exec(l.message);
       if (m) planned.add(Number(m[1]));
       else if (l.stage === "visual" || l.stage === "avatar_video") {
         const t = /^Beat (\d+)/.exec(l.message);
         if (t) touched.add(Number(t[1]));
       }
+      // First "assemble" line ("Compositing N beats…") marks the moment beat-touch
+      // progress stops meaning anything — every beat is already done and the run is
+      // rendering/muxing instead. Used below to switch the ETA to a measured
+      // per-beat assembly rate instead of the (by-then-meaningless) beat fraction.
+      if (assembleStartMs === null && l.stage === "assemble") {
+        assembleStartMs = new Date(l.ts).getTime();
+      }
     }
-    return { totalBeats: planned.size, touchedBeats: touched };
+    return { totalBeats: planned.size, touchedBeats: touched, assembleStartMs };
   }, [logs]);
 
   // Auto-scroll to the newest line ONLY when the user is already at the bottom,
@@ -476,10 +491,30 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
         ).getTime();
         const elapsedMs = Math.max(0, nowMs - startedAtMs);
         const fraction = totalBeats > 0 ? touchedBeats.size / totalBeats : 0;
-        // Below ~2% progress the elapsed/fraction extrapolation swings wildly (e.g. one
-        // beat out of 200 could imply anywhere from 3 minutes to 3 hours) — show
-        // "Estimating…" instead of a number nobody should trust yet.
-        const etaMs = fraction > 0.02 && fraction < 1 ? elapsedMs / fraction - elapsedMs : null;
+        let etaMs: number | null;
+        if (assembleStartMs !== null) {
+          // Beat-touch progress is meaningless here — every beat is done and ffmpeg is
+          // compositing/muxing them. That phase doesn't track beats at all, so estimate
+          // it from its own measured rate instead: across 16 completed runs, wall time
+          // from the first "Compositing N beats" line to the run's last log line
+          // averaged ~2.6s/beat (9303s / 3546 beats total, 2.2-3.5s/beat per run) —
+          // count DOWN from that budget using time actually spent in this phase so far,
+          // rather than a fixed 1%-of-elapsed guess that stayed pinned at ~20-30s while
+          // assembly ran for several more minutes. Still a rough average (real per-run
+          // rate varies ±35%), but it lands in the right ballpark instead of off by 10-20x.
+          const ASSEMBLY_SEC_PER_BEAT = 2.62;
+          const budgetMs = totalBeats * ASSEMBLY_SEC_PER_BEAT * 1000;
+          const spentMs = nowMs - assembleStartMs;
+          etaMs = Math.max(0, budgetMs - spentMs);
+        } else {
+          // Below ~2% progress the elapsed/fraction extrapolation swings wildly (e.g. one
+          // beat out of 200 could imply anywhere from 3 minutes to 3 hours) — show
+          // "Estimating…" instead of a number nobody should trust yet. Capped below 1 so
+          // the brief gap between the last beat being touched and the assemble stage
+          // actually starting doesn't zero the denominator and flash "Estimating…".
+          const etaFraction = Math.min(fraction, 0.99);
+          etaMs = etaFraction > 0.02 ? elapsedMs / etaFraction - elapsedMs : null;
+        }
         return (
           <div
             className="card"
