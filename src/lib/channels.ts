@@ -4,11 +4,21 @@ import { isSecretKey, shortMask, type SettingKey } from "./settings";
 /**
  * Channels ("Chaîne") — a simple per-channel defaults bundle the operator picks
  * when creating a video: visual mode, AI image style, seconds-per-visual, output
- * format, an optional default avatar, and (below) a full override profile — voice
- * provider + voice id, character reference portrait, and any API key — so one
- * channel can run entirely on a different client's accounts without touching the
- * global Settings page. Distinct from the inherited `prompt_presets` (scene-split
- * prompts) — this model is intentionally simple.
+ * format, an optional default avatar, and a small, DELIBERATELY NARROW override
+ * profile — Cloudflare (Account ID + Token), ai33.pro (API key + voice id),
+ * character reference portrait, and the AI image style — so a channel can carry a
+ * client's own Cloudflare/ai33 accounts + visual identity without touching the
+ * global Settings page, which stays the app-wide default for everything else.
+ *
+ * `voice_provider` is not a general multi-provider selector in the UI (it WAS, but
+ * that was more than this app needs — see app/channels/_components/
+ * ChannelAi33VoiceField.tsx): the API routes derive it automatically as `"ai33"`
+ * whenever `voice_id` is non-empty, else `null`. The column and
+ * channelSettingOverrides() stay generic underneath, since nothing about them is
+ * ai33-specific — only the UI/route layer narrowed to one provider.
+ *
+ * Distinct from the inherited `prompt_presets` (scene-split prompts) — this model
+ * is intentionally simple.
  */
 
 export type VisualMode = "ai" | "real" | "mix";
@@ -20,12 +30,18 @@ export interface Channel {
   ai_style: string | null;
   /** Editable guidance for the per-beat visual-query ("split") prompt. NULL = default. */
   visual_prompt: string | null;
-  /** Per-channel ElevenLabs narration voice_id. NULL = global ELEVENLABS_VOICE_ID. */
+  /** Per-channel narration voice id. Historically "whatever the global VOICEOVER_PROVIDER
+   *  is" (NULL = that provider's own global voice); the UI now writes an ai33.pro voice id
+   *  here specifically (see ChannelAi33VoiceField.tsx) and the API routes set
+   *  `voice_provider` to match automatically. NULL = global ELEVENLABS_VOICE_ID (or
+   *  whichever provider is globally selected). */
   voice_id: string | null;
   /** Per-channel voiceover speed override. NULL = global TTS_SPEED. */
   voice_speed: number | null;
-  /** Which TTS provider `voice_id` is sent to. NULL = global VOICEOVER_PROVIDER.
-   *  Needed because voice_id alone is provider-blind — see channelSettingOverrides(). */
+  /** Which TTS provider `voice_id` is sent to — derived automatically by the API routes
+   *  from whether `voice_id` is set ("ai33" when it is, NULL when it's empty), never
+   *  chosen directly in the UI. NULL = global VOICEOVER_PROVIDER. Needed because voice_id
+   *  alone is provider-blind — see channelSettingOverrides(). */
   voice_provider: string | null;
   /** Absolute path to this channel's own character-reference portrait (managed by
    *  /api/channels/[id]/character-reference, never by updateChannel). NULL = global
@@ -85,6 +101,14 @@ export interface ChannelInput {
   interval_sec?: number;
   format?: string;
   avatar_id?: number | null;
+}
+
+/** ai33 is the only provider the Channels UI lets an operator pin per channel — see the
+ *  module doc comment. Whenever a channel's voice_id is non-empty it's an ai33.pro voice
+ *  id (ChannelAi33VoiceField.tsx), so voice_provider is derived, never taken from a
+ *  client-supplied value. Exported so both API routes (create + update) share one rule. */
+export function deriveVoiceProvider(voiceId: string | null | undefined): string | null {
+  return voiceId?.trim() ? "ai33" : null;
 }
 
 function normMode(m: string | undefined): VisualMode {
@@ -175,10 +199,26 @@ export function setChannelApiKeysJson(id: number, json: string | null): void {
   );
 }
 
-/** Parse + filter a channel's api_keys_json to ONLY isSecretKey() settings, dropping
- *  anything else (defensive — belt-and-suspenders alongside the write-time filter in
- *  setChannelApiKeysJson, so a row written by an older/different code path is still safe
- *  to read). Malformed JSON reads as no overrides rather than throwing. */
+/**
+ * A tiny, explicit exception list: settings that AREN'T secret-shaped (isSecretKey()
+ * would drop them) but that a channel legitimately needs to override alongside a secret
+ * they're paired with. CLOUDFLARE_ACCOUNT_ID is not itself a credential — it's the
+ * "username" half of the Cloudflare pair, useless without CLOUDFLARE_API_TOKEN next to
+ * it, and Cloudflare literally cannot run for a channel without both. Kept as its own
+ * named set (not folded into isSecretKey()) so the actual security boundary — "never let
+ * a channel override an unrelated setting like FFMPEG_PATH" — stays exactly as narrow as
+ * it was, with this one exception reviewed and named rather than a loosened general rule.
+ */
+const CHANNEL_EXTRA_OVERRIDE_KEYS = new Set<string>(["CLOUDFLARE_ACCOUNT_ID"]);
+
+function isChannelOverridableKey(key: string): boolean {
+  return isSecretKey(key) || CHANNEL_EXTRA_OVERRIDE_KEYS.has(key);
+}
+
+/** Parse + filter a channel's api_keys_json to ONLY isChannelOverridableKey() settings,
+ *  dropping anything else (defensive — belt-and-suspenders alongside the write-time
+ *  filter in setChannelApiKeysJson, so a row written by an older/different code path is
+ *  still safe to read). Malformed JSON reads as no overrides rather than throwing. */
 export function filterToSecretKeys(json: string | null | undefined): Partial<Record<SettingKey, string>> {
   if (!json) return {};
   let parsed: unknown;
@@ -191,7 +231,7 @@ export function filterToSecretKeys(json: string | null | undefined): Partial<Rec
   const out: Partial<Record<SettingKey, string>> = {};
   for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
     if (typeof v !== "string" || !v.trim()) continue;
-    if (!isSecretKey(k)) continue; // silently drop — never let a non-credential key through
+    if (!isChannelOverridableKey(k)) continue; // silently drop — never let an unrelated key through
     out[k as SettingKey] = v;
   }
   return out;
@@ -199,11 +239,14 @@ export function filterToSecretKeys(json: string | null | undefined): Partial<Rec
 
 /** Masked view of a channel's API-key overrides, for sending to the browser — same
  *  first4…last4 convention as getMaskedSettings(), so the two never look inconsistent
- *  side by side. Never send api_keys_json itself to a client; send this instead. */
+ *  side by side. Never send api_keys_json itself to a client; send this instead.
+ *  CLOUDFLARE_ACCOUNT_ID (the one CHANNEL_EXTRA_OVERRIDE_KEYS entry) is not a credential
+ *  — getMaskedSettings() doesn't mask it globally either — so it passes through as-is;
+ *  only actual isSecretKey() values are masked. */
 export function maskedChannelApiKeys(json: string | null | undefined): Record<string, string> {
   const parsed = filterToSecretKeys(json);
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(parsed)) out[k] = shortMask(v);
+  for (const [k, v] of Object.entries(parsed)) out[k] = isSecretKey(k) ? shortMask(v) : v;
   return out;
 }
 
@@ -221,9 +264,12 @@ export function maskedChannelApiKeys(json: string | null | undefined): Record<st
 export function mergeChannelApiKeys(existingJson: string | null | undefined, incoming: Record<string, string>): string | null {
   const merged: Record<string, string> = { ...filterToSecretKeys(existingJson) };
   for (const [k, v] of Object.entries(incoming)) {
-    if (!isSecretKey(k)) continue;
+    if (!isChannelOverridableKey(k)) continue;
     const value = (v ?? "").trim();
-    if (value.includes("…")) continue; // untouched mask — keep whatever merged[k] already is
+    // The "…" mask marker only ever applies to a MASKED (secret) field — a plain field
+    // like CLOUDFLARE_ACCOUNT_ID is never masked in the first place, so it has no
+    // "untouched" state to preserve; a value containing "…" there is just a real value.
+    if (isSecretKey(k) && value.includes("…")) continue; // untouched mask — keep merged[k]
     if (!value) {
       delete merged[k]; // explicitly cleared -> fall back to the global key
     } else {

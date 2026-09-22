@@ -1,11 +1,10 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
 import { useT } from "../_i18n";
-import { voiceProviderMeta } from "@/lib/providers";
 import { AvatarSelect, type AvatarLite } from "../_components/AvatarSelect";
 import { CharacterReferenceField } from "../settings/_components/CharacterReferenceField";
 import { ChannelApiKeysField } from "./_components/ChannelApiKeysField";
-import { ChannelVoiceFields } from "./_components/ChannelVoiceFields";
+import { ChannelAi33VoiceField } from "./_components/ChannelAi33VoiceField";
 
 interface Channel {
   id: number;
@@ -32,11 +31,10 @@ interface Draft {
   format: string;
   // User-facing:
   ai_style: string;
-  voice_id: string;
+  voice_id: string; // ai33.pro voice id — see ChannelAi33VoiceField
   voice_speed: string;
-  voice_provider: string;
   avatar_id: number | null;
-  api_keys: Record<string, string>;
+  api_keys: Record<string, string>; // CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN / AI33_API_KEY
 }
 
 const EMPTY: Draft = {
@@ -48,7 +46,6 @@ const EMPTY: Draft = {
   ai_style: "",
   voice_id: "",
   voice_speed: "",
-  voice_provider: "",
   avatar_id: null,
   api_keys: {},
 };
@@ -57,7 +54,6 @@ export default function ChainesPage() {
   const tr = useT();
   const [channels, setChannels] = useState<Channel[]>([]);
   const [avatars, setAvatars] = useState<AvatarLite[]>([]);
-  const [globalVoiceProvider, setGlobalVoiceProvider] = useState("elevenlabs");
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [edit, setEdit] = useState<Draft>(EMPTY);
@@ -74,20 +70,15 @@ export default function ChainesPage() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  // Avatars for the picker + global voice provider for the dynamic Voice-ID label.
   useEffect(() => {
     fetch("/api/avatars").then((r) => (r.ok ? r.json() : null)).then((rows) => { if (Array.isArray(rows)) setAvatars(rows); }).catch(() => {});
-    fetch("/api/settings").then((r) => (r.ok ? r.json() : null)).then((s) => {
-      if (s && typeof s === "object" && !Array.isArray(s) && typeof s.VOICEOVER_PROVIDER === "string" && s.VOICEOVER_PROVIDER) setGlobalVoiceProvider(s.VOICEOVER_PROVIDER);
-    }).catch(() => {});
   }, []);
 
   function bodyOf(d: Draft) {
     return {
       name: d.name.trim(),
-      voice_id: d.voice_id,
+      voice_id: d.voice_id, // voice_provider is derived server-side from this — see deriveVoiceProvider()
       voice_speed: d.voice_speed,
-      voice_provider: d.voice_provider,
       avatar_id: d.avatar_id,
       api_keys: d.api_keys,
       // Preserved from existing/default values — not user-editable here anymore.
@@ -122,7 +113,6 @@ export default function ChainesPage() {
       format: c.format,
       voice_id: c.voice_id ?? "",
       voice_speed: c.voice_speed != null ? String(c.voice_speed) : "",
-      voice_provider: c.voice_provider ?? "",
       avatar_id: c.avatar_id,
       api_keys: c.api_keys ?? {},
     });
@@ -147,80 +137,67 @@ export default function ChainesPage() {
     await load();
   }
 
-  const fields = (d: Draft, set: (d: Draft) => void, channelId: number | null) => {
-    return (
-      <>
-        <div className="grid-2" style={{ gap: 16 }}>
-          <div>
-            <label className="label">{tr("Nom", "Name")}</label>
-            <input className="input" value={d.name} onChange={(e) => set({ ...d, name: e.target.value })} placeholder={tr("Ma chaîne", "My channel")} />
-          </div>
-          <div>
-            <label className="label">{tr("Avatar par défaut", "Default avatar")}</label>
-            <AvatarSelect avatars={avatars} value={d.avatar_id} onChange={(id) => set({ ...d, avatar_id: id })} noneLabel={tr("Aucun — voix seule / choisi au lancement", "None — voice only / chosen at run")} />
-          </div>
+  const fields = (d: Draft, set: (d: Draft) => void, channelId: number | null) => (
+    <>
+      <div className="grid-2" style={{ gap: 16 }}>
+        <div>
+          <label className="label">{tr("Nom", "Name")}</label>
+          <input className="input" value={d.name} onChange={(e) => set({ ...d, name: e.target.value })} placeholder={tr("Ma chaîne", "My channel")} />
         </div>
+        <div>
+          <label className="label">{tr("Avatar par défaut", "Default avatar")}</label>
+          <AvatarSelect avatars={avatars} value={d.avatar_id} onChange={(id) => set({ ...d, avatar_id: id })} noneLabel={tr("Aucun — voix seule / choisi au lancement", "None — voice only / chosen at run")} />
+        </div>
+      </div>
 
-        {/* Its own component (not inlined here): it calls useVoiceCatalogue(), a hook, and
-            `fields` is a plain closure invoked a variable number of times (once for the
-            create draft, plus once per channel currently being edited) — calling a hook
-            directly inside that closure would violate the Rules of Hooks. As a real
-            component, React gives each rendered instance its own hook state correctly. */}
-        <ChannelVoiceFields
-          voiceProvider={d.voice_provider}
-          voiceId={d.voice_id}
-          globalVoiceProvider={globalVoiceProvider}
-          onVoiceProviderChange={(v) => set({ ...d, voice_provider: v })}
-          onVoiceIdChange={(v) => set({ ...d, voice_id: v })}
+      <ChannelAi33VoiceField voiceId={d.voice_id} onChange={(v) => set({ ...d, voice_id: v })} />
+
+      <div>
+        <label className="label">{tr("Vitesse de la voix (optionnel)", "Voiceover speed (optional)")}</label>
+        <input className="input" type="number" step="0.01" min="0.7" max="1.2" value={d.voice_speed}
+          onChange={(e) => set({ ...d, voice_speed: e.target.value })}
+          placeholder={tr("vide = vitesse globale · 0.7 lent – 1.2 rapide", "empty = global speed · 0.7 slow – 1.2 fast")} />
+      </div>
+
+      <div>
+        <label className="label">{tr("Style d'image IA par défaut (optionnel)", "Default AI image style (optional)")}</label>
+        <textarea
+          className="input"
+          rows={2}
+          value={d.ai_style}
+          onChange={(e) => set({ ...d, ai_style: e.target.value })}
+          placeholder={tr(
+            "ex. « cinematic, muted colors, 35mm film grain »",
+            "e.g. \"cinematic, muted colors, 35mm film grain\""
+          )}
         />
-
-        <div>
-          <label className="label">{tr("Vitesse de la voix (optionnel)", "Voiceover speed (optional)")}</label>
-          <input className="input" type="number" step="0.01" min="0.7" max="1.2" value={d.voice_speed}
-            onChange={(e) => set({ ...d, voice_speed: e.target.value })}
-            placeholder={tr("vide = vitesse globale · 0.7 lent – 1.2 rapide", "empty = global speed · 0.7 slow – 1.2 fast")} />
+        <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+          {tr("Ajouté au prompt de chaque plan IA (image et vidéo) généré pour cette chaîne.", "Appended to every AI beat's prompt (image and video) generated for this channel.")}
         </div>
+      </div>
 
-        <div>
-          <label className="label">{tr("Style d'image IA par défaut (optionnel)", "Default AI image style (optional)")}</label>
-          <textarea
-            className="input"
-            rows={2}
-            value={d.ai_style}
-            onChange={(e) => set({ ...d, ai_style: e.target.value })}
-            placeholder={tr(
-              "vide = style global (Paramètres) · ex. « cinematic, muted colors, 35mm film grain »",
-              "empty = global style (Settings) · e.g. \"cinematic, muted colors, 35mm film grain\""
-            )}
-          />
-          <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-            {tr("Ajouté au prompt de chaque plan IA (image et vidéo) généré pour cette chaîne.", "Appended to every AI beat's prompt (image and video) generated for this channel.")}
-          </div>
-        </div>
+      {channelId != null && (
+        <CharacterReferenceField
+          endpoint={`/api/channels/${channelId}/character-reference`}
+          label={tr("Personnage de référence de cette chaîne (optionnel)", "Character reference image (optional)")}
+          hint={tr(
+            "Utilisée pour TOUTES les vidéos de cette chaîne.",
+            "Used for every video on this channel."
+          )}
+        />
+      )}
 
-        {channelId != null && (
-          <CharacterReferenceField
-            endpoint={`/api/channels/${channelId}/character-reference`}
-            label={tr("Personnage de référence de cette chaîne (optionnel)", "This channel's character reference (optional)")}
-            hint={tr(
-              "Remplace l'image de référence globale pour toutes les vidéos de cette chaîne. Vide = image globale (Paramètres).",
-              "Overrides the global reference image for every video on this channel. Empty = the global image (Settings)."
-            )}
-          />
-        )}
-
-        <ChannelApiKeysField value={d.api_keys} onChange={(next) => set({ ...d, api_keys: next })} />
-      </>
-    );
-  };
+      <ChannelApiKeysField value={d.api_keys} onChange={(next) => set({ ...d, api_keys: next })} />
+    </>
+  );
 
   return (
     <div>
       <h1>{tr("Chaînes", "Channels")}</h1>
       <p className="muted" style={{ marginBottom: 18, fontSize: 14 }}>
         {tr(
-          "Une chaîne = un nom, une voix et un avatar par défaut — et, si besoin, son propre fournisseur de voix, son style d'image IA, son personnage de référence et ses propres clés API (utile pour un client avec ses propres comptes). Les autres réglages utilisent les valeurs par défaut ou se choisissent au lancement.",
-          "A channel = a name, a default voice and a default avatar — plus, when needed, its own voice provider, AI image style, character reference, and API keys (useful for a client with their own accounts). Other settings use sensible defaults or are chosen at run time."
+          "Une chaîne = configuration au niveau du projet/client : Cloudflare, ai33.pro (clé + voix), personnage de référence et style d'image IA. Tout le reste vient des Paramètres globaux.",
+          "A channel = project/client-level config: Cloudflare, ai33.pro (key + voice), character reference, and AI image style. Everything else comes from the global Settings."
         )}
       </p>
 
@@ -253,10 +230,9 @@ export default function ChainesPage() {
                     <div style={{ fontSize: 13.5, minWidth: 0 }}>
                       <strong>{c.name}</strong>
                       <span className="faint">
-                        {" "}— {tr("voix", "voice")} {c.voice_id ? "✓" : tr("défaut", "default")}
                         {avatarName ? ` · ${avatarName}` : ""}
-                        {c.voice_provider ? ` · ${voiceProviderMeta(c.voice_provider).label}` : ""}
-                        {Object.values(c.api_keys || {}).some((v) => v.trim()) ? ` · ${tr("clés propres", "own keys")}` : ""}
+                        {c.voice_provider === "ai33" ? ` · ${tr("voix ai33", "ai33 voice")}` : ""}
+                        {Object.values(c.api_keys || {}).some((v) => v.trim()) ? ` · ${tr("comptes propres", "own accounts")}` : ""}
                       </span>
                     </div>
                     <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>

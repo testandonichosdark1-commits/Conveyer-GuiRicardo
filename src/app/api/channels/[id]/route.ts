@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { ensureInit } from "@/lib/init";
-import { getChannel, updateChannel, deleteChannel, toClientChannel, mergeChannelApiKeys } from "@/lib/channels";
+import { getChannel, updateChannel, deleteChannel, toClientChannel, mergeChannelApiKeys, deriveVoiceProvider } from "@/lib/channels";
 
 export const runtime = "nodejs";
 
@@ -32,14 +32,16 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
       body.api_keys && typeof body.api_keys === "object"
         ? mergeChannelApiKeys(existing.api_keys_json, body.api_keys as Record<string, string>)
         : undefined;
+    const voiceId = body.voice_id != null ? String(body.voice_id) : null;
     updateChannel(cid, {
       name: String(body.name || ""),
       visual_mode: body.visual_mode as "ai" | "real" | "mix" | undefined,
       ai_style: body.ai_style != null ? String(body.ai_style) : null,
       visual_prompt: body.visual_prompt != null ? String(body.visual_prompt) : null,
-      voice_id: body.voice_id != null ? String(body.voice_id) : null,
+      voice_id: voiceId,
       voice_speed: body.voice_speed != null && body.voice_speed !== "" ? Number(body.voice_speed) : null,
-      voice_provider: body.voice_provider != null ? String(body.voice_provider) : null,
+      // Derived, never trusted from the client — see deriveVoiceProvider()'s doc comment.
+      voice_provider: deriveVoiceProvider(voiceId),
       api_keys_json: apiKeysUpdate,
       interval_sec: body.interval_sec != null ? Number(body.interval_sec) : undefined,
       format: body.format != null ? String(body.format) : undefined,

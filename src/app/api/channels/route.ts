@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { ensureInit } from "@/lib/init";
-import { listChannels, createChannel, getChannel, toClientChannel, mergeChannelApiKeys } from "@/lib/channels";
+import { listChannels, createChannel, getChannel, toClientChannel, mergeChannelApiKeys, deriveVoiceProvider } from "@/lib/channels";
 
 export const runtime = "nodejs";
 
@@ -21,14 +21,16 @@ export async function POST(req: Request) {
     // A new channel has no prior stored keys to re-hydrate a mask from — the client
     // never has a mask to send back on create anyway (there is nothing to load yet).
     const apiKeys = body.api_keys && typeof body.api_keys === "object" ? (body.api_keys as Record<string, string>) : {};
+    const voiceId = body.voice_id != null ? String(body.voice_id) : null;
     const id = createChannel({
       name: String(body.name || ""),
       visual_mode: body.visual_mode as "ai" | "real" | "mix" | undefined,
       ai_style: body.ai_style != null ? String(body.ai_style) : null,
       visual_prompt: body.visual_prompt != null ? String(body.visual_prompt) : null,
-      voice_id: body.voice_id != null ? String(body.voice_id) : null,
+      voice_id: voiceId,
       voice_speed: body.voice_speed != null && body.voice_speed !== "" ? Number(body.voice_speed) : null,
-      voice_provider: body.voice_provider != null ? String(body.voice_provider) : null,
+      // Derived, never trusted from the client — see deriveVoiceProvider()'s doc comment.
+      voice_provider: deriveVoiceProvider(voiceId),
       api_keys_json: mergeChannelApiKeys(null, apiKeys),
       interval_sec: body.interval_sec != null ? Number(body.interval_sec) : undefined,
       format: body.format != null ? String(body.format) : undefined,

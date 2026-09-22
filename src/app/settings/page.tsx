@@ -14,7 +14,6 @@ import { ProviderVoiceFields } from "./_components/ProviderVoiceFields";
 import { FootageSources } from "./_components/FootageSources";
 import { FallbackAiMedia } from "./_components/FallbackAiMedia";
 import { AdvancedSection } from "./_components/AdvancedSection";
-import { CharacterReferenceField } from "./_components/CharacterReferenceField";
 import { FlowBrowserBlock } from "./_components/FlowBrowserBlock";
 
 export default function ParametresPage() {
@@ -50,8 +49,11 @@ export default function ParametresPage() {
           </div>
           <div>
             <label className="label">{tr("Fournisseur de voix", "Voice provider")}</label>
+            {/* ai33.pro is deliberately absent here — it's channel-only now (Channels page:
+                each channel pins its own ai33 key + voice_id). Settings stays the app-wide
+                default for every OTHER provider; ai33 has no global default to configure. */}
             <select className="input" value={voiceProvider} onChange={(e) => set("VOICEOVER_PROVIDER", e.target.value)}>
-              {VOICE_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.selectLabel}</option>)}
+              {VOICE_PROVIDERS.filter((p) => p.id !== "ai33").map((p) => <option key={p.id} value={p.id}>{p.selectLabel}</option>)}
             </select>
           </div>
         </div>
@@ -73,29 +75,9 @@ export default function ParametresPage() {
               </div>
               <div className="faint" style={{ fontSize: 12, marginTop: 3, lineHeight: 1.5 }}>
                 {tr(
-                  "Le profil principal est toujours essayé en premier. Les profils de secours ne sont utilisés que si un profil présente un problème d'identifiants, de configuration ou une indisponibilité transitoire. Une allocation quotidienne épuisée (3036/4006) ne déclenche pas la rotation : le pipeline passe à kie.ai.",
-                  "The Primary profile is always tried first. Backup profiles are used only for credential/configuration problems or transient availability failures. Daily allocation exhaustion (3036/4006) does not rotate accounts: the pipeline falls back to kie.ai."
+                  "Le profil principal (Account ID + Token) est désormais configuré par chaîne — page Chaînes. Les profils de secours ci-dessous restent globaux : ils prennent le relais si le profil actif (celui de la chaîne, ou l'ancien réglage global s'il existe encore) a un problème d'identifiants, de configuration ou une indisponibilité transitoire. Une allocation quotidienne épuisée (3036/4006) ne déclenche pas la rotation : le pipeline passe à kie.ai.",
+                  "The Primary profile (Account ID + Token) is now configured per channel — see the Channels page. The backup profiles below stay global: they take over if the active profile (the channel's, or a legacy global one if still set) has a credential/configuration problem or a transient outage. Daily allocation exhaustion (3036/4006) does not rotate accounts: the pipeline falls back to kie.ai."
                 )}
-              </div>
-            </div>
-
-            <div style={{ display: "grid", gap: 8, padding: 10, border: "1px solid var(--border)", borderRadius: 8 }}>
-              <div style={{ fontWeight: 700, fontSize: 12.5 }}>{tr("Profil principal", "Primary profile")}</div>
-              <div className="grid-2" style={{ gap: 12 }}>
-                <SettingsField
-                  label={tr("Cloudflare — Account ID", "Cloudflare — Account ID")}
-                  settingKey="CLOUDFLARE_ACCOUNT_ID"
-                  val={val}
-                  set={set}
-                  placeholder="32-character account id"
-                />
-                <SettingsField
-                  label={tr("Cloudflare — API Token", "Cloudflare — API Token")}
-                  settingKey="CLOUDFLARE_API_TOKEN"
-                  val={val}
-                  set={set}
-                  placeholder="cfut_…"
-                />
               </div>
             </div>
 
@@ -305,9 +287,10 @@ export default function ParametresPage() {
 
         <AdvancedSection title={tr("Avancé (optionnel)", "Advanced (optional)")}>
           {/* AI media (KIE_AI_MEDIA) moved to the Run page, shown contextually per visual mode. */}
+          {/* AI_IMAGE_STYLE and the character reference image moved to per-channel config
+              (Channels page: Default AI image style / Character reference image) — Settings
+              stays the app-wide default and no longer exposes a global form field for either. */}
           <SettingsField label={tr("Secondes par visuel (durée d'un plan par défaut)", "Seconds per visual (default beat length)")} settingKey="SECONDS_PER_VISUAL" val={val} set={set} placeholder="4.5" />
-          <SettingsField label={tr("Style images IA par défaut", "Default AI image style")} settingKey="AI_IMAGE_STYLE" val={val} set={set} />
-          {(aiProvider === "kie" || aiProvider === "flow_browser") && <CharacterReferenceField provider={aiProvider} />}
           <SettingsField label={tr("Pixabay — clé API (optionnel)", "Pixabay — API key (optional)")} settingKey="PIXABAY_API_KEY" val={val} set={set} />
           {/* Web (Google) footage source — its two keys live here, next to the other footage keys
               and right above the source checkboxes that enable it. Leave empty to disable web search. */}

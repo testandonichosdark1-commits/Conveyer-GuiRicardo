@@ -5,6 +5,7 @@ import {
   maskedChannelApiKeys,
   channelSettingOverrides,
   toClientChannel,
+  deriveVoiceProvider,
   type Channel,
 } from "./channels";
 
@@ -145,5 +146,40 @@ describe("toClientChannel", () => {
     expect(client).not.toHaveProperty("api_keys_json");
     expect(JSON.stringify(client)).not.toContain("sk-realsecretvalue");
     expect(client.api_keys).toEqual({ HEYGEN_API_KEY: "sk-r…alue" });
+  });
+});
+
+describe("CLOUDFLARE_ACCOUNT_ID — the one non-secret exception", () => {
+  it("passes the write-time/read-time filter alongside real secret keys", () => {
+    const json = JSON.stringify({ CLOUDFLARE_ACCOUNT_ID: "abc123", CLOUDFLARE_API_TOKEN: "cfut_realtoken1234" });
+    expect(filterToSecretKeys(json)).toEqual({ CLOUDFLARE_ACCOUNT_ID: "abc123", CLOUDFLARE_API_TOKEN: "cfut_realtoken1234" });
+  });
+
+  it("is never masked — it isn't a credential", () => {
+    const json = JSON.stringify({ CLOUDFLARE_ACCOUNT_ID: "abcdef0123456789" });
+    expect(maskedChannelApiKeys(json)).toEqual({ CLOUDFLARE_ACCOUNT_ID: "abcdef0123456789" });
+  });
+
+  it("mergeChannelApiKeys treats it as a plain field — no mask-preservation needed", () => {
+    const result = mergeChannelApiKeys(null, { CLOUDFLARE_ACCOUNT_ID: "abc123" });
+    expect(JSON.parse(result!)).toEqual({ CLOUDFLARE_ACCOUNT_ID: "abc123" });
+  });
+
+  it("still never lets through a truly unrelated non-secret key", () => {
+    const result = mergeChannelApiKeys(null, { CLOUDFLARE_ACCOUNT_ID: "abc123", FFMPEG_PATH: "/tmp/evil" });
+    expect(JSON.parse(result!)).toEqual({ CLOUDFLARE_ACCOUNT_ID: "abc123" });
+  });
+});
+
+describe("deriveVoiceProvider", () => {
+  it("returns 'ai33' whenever a voice id is present", () => {
+    expect(deriveVoiceProvider("edge:en-US-GuyNeural")).toBe("ai33");
+    expect(deriveVoiceProvider("  spaced  ")).toBe("ai33");
+  });
+  it("returns null for empty/blank/missing voice ids — the channel uses the global provider", () => {
+    expect(deriveVoiceProvider("")).toBeNull();
+    expect(deriveVoiceProvider("   ")).toBeNull();
+    expect(deriveVoiceProvider(null)).toBeNull();
+    expect(deriveVoiceProvider(undefined)).toBeNull();
   });
 });
