@@ -66,7 +66,10 @@ globalThis.__facelessFlowBrowserState = state;
 // encode/publish step), and the two timeouts must be free to move independently.
 function settingInt(key: "FLOW_GENERATION_TIMEOUT_SEC" | "FLOW_VIDEO_TIMEOUT_SEC" | "FLOW_VIDEO_DURATION_SEC", fallback: number, min: number, max: number): number {
   const n = Number(getSetting(key));
-  return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
+  // An unset/blank setting reads as Number("") === 0, which IS finite — so this must also
+  // require n > 0, or a blanked field would silently clamp to `min` (e.g. a 30s image
+  // timeout) instead of the intended default (240s), rather than falling back to it.
+  return Number.isFinite(n) && n > 0 ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
 }
 
 /** Max wait for one generated Nano Banana image, in ms. */
@@ -237,7 +240,7 @@ export async function openFlowSession(): Promise<FlowSessionStatus> {
       loggedIn,
       url: page.url(),
       message: loggedIn
-        ? "Normal Chrome is connected to Google Flow. Session is ready; no image was generated."
+        ? "Normal Chrome is connected to Google Flow. Session is ready; no image or video was generated."
         : "Normal Chrome opened. Complete Google sign-in in that window, open the Flow project, then test again.",
     };
   });
@@ -382,27 +385,25 @@ export function normalizeFlowModelLabel(s: string): string {
   return s.toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
+/** Words that decorate a menu label without naming a distinct model/tier. Stripped before
+ *  comparison so "Veo 3.1 Fast (Beta)" / "New: Veo 3.1 Fast" still match "veo-3.1-fast" —
+ *  but "Fast"/"Quality"/a different version number are NEVER in this list, because those
+ *  DO distinguish one Veo tier from another and must keep failing the match. */
+const VEO_LABEL_DECORATION = /\b(new|beta|preview)\b/g;
+
 /**
  * Does a candidate label (arbitrary text from the Flow UI) name the wanted Veo model?
- * Exact match after normalization, or the wanted tokens appearing as a contiguous run
- * inside the candidate (so "Veo 3.1 Fast (Beta)" still matches "veo-3.1-fast"). Never
- * the reverse (a shorter candidate must not match a longer wanted string) — that would
- * let "Veo 3" match when "Veo 3.1" was configured. Exported for unit tests.
+ * Strips only cosmetic decoration (brackets, stray punctuation, "New"/"Beta"/"Preview")
+ * and requires the REMAINDER to equal the wanted string exactly — not merely contain it —
+ * so "veo-3.1" never matches a menu entry for "Veo 3.1 Fast" just because it contains the
+ * shorter string as a prefix. Exported for unit tests.
  */
 export function veoModelLabelMatches(wanted: string, candidateText: string): boolean {
   const w = normalizeFlowModelLabel(wanted);
-  const c = normalizeFlowModelLabel(candidateText);
-  if (!w || !c) return false;
-  if (w === c) return true;
-  // Whole-token containment: split both on spaces and require candidate to contain the
-  // wanted token sequence contiguously, not just as a loose substring (which would let
-  // "veo 31 fast" mis-match unrelated digits glued together in a badge).
-  const wTokens = w.split(" ");
-  const cTokens = c.split(" ");
-  for (let i = 0; i + wTokens.length <= cTokens.length; i++) {
-    if (wTokens.every((t, j) => cTokens[i + j] === t)) return true;
-  }
-  return false;
+  if (!w) return false;
+  const cleaned = candidateText.replace(/[()[\]]/g, " ").replace(/[^a-zA-Z0-9.\s-]/g, " ");
+  const c = normalizeFlowModelLabel(cleaned).replace(VEO_LABEL_DECORATION, " ").replace(/\s+/g, " ").trim();
+  return c === w;
 }
 
 /** The configured Veo model, normalized to plain words ("veo-3.1-fast" -> "veo 3.1 fast"). */
@@ -779,7 +780,9 @@ async function diagnoseComposerControls(page: Page): Promise<string> {
  * so "clear before every beat, attach only when this beat wants it" can never drift
  * between the image and video paths. Returns whether a reference ended up attached.
  */
-async function prepareComposerReference(page: Page, input: Locator, referenceImagePath: string | null): Promise<boolean> {
+// Exported so tests exercise THIS function (with a fake Page/Locator) rather than
+// re-implementing the clear-then-attach sequencing. Nothing else imports it directly.
+export async function prepareComposerReference(page: Page, input: Locator, referenceImagePath: string | null): Promise<boolean> {
   await clearFlowReferences(page);
   if (!referenceImagePath) return false;
   await uploadFlowReference(page, input, referenceImagePath);
