@@ -264,6 +264,19 @@ export function isGeminiQuotaError(message: string): boolean {
   return /RESOURCE_EXHAUSTED|quota exceeded|exceeded your current quota|prepayment credit/i.test(message);
 }
 
+/**
+ * Is this failure a bad/missing GOOGLE_API_KEY, rather than Gemini rejecting the request
+ * content? Both can arrive as HTTP 400, so the message body — not just the status — decides.
+ * Google returns `"status": "INVALID_ARGUMENT"` with a message starting "API key not valid"
+ * for a wrong/revoked key; that never clears on its own within a run, so — like an exhausted
+ * quota — every subsequent Gemini call fails identically for the rest of the run (see
+ * noteGeminiQuota, which pauses on this the same way it pauses on quota exhaustion).
+ */
+export function isGeminiAuthError(message: string): boolean {
+  if (!/\bGemini 400\b/.test(message)) return false;
+  return /api key not valid|api_key_invalid/i.test(message);
+}
+
 /** Minimal shape of a Gemini `generateContent` response — only the fields our callers read. */
 export interface GeminiGenerateContentResponse {
   candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];

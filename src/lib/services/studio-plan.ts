@@ -3,7 +3,7 @@ import { log } from "../logger";
 import type { WordTiming } from "./elevenlabs-voiceover";
 import { recordGemini } from "./cost-ledger";
 import { callGemini, type GeminiGenerateContentResponse } from "./gemini-models";
-import { noteGeminiQuota, geminiQuotaHit } from "./gemini-quota";
+import { noteGeminiQuota, noteGeminiKeyMissing, geminiQuotaHit } from "./gemini-quota";
 
 /**
  * Beat planner.
@@ -1754,6 +1754,7 @@ async function planVisualQueries(
   const out = new Map<number, PlannedVisual>();
   const apiKey = getSetting("GOOGLE_API_KEY");
   if (!apiKey) {
+    noteGeminiKeyMissing(runId, "plan");
     log(runId, "warn", "GOOGLE_API_KEY not set — using beat text as the visual query", { stage: "plan" });
     return out;
   }
