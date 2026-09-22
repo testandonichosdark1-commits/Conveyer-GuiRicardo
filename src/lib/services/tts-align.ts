@@ -5,6 +5,7 @@ import { log } from "../logger";
 import { synthesizeFullScript } from "./tts";
 import { recordGroqTranscription } from "./cost-ledger";
 import { noteCreditExhausted } from "./credit-exhaustion";
+import { CancelledError } from "../cancellation";
 import type { Scene } from "./scene-split";
 
 /** One transcribed word from Whisper, in milliseconds. */
@@ -186,7 +187,12 @@ async function transcribeWithGroqWhisper(runId: string, audioPath: string): Prom
   if (!r.ok) {
     const errBody = await r.text();
     const raw = `Groq Whisper ${r.status}: ${errBody.slice(0, 400)}`;
-    noteCreditExhausted(runId, "Groq", raw, "tts");
+    // A credit wall PAUSES the run (pauseRunForOperator marks it cancelled/resumable), but
+    // this call sits outside any per-beat loop with no later checkCancelled() checkpoint to
+    // convert a plain throw into CancelledError before it reaches the top-level pipeline
+    // catch — which only spares CancelledError from overwriting the run back to 'error'
+    // (unresumable). See tts.ts's ai33 create call for the confirmed live symptom.
+    if (noteCreditExhausted(runId, "Groq", raw, "tts")) throw new CancelledError(raw);
     throw new Error(raw);
   }
 

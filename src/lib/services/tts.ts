@@ -13,6 +13,7 @@ import { describeProviderVoiceRejection, ai84VoiceModelMismatch, ai33VoiceIdUnqu
 import { ai84Backend } from "../providers";
 import { pickTaskId, readTaskState, describeUnparsed } from "./ai33-response";
 import { noteCreditExhausted } from "./credit-exhaustion";
+import { CancelledError } from "../cancellation";
 import { AI33_DEFAULT_BASE } from "./ai33-voices";
 import {
   buildAi84ElevenCreate,
@@ -1122,7 +1123,14 @@ async function ai33Tts(
     }
     if (!createResp.ok) {
       const raw = `ai33 create ${createResp.status}: ${(await createResp.text()).slice(0, 300)}`;
-      noteCreditExhausted(runId, "ai33", raw, "tts");
+      // A credit wall PAUSES the run (pauseRunForOperator marks it cancelled/resumable) —
+      // but this call sits outside any per-beat loop, with no later checkCancelled()
+      // checkpoint downstream to convert that into a CancelledError before it reaches the
+      // top-level pipeline catch. Throwing a plain Error here raced right past the pause:
+      // studio-pipeline's catch only spares CancelledError from overwriting the run back to
+      // 'error' (unresumable) — confirmed live, a real run logged "pausing this run now...
+      // click Resume" and then landed as status=error, canResume=false anyway.
+      if (noteCreditExhausted(runId, "ai33", raw, "tts")) throw new CancelledError(raw);
       throw isVoiceRejection(raw) || ai33LooksLikeVoiceRejection(raw) ? rejection(raw) : new Error(raw);
     }
     const created: unknown = await createResp.json();
@@ -1207,7 +1215,9 @@ async function ai33Tts(
     }
     if (state.phase === "failed") {
       const raw = `ai33 task ${taskId} ${state.rawStatus || "failed"}: ${state.error ?? "unknown error"}`;
-      noteCreditExhausted(runId, "ai33", raw, "tts");
+      // See the create-time credit wall above for why this must be a CancelledError, not a
+      // plain one, when noteCreditExhausted just paused the run.
+      if (noteCreditExhausted(runId, "ai33", raw, "tts")) throw new CancelledError(raw);
       // The shared predicate needs a 400/404 or the literal `voice_not_found` token, and a
       // failed TASK carries neither — so a bad voice id, by far the likeliest failure here,
       // would otherwise arrive with no hint of which field to change.
