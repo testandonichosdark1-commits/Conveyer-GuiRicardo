@@ -3289,20 +3289,32 @@ export function keepPositiveClauses(clauses: string): string {
  */
 export function beatWantsCharacterReference(beat: Pick<Beat, "aiPrompt" | "visualQuery" | "text">): boolean {
   const scene = [beat.aiPrompt, beat.visualQuery, beat.text].filter(Boolean).join(" ");
-  const explicitCharacter = /\b(?:woman|women|female|housekeeper|housekeeping\s+(?:attendant|staff)|room\s+attendant|maid|cleaning\s+lady|professional\s+cleaner|cleaning\s+professional|cleaning\s+worker|hotel\s+(?:attendant|worker|staff|employee)|hospitality\s+professional|worker|employee|staff\s+member|she|her|hers)\b/i;
+  // Gendered/role nouns — the original signal, still valid for a female-presenter or
+  // housekeeper-persona channel. Deliberately NOT the only signal: a male presenter's
+  // narration ("I'm Finn, the DIY Guy") never contains any of these words, so a channel
+  // built around a man matched NONE of them and the reference photo was never used —
+  // confirmed live: "I'm Finn..." generated an unrelated stranger's face at 100% "match"
+  // because the scorer only checks the image against the TEXT, never against the
+  // configured portrait.
+  const explicitCharacter = /\b(?:woman|women|female|housekeeper|housekeeping\s+(?:attendant|staff)|room\s+attendant|maid|cleaning\s+lady|professional\s+cleaner|cleaning\s+professional|cleaning\s+worker|hotel\s+(?:attendant|worker|staff|employee)|hospitality\s+professional|worker|employee|staff\s+member|she|her|hers|man|men|male|he|him|his)\b/i;
   // A configured portrait represents the channel's first-person presenter. Embodied
   // actions are a useful signal even when the narration says only “I” and the planner
-  // omits “housekeeper” from its visual prompt. Avoid generic “I think / I know” so the
+  // omits a role word from its visual prompt. Avoid generic “I think / I know” so the
   // portrait is not forced into explanatory object shots.
   const embodiedFirstPerson = /\bI\s+(?:saw|noticed|looked|stepped|walked|entered|checked|cleaned|wiped|found|reached|picked|opened|closed|touched|examined|watched|worked|held|removed|sprayed)\b/i;
-  return explicitCharacter.test(scene) || embodiedFirstPerson.test(scene);
+  // Self-introduction is the single most reliable presenter cue there is ("I'm Finn",
+  // "I am The DIY Guy", "most people call me...") and needs no role/gender word at all —
+  // this is the exact pattern that fell through both checks above.
+  const selfIntroduction = /\bI'?m\s+\w|\bI\s+am\s+\w|\b(?:people\s+)?call\s+me\b|\bmy\s+name\s+is\b/i;
+  return explicitCharacter.test(scene) || embodiedFirstPerson.test(scene) || selfIntroduction.test(scene);
 }
 
 const CHARACTER_REFERENCE_INSTRUCTION =
-  "Use the supplied reference image ONLY as the identity reference for the adult female character. " +
-  "Preserve the same woman's facial structure, hairstyle, apparent age, skin tone, and overall likeness. " +
-  "Do not copy the reference background, pose, crop, or lighting; create the requested scene naturally. " +
-  "Do not turn her into a generic stock-photo model.";
+  "Use the supplied reference image ONLY as the identity reference for the person in the scene. " +
+  "Preserve that same person's facial structure, hairstyle, apparent age, and skin tone — whatever " +
+  "their apparent gender, exactly as shown in the reference. Do not copy the reference background, " +
+  "pose, crop, or lighting; create the requested scene naturally. Do not turn them into a generic " +
+  "stock-photo model.";
 
 /** AI b-roll for a beat — kie.ai (nano-banana image + Ken Burns, or Veo video), 69labs/Grok, or Runware. */
 async function acquireAi(
