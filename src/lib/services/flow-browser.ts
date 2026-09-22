@@ -327,7 +327,18 @@ async function submitPrompt(page: Page, input: Locator): Promise<void> {
 async function ensureNanoBanana(page: Page): Promise<void> {
   const wanted = (getSetting("FLOW_IMAGE_MODEL") || "nano-banana-pro").replace(/[-_]+/g, " ").trim();
   const pattern = wanted.toLowerCase().includes("pro") ? /Nano Banana Pro/i : /Nano Banana/i;
-  if (await page.getByText(pattern).first().isVisible().catch(() => false)) return;
+  // Poll, don't snapshot: this is a single isVisible() check racing Flow's own re-render of
+  // the model chip right after a prompt submits/a generation finishes — confirmed live, a
+  // manual read of the SAME page moments after a batch of "Could not confirm" failures found
+  // the chip plainly visible ("🍌 Nano Banana Pro crop_16_9"), unchanged the whole time. A
+  // one-shot check has no way to tell "wrong model" from "right model, not painted yet" apart;
+  // giving it a few seconds to settle does, at the cost of a few hundred ms on the common path
+  // where it's already there.
+  const confirmDeadline = Date.now() + 4_000;
+  while (Date.now() < confirmDeadline) {
+    if (await page.getByText(pattern).first().isVisible().catch(() => false)) return;
+    await page.waitForTimeout(250);
+  }
 
   // Flow normally displays the active model beside the prompt. If it doesn't, try the
   // nearby model/options controls and select Nano Banana explicitly. We fail closed if
