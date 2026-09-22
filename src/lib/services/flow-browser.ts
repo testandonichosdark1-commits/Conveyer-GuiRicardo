@@ -7,6 +7,7 @@ import { chromium, type BrowserContext, type Locator, type Page, type Response }
 import { getSetting } from "../settings";
 import { DATA_DIR } from "../run-paths";
 import { checkCancelled } from "../cancellation";
+import { log } from "../logger";
 
 /**
  * Experimental Google Flow browser adapter.
@@ -324,9 +325,46 @@ async function submitPrompt(page: Page, input: Locator): Promise<void> {
   await input.press("Enter");
 }
 
-async function ensureNanoBanana(page: Page): Promise<void> {
-  const wanted = (getSetting("FLOW_IMAGE_MODEL") || "nano-banana-pro").replace(/[-_]+/g, " ").trim();
-  const pattern = wanted.toLowerCase().includes("pro") ? /Nano Banana Pro/i : /Nano Banana/i;
+/**
+ * Flow's model picker lists THREE Nano Banana variants — Pro, 2, and 2 Lite — and "Nano
+ * Banana 2" is a literal text PREFIX of "Nano Banana 2 Lite". A plain substring match
+ * (what the old two-way pro/not-pro check effectively did) would confirm "2 Lite" as
+ * correct when "2" was wanted, or vice versa via `.last()` in the option list. Build an
+ * exact variant pattern instead, so confirming/selecting one model can never silently
+ * accept or click a different one.
+ */
+function modelPattern(label: string): RegExp {
+  const norm = label.toLowerCase().replace(/[-_]+/g, " ");
+  if (/\b2\s*lite\b/.test(norm)) return /Nano Banana 2\s*Lite/i;
+  if (/\bpro\b/.test(norm)) return /Nano Banana Pro/i;
+  if (/\b2\b/.test(norm)) return /Nano Banana 2(?!\s*Lite)/i;
+  return /Nano Banana(?!\s*(?:Pro|2))/i; // bare "Nano Banana" — excludes Pro/2/2 Lite
+}
+
+/**
+ * Opens Flow's model dropdown (the "🍌 <model> ▾" chip beside the prompt — clicking the
+ * active model's own label is what opens the picker) and clicks the option matching
+ * `label`. Returns false rather than throwing: callers decide whether a failed switch is
+ * fatal (initial confirm) or just means "stay on the current model" (credit fallback).
+ */
+async function selectFlowModel(page: Page, label: string): Promise<boolean> {
+  const pattern = modelPattern(label);
+  const trigger = page.getByText(/Nano Banana/i).first();
+  if (!(await trigger.isVisible().catch(() => false))) return false;
+  await trigger.click().catch(() => undefined);
+  const option = page.getByText(pattern, { exact: false }).last();
+  const opened = await option.isVisible({ timeout: 2_000 }).catch(() => false);
+  if (!opened) {
+    await page.keyboard.press("Escape").catch(() => undefined);
+    return false;
+  }
+  await option.click();
+  return true;
+}
+
+async function ensureNanoBanana(page: Page, overrideModel?: string): Promise<void> {
+  const wanted = (overrideModel || getSetting("FLOW_IMAGE_MODEL") || "nano-banana-pro").replace(/[-_]+/g, " ").trim();
+  const pattern = modelPattern(wanted);
   // Poll, don't snapshot: this is a single isVisible() check racing Flow's own re-render of
   // the model chip right after a prompt submits/a generation finishes — confirmed live, a
   // manual read of the SAME page moments after a batch of "Could not confirm" failures found
@@ -358,7 +396,7 @@ async function ensureNanoBanana(page: Page): Promise<void> {
     await page.keyboard.press("Escape").catch(() => undefined);
   }
   throw new FlowBrowserError(
-    `Could not confirm ${wanted} in Google Flow. Select Nano Banana Pro once in the visible browser and retry.`,
+    `Could not confirm ${wanted} in Google Flow. Select it once in the visible browser and retry.`,
     "ui"
   );
 }
@@ -604,6 +642,59 @@ async function detectFlowFailure(page: Page): Promise<FlowBrowserError | null> {
   return null;
 }
 
+/**
+ * Runs that have downgraded off their configured Flow model after it hit a credit wall.
+ * Remembered per run so every beat AFTER the first credit failure starts directly on the
+ * fallback model instead of re-submitting to the exhausted one and paying for the same
+ * wait/detect cycle again each time.
+ */
+const creditFallbackRuns = new Set<string>();
+
+/** One fill-prompt/submit/wait-for-image attempt against whichever model is active on the page. */
+async function runFlowGeneration(
+  page: Page,
+  runId: string,
+  prompt: string,
+  aspect: string,
+  timeoutMs: number
+): Promise<CapturedImage[]> {
+  const candidates: CapturedImage[] = [];
+  const tasks = new Set<Promise<void>>();
+  let lastCaptureAt = 0;
+  const onResponse = (response: Response) => {
+    const task = captureResponse(response).then((image) => {
+      if (image) {
+        candidates.push(image);
+        lastCaptureAt = Date.now();
+      }
+    }).finally(() => tasks.delete(task));
+    tasks.add(task);
+  };
+  page.on("response", onResponse);
+  try {
+    const input = await promptBox(page);
+    await input.fill(prompt.slice(0, 12_000));
+    await submitPrompt(page, input);
+    const deadline = Date.now() + timeoutMs;
+    let nextFailureCheck = Date.now() + 4_000;
+    while (Date.now() < deadline) {
+      if (runId) checkCancelled(runId);
+      if (await pageHasLoginPrompt(page)) throw new FlowBrowserError("Google session expired during generation.", "login");
+      if (candidates.length && Date.now() - lastCaptureAt >= 4_000) break;
+      if (Date.now() >= nextFailureCheck) {
+        const failure = await detectFlowFailure(page);
+        if (failure) throw failure;
+        nextFailureCheck = Date.now() + 4_000;
+      }
+      await page.waitForTimeout(500);
+    }
+    await Promise.allSettled([...tasks]);
+    return candidates;
+  } finally {
+    page.off("response", onResponse);
+  }
+}
+
 /** Generate one full-size image through the Google Flow web UI and save it as PNG. */
 export async function generateFlowImage(
   runId: string,
@@ -619,8 +710,14 @@ export async function generateFlowImage(
     if (await pageHasLoginPrompt(page)) {
       throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
     }
+
+    const configuredModel = getSetting("FLOW_IMAGE_MODEL") || "nano-banana-pro";
+    const fallbackModel = getSetting("FLOW_CREDIT_FALLBACK_MODEL").trim();
+    const alreadyDowngraded = runId && creditFallbackRuns.has(runId);
+    const startModel = alreadyDowngraded && fallbackModel ? fallbackModel : configuredModel;
+
     const input = await promptBox(page);
-    await ensureNanoBanana(page);
+    await ensureNanoBanana(page, startModel);
     // Remove any composer attachment left by a previous beat. Then attach the
     // portrait only for a beat explicitly routed as a character scene. This keeps
     // object/detail shots from inheriting the housekeeper by accident.
@@ -629,50 +726,36 @@ export async function generateFlowImage(
       await uploadFlowReference(page, input, options.referenceImagePath);
     }
     const timeoutMs = settingInt("FLOW_GENERATION_TIMEOUT_SEC", 240, 30, 900) * 1000;
-    const candidates: CapturedImage[] = [];
-    const tasks = new Set<Promise<void>>();
-    let lastCaptureAt = 0;
-    const onResponse = (response: Response) => {
-      const task = captureResponse(response).then((image) => {
-        if (image) {
-          candidates.push(image);
-          lastCaptureAt = Date.now();
-        }
-      }).finally(() => tasks.delete(task));
-      tasks.add(task);
-    };
-    page.on("response", onResponse);
+    const effectiveAspect = aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9";
 
+    let candidates: CapturedImage[];
     try {
-      await input.fill(prompt.slice(0, 12_000));
-      await submitPrompt(page, input);
-      const deadline = Date.now() + timeoutMs;
-      let nextFailureCheck = Date.now() + 4_000;
-      while (Date.now() < deadline) {
-        if (runId) checkCancelled(runId);
-        if (await pageHasLoginPrompt(page)) throw new FlowBrowserError("Google session expired during generation.", "login");
-        if (candidates.length && Date.now() - lastCaptureAt >= 4_000) break;
-        if (Date.now() >= nextFailureCheck) {
-          const failure = await detectFlowFailure(page);
-          if (failure) throw failure;
-          nextFailureCheck = Date.now() + 4_000;
-        }
-        await page.waitForTimeout(500);
+      candidates = await runFlowGeneration(page, runId, prompt, effectiveAspect, timeoutMs);
+    } catch (e) {
+      // A credit wall on the model just tried, with an unexhausted fallback configured and
+      // not already in use: switch model and retry this SAME prompt once, rather than
+      // failing the beat or (if kie fallback is off) the whole run over money left on a
+      // model the operator has a cheaper alternative for. Any other failure (login, UI,
+      // timeout) is unchanged — retrying those against a different model wouldn't help.
+      const isCredits = e instanceof FlowBrowserError && e.code === "credits";
+      if (!isCredits || !fallbackModel || startModel.trim().toLowerCase() === fallbackModel.toLowerCase() || !(await selectFlowModel(page, fallbackModel))) {
+        throw e;
       }
-      await Promise.allSettled([...tasks]);
-      const best = chooseBestCapturedImage(candidates, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
-      fs.mkdirSync(path.dirname(outPath), { recursive: true });
-      if (best) {
-        await sharp(best.buffer).png().toFile(outPath);
-        return outPath;
-      }
-      if (await tryDownloadFromUi(page, outPath)) return outPath;
-      throw new FlowBrowserError(
-        `No full-size Flow image was captured within ${Math.round(timeoutMs / 1000)}s. The UI may have changed.`,
-        "timeout"
-      );
-    } finally {
-      page.off("response", onResponse);
+      if (runId) creditFallbackRuns.add(runId);
+      log(runId, "warn", `Google Flow: ${startModel} is out of credit — switched to ${fallbackModel} for this and every later beat`, { stage: "visual" });
+      candidates = await runFlowGeneration(page, runId, prompt, effectiveAspect, timeoutMs);
     }
+
+    const best = chooseBestCapturedImage(candidates, effectiveAspect);
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    if (best) {
+      await sharp(best.buffer).png().toFile(outPath);
+      return outPath;
+    }
+    if (await tryDownloadFromUi(page, outPath)) return outPath;
+    throw new FlowBrowserError(
+      `No full-size Flow image was captured within ${Math.round(timeoutMs / 1000)}s. The UI may have changed.`,
+      "timeout"
+    );
   });
 }

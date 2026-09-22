@@ -168,6 +168,7 @@ export const SETTING_KEYS = [
   "FLOW_GENERATION_TIMEOUT_SEC", // Max wait for one generated image
   "FLOW_FALLBACK_PROVIDER",    // none | kie — what to do if the Flow UI fails
   "FLOW_IMAGE_MODEL",          // Model label/id expected in Flow (Nano Banana Pro)
+  "FLOW_CREDIT_FALLBACK_MODEL", // Model to switch to for the rest of the run when FLOW_IMAGE_MODEL runs out of credit (e.g. Nano Banana 2). Blank = disabled.
   "FLOW_ASPECT_RATIO",         // Image aspect ratio selected/validated by the worker
   "FLOW_REGEN_ATTEMPTS",       // Flow generations per beat after visual quality scoring (default 1)
   "FLOW_PROMPT_SELECTOR",      // Optional CSS selector override for Flow prompt box
@@ -601,6 +602,7 @@ export const DEFAULTS: Record<SettingKey, string> = {
   FLOW_GENERATION_TIMEOUT_SEC: "240",
   FLOW_FALLBACK_PROVIDER: "none",
   FLOW_IMAGE_MODEL: defaultAiModel("flow_browser", "image"),
+  FLOW_CREDIT_FALLBACK_MODEL: "Nano Banana 2",
   FLOW_ASPECT_RATIO: "16:9",
   FLOW_REGEN_ATTEMPTS: "1",
   FLOW_PROMPT_SELECTOR: "",
