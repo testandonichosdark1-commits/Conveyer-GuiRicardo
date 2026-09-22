@@ -3590,10 +3590,11 @@ async function acquireAi(
       // untouched here; see the kie branch below for that decision).
       provider = "kie";
     } else {
-      let best: { path: string; score: number } | null = null;
+      let best: { path: string; score: number; model: string } | null = null;
       let flowError: Error | null = null;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         const tmpImg = path.join(os.tmpdir(), `flow_${runId.slice(0, 8)}_${beat.index}_${attempt}.png`);
+        let usedModel = "";
         try {
           const flowPrompt = characterReferencePath
             ? `${buildPrompt(VARIANTS[attempt % VARIANTS.length])}, ${CHARACTER_REFERENCE_INSTRUCTION}`
@@ -3604,13 +3605,14 @@ async function acquireAi(
             `Beat ${beat.index}: Google Flow/Nano Banana generation started (${attempt + 1}/${maxAttempts})${characterReferencePath ? " — character reference active" : ""}`,
             { stage: "visual" }
           );
-          await generateFlowImage(
+          const result = await generateFlowImage(
             runId,
             flowPrompt,
             tmpImg,
             getSetting("FLOW_ASPECT_RATIO") || aspect,
             characterReferencePath ? { referenceImagePath: characterReferencePath } : undefined
           );
+          usedModel = result.model;
         } catch (e) {
           flowError = e as Error;
           try { fs.unlinkSync(tmpImg); } catch {}
@@ -3620,7 +3622,7 @@ async function acquireAi(
         const score = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, tmpImg);
         if (!best || score > best.score) {
           if (best) { try { fs.unlinkSync(best.path); } catch {} }
-          best = { path: tmpImg, score };
+          best = { path: tmpImg, score, model: usedModel };
         } else {
           try { fs.unlinkSync(tmpImg); } catch {}
         }
@@ -3632,8 +3634,12 @@ async function acquireAi(
       if (best) {
         kenBurns(best.path, outPath, beatDurSec, beat.index % 2 === 1, resolution);
         try { fs.unlinkSync(best.path); } catch {}
-        log(runId, "info", `Beat ${beat.index}: AI still via Google Flow/Nano Banana Pro + Ken Burns — match ${best.score}%`, { stage: "visual" });
-        return { path: outPath, kind: "ai", provider: "flow:nano-banana-pro" };
+        // Reflects whichever model actually produced this image — the configured
+        // FLOW_IMAGE_MODEL, or FLOW_IMAGE_MODEL_FALLBACK if the primary hit a limit and
+        // this beat fell through to it (see generateFlowImage's doc comment).
+        const modelSlug = best.model.trim().toLowerCase().replace(/\s+/g, "-") || "nano-banana-pro";
+        log(runId, "info", `Beat ${beat.index}: AI still via Google Flow/${best.model || "Nano Banana"} + Ken Burns — match ${best.score}%`, { stage: "visual" });
+        return { path: outPath, kind: "ai", provider: `flow:${modelSlug}` };
       }
 
       if (!flowFallbackToKie) {

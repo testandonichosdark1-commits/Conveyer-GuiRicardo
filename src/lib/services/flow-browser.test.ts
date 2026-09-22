@@ -25,6 +25,8 @@ vi.mock("../cancellation", () => ({ checkCancelled: () => {} }));
 import {
   normalizeFlowModelLabel,
   veoModelLabelMatches,
+  flowModelLabelMatches,
+  isModelIndependentFailure,
   isVideoResponseCandidate,
   newestVideoCandidate,
   looksLikeNonVideoBody,
@@ -69,6 +71,35 @@ describe("veoModelLabelMatches", () => {
   it("is empty-safe", () => {
     expect(veoModelLabelMatches("", "Veo 3.1 Fast")).toBe(false);
     expect(veoModelLabelMatches("veo-3.1-fast", "")).toBe(false);
+  });
+});
+
+describe("flowModelLabelMatches — Nano Banana tiers (same matcher, shared with Veo)", () => {
+  it("matches the exact tier", () => {
+    expect(flowModelLabelMatches("nano-banana-2", "Nano Banana 2")).toBe(true);
+    expect(flowModelLabelMatches("nano-banana-pro", "Nano Banana Pro")).toBe(true);
+  });
+  it("tolerates cosmetic decoration", () => {
+    expect(flowModelLabelMatches("nano-banana-2", "Nano Banana 2 (New)")).toBe(true);
+  });
+  it("never lets the plain tier match Pro, or Pro match a numbered tier", () => {
+    expect(flowModelLabelMatches("nano-banana", "Nano Banana Pro")).toBe(false);
+    expect(flowModelLabelMatches("nano-banana-pro", "Nano Banana 2")).toBe(false);
+    expect(flowModelLabelMatches("nano-banana-2", "Nano Banana Pro")).toBe(false);
+  });
+});
+
+describe("isModelIndependentFailure — which failures skip the fallback model", () => {
+  it("login and config problems are never worth retrying with a different model", () => {
+    expect(isModelIndependentFailure("login")).toBe(true);
+    expect(isModelIndependentFailure("config")).toBe(true);
+  });
+  it("everything else is worth trying the fallback for — including an unrecognized/undefined code", () => {
+    expect(isModelIndependentFailure("credits")).toBe(false);
+    expect(isModelIndependentFailure("ui")).toBe(false);
+    expect(isModelIndependentFailure("timeout")).toBe(false);
+    expect(isModelIndependentFailure("capture")).toBe(false);
+    expect(isModelIndependentFailure(undefined)).toBe(false);
   });
 });
 

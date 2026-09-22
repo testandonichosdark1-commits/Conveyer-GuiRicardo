@@ -42,7 +42,7 @@ vi.mock("./flow-browser", () => ({
     flowGen.image(outPath);
     if (ctl.flowImageFails) return Promise.reject(new FakeFlowBrowserError("flow image UI failure", "ui"));
     fs.writeFileSync(outPath, "png-bytes");
-    return Promise.resolve(outPath);
+    return Promise.resolve({ path: outPath, model: "nano banana pro" });
   },
   generateFlowVideo: (_runId: string, _prompt: string, outPath: string) => {
     flowGen.video(outPath);

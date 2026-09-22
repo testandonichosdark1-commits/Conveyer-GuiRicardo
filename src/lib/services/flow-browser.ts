@@ -347,32 +347,55 @@ async function submitPrompt(page: Page, input: Locator): Promise<void> {
   await input.press("Enter");
 }
 
-async function ensureNanoBanana(page: Page): Promise<void> {
-  const wanted = (getSetting("FLOW_IMAGE_MODEL") || "nano-banana-pro").replace(/[-_]+/g, " ").trim();
-  const pattern = wanted.toLowerCase().includes("pro") ? /Nano Banana Pro/i : /Nano Banana/i;
-  if (await page.getByText(pattern).first().isVisible().catch(() => false)) return;
+/**
+ * Confirm (or select) a specific image-model tier by exact label — "nano-banana-pro" ->
+ * "Nano Banana Pro", "nano-banana-2" -> "Nano Banana 2", etc. Shared by the primary model
+ * and its configured fallback (see FLOW_IMAGE_MODEL_FALLBACK / generateFlowImage), so both
+ * go through the identical selection + fail-loud contract — picking a tier is picking a
+ * tier, whichever one is currently wanted.
+ */
+async function ensureImageModel(page: Page, wantedRaw: string): Promise<void> {
+  const wanted = wantedRaw.replace(/[-_]+/g, " ").trim();
+  if (await page.getByText(new RegExp(wanted.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")).first().isVisible().catch(() => false)) return;
 
   // Flow normally displays the active model beside the prompt. If it doesn't, try the
-  // nearby model/options controls and select Nano Banana explicitly. We fail closed if
-  // the model cannot be confirmed: silently generating with another model would violate
-  // the operator's "Nano Banana only" selection.
+  // nearby model/options controls and select it explicitly. We fail closed if the model
+  // cannot be confirmed: silently generating with another model would violate the
+  // operator's selection (or, on the fallback path, misreport which tier actually ran).
   const controls = page.getByRole("button", { name: /Model|Modelo|Image|Imagem|Options|Opções|Settings|Configurações/i });
   const count = Math.min(await controls.count().catch(() => 0), 8);
   for (let i = count - 1; i >= 0; i--) {
     const control = controls.nth(i);
     if (!(await control.isVisible().catch(() => false))) continue;
     await control.click().catch(() => undefined);
-    const option = page.getByText(pattern, { exact: false }).last();
-    if (await option.isVisible().catch(() => false)) {
-      await option.click();
-      return;
+    // Iterate visible "Nano Banana …" text nodes and pick the one that actually NAMES the
+    // wanted tier (flowModelLabelMatches), rather than trusting the first loose text match
+    // — Flow's menu shows "Nano Banana", "Nano Banana Pro" (and now "Nano Banana 2") next
+    // to each other, and a loose match would happily pick the wrong one.
+    const optionCandidates = page.getByText(/Nano Banana/i);
+    const optCount = Math.min(await optionCandidates.count().catch(() => 0), 20);
+    for (let j = optCount - 1; j >= 0; j--) {
+      const opt = optionCandidates.nth(j);
+      if (!(await opt.isVisible().catch(() => false))) continue;
+      const text = await opt.innerText().catch(() => "");
+      if (flowModelLabelMatches(wanted, text)) {
+        await opt.click();
+        return;
+      }
     }
     await page.keyboard.press("Escape").catch(() => undefined);
   }
   throw new FlowBrowserError(
-    `Could not confirm ${wanted} in Google Flow. Select Nano Banana Pro once in the visible browser and retry.`,
+    `Could not confirm "${wanted}" in Google Flow. Select it once in the visible browser and retry, or correct the model setting.`,
     "ui"
   );
+}
+
+/** Confirms the operator's PRIMARY configured image model — FLOW_IMAGE_MODEL, default
+ *  "nano-banana-pro". Thin wrapper kept for readability at call sites. */
+async function ensureNanoBanana(page: Page): Promise<void> {
+  const wanted = (getSetting("FLOW_IMAGE_MODEL") || "nano-banana-pro").replace(/[-_]+/g, " ").trim();
+  await ensureImageModel(page, wanted);
 }
 
 /**
@@ -386,25 +409,32 @@ export function normalizeFlowModelLabel(s: string): string {
 }
 
 /** Words that decorate a menu label without naming a distinct model/tier. Stripped before
- *  comparison so "Veo 3.1 Fast (Beta)" / "New: Veo 3.1 Fast" still match "veo-3.1-fast" —
- *  but "Fast"/"Quality"/a different version number are NEVER in this list, because those
- *  DO distinguish one Veo tier from another and must keep failing the match. */
-const VEO_LABEL_DECORATION = /\b(new|beta|preview)\b/g;
+ *  comparison so "Veo 3.1 Fast (Beta)" / "New: Veo 3.1 Fast" / "Nano Banana 2 (New)" still
+ *  match their plain configured id — but "Fast"/"Quality"/"Pro"/a version NUMBER are NEVER
+ *  in this list, because those DO distinguish one tier from another and must keep failing
+ *  the match. */
+const FLOW_LABEL_DECORATION = /\b(new|beta|preview)\b/g;
 
 /**
- * Does a candidate label (arbitrary text from the Flow UI) name the wanted Veo model?
+ * Does a candidate label (arbitrary text from the Flow UI) name the wanted model/tier?
  * Strips only cosmetic decoration (brackets, stray punctuation, "New"/"Beta"/"Preview")
  * and requires the REMAINDER to equal the wanted string exactly — not merely contain it —
- * so "veo-3.1" never matches a menu entry for "Veo 3.1 Fast" just because it contains the
- * shorter string as a prefix. Exported for unit tests.
+ * so "nano-banana" never matches a menu entry for "Nano Banana Pro" just because it
+ * contains the shorter string as a prefix (and "veo-3.1" never matches "Veo 3.1 Fast").
+ * Exported for unit tests. Used for both Veo tiers and Nano Banana tiers — the matching
+ * rule doesn't care which family of model names it's applied to.
  */
-export function veoModelLabelMatches(wanted: string, candidateText: string): boolean {
+export function flowModelLabelMatches(wanted: string, candidateText: string): boolean {
   const w = normalizeFlowModelLabel(wanted);
   if (!w) return false;
   const cleaned = candidateText.replace(/[()[\]]/g, " ").replace(/[^a-zA-Z0-9.\s-]/g, " ");
-  const c = normalizeFlowModelLabel(cleaned).replace(VEO_LABEL_DECORATION, " ").replace(/\s+/g, " ").trim();
+  const c = normalizeFlowModelLabel(cleaned).replace(FLOW_LABEL_DECORATION, " ").replace(/\s+/g, " ").trim();
   return c === w;
 }
+
+/** @deprecated kept as an alias — call sites and existing tests use the neutral
+ *  flowModelLabelMatches name now that the same matcher is shared with Nano Banana tiers. */
+export const veoModelLabelMatches = flowModelLabelMatches;
 
 /** The configured Veo model, normalized to plain words ("veo-3.1-fast" -> "veo 3.1 fast"). */
 function wantedVeoModel(): string {
@@ -497,10 +527,13 @@ async function ensureFlowMediaMode(page: Page, mode: "image" | "video"): Promise
   );
 }
 
-/** Ensure Image mode + Nano Banana are active. */
-async function ensureFlowImageMode(page: Page): Promise<void> {
+/** Ensure Image mode + a specific model are active. `modelOverride` (already
+ *  hyphen-to-space normalized) is used on a fallback attempt; omitted, this reads the
+ *  operator's configured FLOW_IMAGE_MODEL exactly as before this parameter existed. */
+async function ensureFlowImageMode(page: Page, modelOverride?: string): Promise<void> {
   await ensureFlowMediaMode(page, "image");
-  await ensureNanoBanana(page);
+  if (modelOverride) await ensureImageModel(page, modelOverride);
+  else await ensureNanoBanana(page);
 }
 
 /** Ensure Video mode + the configured Veo model are active. */
@@ -881,72 +914,131 @@ async function detectFlowFailure(page: Page, media: "image" | "video" = "image")
 }
 
 /** Generate one full-size image through the Google Flow web UI and save it as PNG. */
+/** One image-generation attempt with a SPECIFIC model — no fallback logic in here, that
+ *  lives in generateFlowImage() which calls this once or twice. */
+async function attemptFlowImage(
+  runId: string,
+  prompt: string,
+  outPath: string,
+  aspect: string,
+  options: { referenceImagePath?: string } | undefined,
+  model: string
+): Promise<string> {
+  if (runId) checkCancelled(runId);
+  const { page } = await launchBrowser();
+  await gotoFlow(page);
+  if (await pageHasLoginPrompt(page)) {
+    throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
+  }
+  const input = await promptBox(page);
+  await ensureFlowImageMode(page, model);
+  await ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
+  // Remove any composer attachment left by a previous beat. Then attach the
+  // portrait only for a beat explicitly routed as a character scene. This keeps
+  // object/detail shots from inheriting the housekeeper by accident.
+  await prepareComposerReference(page, input, options?.referenceImagePath ?? null);
+  const timeoutMs = flowImageTimeoutMs();
+  const candidates: CapturedImage[] = [];
+  const tasks = new Set<Promise<void>>();
+  let lastCaptureAt = 0;
+  const onResponse = (response: Response) => {
+    const task = captureResponse(response).then((image) => {
+      if (image) {
+        candidates.push(image);
+        lastCaptureAt = Date.now();
+      }
+    }).finally(() => tasks.delete(task));
+    tasks.add(task);
+  };
+  page.on("response", onResponse);
+
+  try {
+    await input.fill(prompt.slice(0, 12_000));
+    await submitPrompt(page, input);
+    const deadline = Date.now() + timeoutMs;
+    let nextFailureCheck = Date.now() + 4_000;
+    while (Date.now() < deadline) {
+      if (runId) checkCancelled(runId);
+      if (await pageHasLoginPrompt(page)) throw new FlowBrowserError("Google session expired during generation.", "login");
+      if (candidates.length && Date.now() - lastCaptureAt >= 4_000) break;
+      if (Date.now() >= nextFailureCheck) {
+        const failure = await detectFlowFailure(page);
+        if (failure) throw failure;
+        nextFailureCheck = Date.now() + 4_000;
+      }
+      await page.waitForTimeout(500);
+    }
+    await Promise.allSettled([...tasks]);
+    const best = chooseBestCapturedImage(candidates, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    if (best) {
+      await sharp(best.buffer).png().toFile(outPath);
+      return outPath;
+    }
+    if (await tryDownloadFromUi(page, outPath)) return outPath;
+    throw new FlowBrowserError(
+      `No full-size Flow image was captured within ${Math.round(timeoutMs / 1000)}s. The UI may have changed.`,
+      "timeout"
+    );
+  } finally {
+    page.off("response", onResponse);
+  }
+}
+
+/** A failure this specific rather than "the model tier is unavailable/limited" — trying a
+ *  different model would not help, so the fallback tier is never attempted for these. */
+export function isModelIndependentFailure(code: FlowBrowserError["code"] | undefined): boolean {
+  return code === "login" || code === "config";
+}
+
+export interface FlowImageResult {
+  path: string;
+  /** Which model actually produced this image — the primary FLOW_IMAGE_MODEL, or
+   *  FLOW_IMAGE_MODEL_FALLBACK if the primary hit a limit/error and a fallback was
+   *  configured. Lets the caller report the true provenance (e.g. "flow:nano-banana-2")
+   *  instead of always claiming the primary model ran. */
+  model: string;
+}
+
+/**
+ * Generate one full-size image through the Google Flow web UI and save it as PNG.
+ *
+ * Falls back to FLOW_IMAGE_MODEL_FALLBACK (default empty = no fallback, today's
+ * behavior unchanged) when the PRIMARY model (FLOW_IMAGE_MODEL) fails for any reason
+ * EXCEPT one no model choice can fix (`login`, `config`) — e.g. Nano Banana Pro hitting
+ * its own generation limit while Nano Banana / Nano Banana 2 still has quota. This is
+ * deliberately not gated on recognizing a specific "you've hit your limit" message: that
+ * exact wording has not been observed live, and a broad "any retryable failure" rule is
+ * more robust to Google changing it than a guessed regex would be. The cost of trying the
+ * fallback needlessly on a genuine full outage is a few extra seconds, not a paid retry —
+ * Flow spends the operator's own Google account, not a per-call bill.
+ */
 export async function generateFlowImage(
   runId: string,
   prompt: string,
   outPath: string,
   aspect = "16:9",
   options?: { referenceImagePath?: string }
-): Promise<string> {
+): Promise<FlowImageResult> {
   return enqueue(async () => {
-    if (runId) checkCancelled(runId);
-    const { page } = await launchBrowser();
-    await gotoFlow(page);
-    if (await pageHasLoginPrompt(page)) {
-      throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
-    }
-    const input = await promptBox(page);
-    await ensureFlowImageMode(page);
-    await ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
-    // Remove any composer attachment left by a previous beat. Then attach the
-    // portrait only for a beat explicitly routed as a character scene. This keeps
-    // object/detail shots from inheriting the housekeeper by accident.
-    await prepareComposerReference(page, input, options?.referenceImagePath ?? null);
-    const timeoutMs = flowImageTimeoutMs();
-    const candidates: CapturedImage[] = [];
-    const tasks = new Set<Promise<void>>();
-    let lastCaptureAt = 0;
-    const onResponse = (response: Response) => {
-      const task = captureResponse(response).then((image) => {
-        if (image) {
-          candidates.push(image);
-          lastCaptureAt = Date.now();
-        }
-      }).finally(() => tasks.delete(task));
-      tasks.add(task);
-    };
-    page.on("response", onResponse);
+    const primaryModel = (getSetting("FLOW_IMAGE_MODEL") || "nano-banana-pro").replace(/[-_]+/g, " ").trim();
+    const fallbackModel = getSetting("FLOW_IMAGE_MODEL_FALLBACK").replace(/[-_]+/g, " ").trim();
 
     try {
-      await input.fill(prompt.slice(0, 12_000));
-      await submitPrompt(page, input);
-      const deadline = Date.now() + timeoutMs;
-      let nextFailureCheck = Date.now() + 4_000;
-      while (Date.now() < deadline) {
-        if (runId) checkCancelled(runId);
-        if (await pageHasLoginPrompt(page)) throw new FlowBrowserError("Google session expired during generation.", "login");
-        if (candidates.length && Date.now() - lastCaptureAt >= 4_000) break;
-        if (Date.now() >= nextFailureCheck) {
-          const failure = await detectFlowFailure(page);
-          if (failure) throw failure;
-          nextFailureCheck = Date.now() + 4_000;
-        }
-        await page.waitForTimeout(500);
-      }
-      await Promise.allSettled([...tasks]);
-      const best = chooseBestCapturedImage(candidates, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
-      fs.mkdirSync(path.dirname(outPath), { recursive: true });
-      if (best) {
-        await sharp(best.buffer).png().toFile(outPath);
-        return outPath;
-      }
-      if (await tryDownloadFromUi(page, outPath)) return outPath;
-      throw new FlowBrowserError(
-        `No full-size Flow image was captured within ${Math.round(timeoutMs / 1000)}s. The UI may have changed.`,
-        "timeout"
+      const p = await attemptFlowImage(runId, prompt, outPath, aspect, options, primaryModel);
+      return { path: p, model: primaryModel };
+    } catch (e) {
+      const err = e as Error;
+      const code = err instanceof FlowBrowserError ? err.code : undefined;
+      if (!fallbackModel || isModelIndependentFailure(code)) throw err;
+      log(
+        runId,
+        "warn",
+        `Google Flow: "${primaryModel}" failed (${err.message.slice(0, 160)}) — trying fallback model "${fallbackModel}"`,
+        { stage: "visual" }
       );
-    } finally {
-      page.off("response", onResponse);
+      const p = await attemptFlowImage(runId, prompt, outPath, aspect, options, fallbackModel);
+      return { path: p, model: fallbackModel };
     }
   });
 }

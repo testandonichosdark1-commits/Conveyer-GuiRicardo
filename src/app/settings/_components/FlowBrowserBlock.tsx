@@ -87,6 +87,22 @@ export function FlowBrowserBlock({ val, set }: { val: Val; set: Set }) {
         </div>
       </div>
 
+      <div>
+        <label className="label">{tr("Modèle de secours si le modèle image atteint sa limite", "Fallback model if the image model hits its limit")}</label>
+        <select className="input" value={val("FLOW_IMAGE_MODEL_FALLBACK") || ""} onChange={(e) => set("FLOW_IMAGE_MODEL_FALLBACK", e.target.value)}>
+          <option value="">{tr("Aucun — échouer / basculer sur kie.ai selon le réglage ci-dessus", "None — fail / fall to kie.ai per the setting above")}</option>
+          <option value="nano-banana-2">Nano Banana 2</option>
+          <option value="nano-banana">Nano Banana</option>
+          <option value="nano-banana-pro">Nano Banana Pro</option>
+        </select>
+        <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+          {tr(
+            "Quand le modèle image principal (ci-dessus) échoue pour une raison qu'un autre modèle pourrait contourner (limite atteinte, erreur), Flow essaie ce modèle avant d'abandonner le plan. Vide = comportement actuel (aucun changement de modèle).",
+            "When the primary image model (above) fails for a reason a different model might get past (a hit limit, an error), Flow tries this one before giving up on the beat. Empty = today's behavior (no model switch)."
+          )}
+        </div>
+      </div>
+
       <div className="grid-2" style={{ gap: 12 }}>
         <div>
           <label className="label">{tr("Délai image (s)", "Image timeout (s)")}</label>

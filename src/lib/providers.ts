@@ -220,7 +220,11 @@ export const AI_PROVIDERS: AiProviderMeta[] = [
     selectLabel: "Google Flow (browser — experimental)",
     image: {
       key: "FLOW_IMAGE_MODEL",
-      models: [{ id: "nano-banana-pro", label: "Nano Banana Pro", recommended: true }],
+      models: [
+        { id: "nano-banana-pro", label: "Nano Banana Pro", recommended: true },
+        { id: "nano-banana-2", label: "Nano Banana 2" },
+        { id: "nano-banana", label: "Nano Banana" },
+      ],
     },
     // Ids are kebab-case; ensureVeoModel() normalizes both this and Flow's own visible
     // label text (lowercase, hyphens/underscores → spaces, collapsed whitespace) before

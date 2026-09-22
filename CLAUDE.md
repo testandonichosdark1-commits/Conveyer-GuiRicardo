@@ -316,11 +316,11 @@ Nano Banana stills and Veo videos; it is not image-only.
   connectivity + login — they never generate anything and spend no credits.** Success message:
   *"Normal Chrome is connected to Google Flow. Session is ready; no image or video was generated."*
 
-### Image path (Nano Banana) — unchanged by the Veo work
+### Image path (Nano Banana, + its own model-tier fallback)
 
-`generateFlowImage()`: `ensureFlowImageMode` (mode switch + `ensureNanoBanana` — confirms the
-configured `FLOW_IMAGE_MODEL`, e.g. `nano-banana-pro`, is the ACTIVE model; **fails loud**, never
-silently generates on a different model) → `ensureFlowAspectRatio` (best-effort) →
+`generateFlowImage()`: `ensureFlowImageMode` (mode switch + `ensureImageModel` — confirms the
+wanted model, e.g. `nano-banana-pro`, is the ACTIVE model; **fails loud**, never silently
+generates on a different model) → `ensureFlowAspectRatio` (best-effort) →
 `prepareComposerReference` (clear any previous beat's attachment, attach the character reference
 only when `beatWantsCharacterReference(beat)` says so) → fill prompt → `submitPrompt` (accessible
 Generate button → `form.requestSubmit()` → `Enter`, in that order — the button is looked for
@@ -328,7 +328,39 @@ Generate button → `form.requestSubmit()` → `Enter`, in that order — the bu
 result from network responses (`image/*` content-type, ≥512×512, chosen by
 `chooseBestCapturedImage()` against the target aspect) or, failing that, the Download button →
 `FLOW_REGEN_ATTEMPTS` (default 1) scored attempts against `REAL_MATCH_THRESHOLD`/`AI_MATCH_THRESHOLD`
-→ Ken Burns → `provider: "flow:nano-banana-pro"`.
+→ Ken Burns → `provider: "flow:<model-slug>"` (e.g. `flow:nano-banana-pro`, `flow:nano-banana-2` —
+reflects whichever tier actually produced the image, see below).
+
+**`FLOW_IMAGE_MODEL_FALLBACK` (default empty = off) — a client asked for exactly this:
+"when Nano Banana Pro hits its limit, switch to Nano Banana 2 so it keeps generating."**
+`generateFlowImage` tries the primary `FLOW_IMAGE_MODEL` first; on ANY failure except one no
+model choice can fix (`FlowBrowserError` code `login` or `config` — `isModelIndependentFailure`),
+it logs a `warn` and retries the WHOLE attempt once against the configured fallback model
+(`ensureImageModel(page, fallbackModel)`, the same fail-loud confirmation as the primary). The
+returned `{ path, model }` tells the caller which tier actually ran, so the provider string and
+run log are never misattributed to the primary model when the fallback produced the image.
+
+- **Deliberately NOT gated on recognizing a specific "limit reached" message.** That exact
+  wording has never been observed against a live session, and a broad "any retryable failure"
+  rule is more robust to Google changing it than a guessed regex would be — the alternative was
+  either a fragile pattern-match or blocking this feature on a live probe. The cost of trying the
+  fallback needlessly on a genuine full outage is a few extra seconds of UI interaction, not a
+  paid retry: Flow spends the operator's own Google account, never a per-call bill.
+- **The matcher (`flowModelLabelMatches`, formerly `veoModelLabelMatches` — kept as an alias so
+  existing imports/tests don't break) is shared between Nano Banana tiers and Veo tiers.** It was
+  never Veo-specific logic to begin with, just named after its first caller; `ensureImageModel` and
+  `ensureVeoModel` both pick the visible menu option whose text, after stripping only cosmetic
+  decoration, equals the wanted id exactly — so `nano-banana` never matches a menu entry for
+  `Nano Banana Pro`, and `nano-banana-pro` never matches `Nano Banana 2`.
+- **The image-model catalog (`providers.ts`, `flow_browser.image.models`) now lists three tiers**
+  (`nano-banana-pro` recommended, `nano-banana-2`, `nano-banana`) so both `FLOW_IMAGE_MODEL` and
+  `FLOW_IMAGE_MODEL_FALLBACK` can be picked from a dropdown — plus the registry's normal free-text
+  escape for whatever Google names the next tier.
+- **Not yet validated against a live Flow session** (same caveat as the rest of this section): the
+  fallback retry's *orchestration* (which model runs when) is unit-tested via
+  `isModelIndependentFailure`/`flowModelLabelMatches`, but the actual in-browser retry — does
+  Flow really offer a distinct "Nano Banana 2" menu entry, and does switching mid-session work
+  cleanly — has not been driven against a real account. Confirm once and update this note.
 
 ### Video path (Veo) — NEW
 
@@ -430,6 +462,10 @@ Fast / Veo 3.1 / Veo 3.1 Fast (recommended) / Veo 3.1 Quality, plus the registry
 free-text escape for a label Google renames or adds later). The image/video split itself reuses the
 existing run-level "AI media" selector (`KIE_AI_MEDIA`: Images only / Auto / Video only, shown on `/`
 whenever Visual mode is AI or Mix) — Flow does not get a second, parallel media-mode setting.
+Added for the Nano Banana model-tier fallback: `FLOW_IMAGE_MODEL_FALLBACK` (default empty = off;
+see "Image path" above), exposed on `FlowBrowserBlock.tsx` as its own select next to the fallback-
+provider one — a DIFFERENT axis (which Flow model tier to retry with) from `FLOW_FALLBACK_PROVIDER`
+(which OTHER provider entirely to fall to once Flow itself is exhausted).
 
 ### Not yet validated against a live Flow session
 
