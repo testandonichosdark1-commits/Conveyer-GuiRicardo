@@ -446,6 +446,83 @@ then a short real run) before relying on it unattended, and update this note wit
 
 ---
 
+## Channels — per-channel override profile (API keys, voice provider, character reference, AI style)
+
+A channel (`channels` table) started as "a name + a default voice + a default avatar"
+(see `src/lib/channels.ts`'s own header). It is now a full account-isolation profile: a
+channel can carry its **own** provider API keys, its **own** voice provider (not just a
+voice id), its **own** character-reference portrait, and its **own** default AI image
+style — so one channel can run entirely on a different client's accounts without
+touching the global Settings page for every other channel.
+
+- **The mechanism is `getSetting()` itself, not 30 call sites.** `settings.ts` keeps an
+  `AsyncLocalStorage<Record<string,string>>` (`channelSettingOverrideStore`).
+  `setChannelSettingOverrides(map)` (`enterWith`, not a wrapping `.run()`) is called
+  **once**, in `studio-pipeline.ts`'s `activateChannelOverrides(cfg)`, right after
+  `readConfig()` resolves the run's channel — and every `getSetting(KEY)` call made
+  anywhere in the rest of that run's async chain (kie.ts, elevenlabs-voiceover.ts,
+  heygen-client.ts, ai33-voices.ts, stock-footage.ts, storyblocks.ts, …) sees the
+  override transparently, with **zero changes to any of them**. `enterWith` (not
+  `.run(store, fn)`) was chosen specifically so `runStudioPipeline`'s existing large
+  single try/finally body didn't need restructuring. Concurrent runs never cross:
+  each is its own top-level async invocation with its own promise chain, and Node's
+  async_hooks isolate the store per chain — the same primitive Next.js itself uses for
+  request-scoped state.
+- **Called on BOTH the fresh-run and Resume paths.** Resume re-enters the pipeline
+  without going through `/api/studio`, so it must re-resolve the channel and re-arm the
+  overrides itself — the same reasoning as the Avatar V eligibility re-check. Unlike the
+  avatar snapshot on `runs.avatar_*` (a billable choice that must replay exactly what a
+  run was created with), the channel's overrides are read **live** at pipeline start: an
+  API key or voice provider fixed on the channel AFTER a run was created still applies
+  on that run's Resume. This is deliberate, not an oversight — account config isn't a
+  cost decision that must stay pinned.
+- **`voice_id` alone was provider-blind.** A channel's `voice_id` is sent to whichever
+  TTS provider is active, but until now that provider was always the GLOBAL
+  `VOICEOVER_PROVIDER` — so an ai33/ai84 voice id on a channel only worked while the
+  whole app happened to be globally set to that provider. `channels.voice_provider`
+  (NULL = global) fixes this by also overriding `VOICEOVER_PROVIDER` itself for that
+  channel's runs.
+- **`api_keys_json` is filtered through `isSecretKey()` on BOTH write and read**
+  (`channels.ts`: `setChannelApiKeysJson`, `filterToSecretKeys`) — a malformed or
+  hand-crafted request body can never smuggle an override for a non-credential setting
+  (e.g. `FFMPEG_PATH`) onto a channel. The UI's own key list
+  (`app/channels/_components/ChannelApiKeysField.tsx`) is a **display** convenience,
+  duplicated rather than imported from `settings.ts` — that module pulls in `./db`
+  (better-sqlite3, a native Node module) and must never be imported from client code,
+  same reason `full-settings/_groups.ts` keeps its own key list. The actual security
+  boundary is `isSecretKey()`, enforced server-side, independent of what the UI shows.
+- **`character_reference_path` has its OWN setter and is deliberately absent from
+  `updateChannel`'s SQL.** It is managed only by
+  `/api/channels/[id]/character-reference` (GET/POST/DELETE, same contract as the
+  global `/api/settings/character-reference`, storage under
+  `DATA_DIR/channels/<id>/`), so an ordinary channel-form save — which has no field for
+  it — can never blank it out. `CharacterReferenceField.tsx` was generalized with an
+  `endpoint` prop (default unchanged) to serve both the global and per-channel cases
+  from one component.
+- **Never send `api_keys_json` (raw) to the browser.** Every API route returns
+  `toClientChannel(channel)`, which replaces it with `api_keys` — a masked map
+  (`shortMask`, the same first4…last4 convention as `getMaskedSettings()`, exported
+  from `settings.ts` for exactly this reuse). Saving back respects the same
+  "don't-overwrite-a-mask" rule `/api/settings` already uses: `mergeChannelApiKeys`
+  keeps the stored value for any field still containing `…`, clears the override for a
+  field explicitly emptied, and only stores fields that changed.
+- **`ai_style` (Default AI image style) needed no backend work at all** — it was
+  already a channel column, already resolved at `/api/studio` create-time
+  (`aiStyle: body.aiStyle ?? channel?.ai_style ?? undefined`) into `config_json`, and
+  already read by the pipeline (`acquireVisual`'s `opts.aiStyle`, which
+  `visual-source.ts` prefers over the global `AI_IMAGE_STYLE`). It had only been
+  **hidden from the Chaînes UI** ("channels default these to global settings at run
+  time" — no longer true for this field); re-exposing the textarea was the whole fix.
+- **`ChannelVoiceFields` is a real component, not inlined into the parent's `fields()`
+  closure.** `fields()` in `channels/page.tsx` is a plain function invoked a *variable*
+  number of times per render (once for the create draft, plus once per channel
+  currently being edited) — calling `useVoiceCatalogue()`, a hook, directly inside it
+  would violate the Rules of Hooks the moment the edited channel changes. Extracting a
+  genuine `<ChannelVoiceFields>` component gives each rendered instance its own correct
+  hook state.
+
+---
+
 ## Key external services
 
 | Service | Used for | Setting |
