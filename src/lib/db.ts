@@ -249,6 +249,20 @@ tryAddColumn("channels", "visual_prompt TEXT");
 tryAddColumn("channels", "voice_id TEXT");
 // Per-channel voiceover speed override (NULL = global TTS_SPEED). Same global-vs-channel model as voice_id.
 tryAddColumn("channels", "voice_speed REAL");
+// Which TTS provider `voice_id` above is sent to (NULL = global VOICEOVER_PROVIDER). Exists
+// because voice_id alone is provider-BLIND: without this, a channel's ai33/ai84 voice id
+// is only usable while the whole app happens to be globally set to that provider. See
+// src/lib/channels.ts channelSettingOverrides().
+tryAddColumn("channels", "voice_provider TEXT");
+// Per-channel character-reference portrait (absolute path under DATA_DIR/channels/<id>/).
+// NULL = global AI_CHARACTER_REFERENCE_PATH. Same global-vs-channel model as voice_id —
+// see src/app/api/channels/[id]/character-reference/route.ts.
+tryAddColumn("channels", "character_reference_path TEXT");
+// Per-channel API-key overrides — JSON object `{ "HEYGEN_API_KEY": "...", ... }`, restricted
+// to isSecretKey() settings only (see channels.ts channelSettingOverrides()). NULL/'{}' = use
+// every global key. Lets one channel run entirely on a different client's provider accounts
+// without touching the global Settings page.
+tryAddColumn("channels", "api_keys_json TEXT");
 
 // Avatar snapshot onto a run — so the pipeline reads a stable avatar even if the
 // library row is edited/deleted later. avatar_db_id is the library id; the

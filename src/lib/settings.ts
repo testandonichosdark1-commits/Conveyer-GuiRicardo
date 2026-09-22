@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import db from "./db";
 import { isRetiredGeminiModel, replacementForGeminiModel } from "./services/gemini-models";
 import { defaultAiModel } from "./providers";
@@ -383,7 +384,36 @@ const upsertStmt = db.prepare(
     "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')"
 );
 
+/**
+ * Per-run channel overrides — API keys, voice provider, character reference — applied
+ * TRANSPARENTLY to every `getSetting()` call made while a run is executing, with zero
+ * changes to the ~30 provider files that already call it (kie.ts, elevenlabs-voiceover.ts,
+ * heygen-client.ts, ai33-voices.ts, stock-footage.ts, …). AsyncLocalStorage.enterWith is
+ * used rather than a wrapping `.run(store, fn)` callback specifically so
+ * studio-pipeline.ts's existing single large try/finally body doesn't need to be
+ * restructured — it just calls `setChannelSettingOverrides()` once, right after resolving
+ * the run's channel, and every `await` after that point (across the whole pipeline: voice,
+ * beats, visuals, assembly) sees the override for the REST of this run's async chain.
+ * Concurrent runs never cross: each is its own top-level async invocation with its own
+ * promise chain, and Node's async_hooks isolates the store per chain — the same mechanism
+ * Next.js itself uses for request-scoped state.
+ */
+const channelSettingOverrideStore = new AsyncLocalStorage<Record<string, string>>();
+
+/** Call once per run, after resolving its channel — see the store's doc comment above. */
+export function setChannelSettingOverrides(overrides: Record<string, string>): void {
+  channelSettingOverrideStore.enterWith(overrides);
+}
+
+/** Explicit no-op override map — a run with no channel (or a channel with nothing set)
+ *  still establishes a store, so a stale one can never leak in from elsewhere. */
+export function clearChannelSettingOverrides(): void {
+  channelSettingOverrideStore.enterWith({});
+}
+
 export function getSetting(key: SettingKey): string {
+  const overrides = channelSettingOverrideStore.getStore();
+  if (overrides && overrides[key]) return overrides[key];
   const row = getStmt.get(key) as { value: string } | undefined;
   if (row && row.value !== "") return row.value;
   return process.env[key] ?? "";
@@ -408,13 +438,20 @@ export function getAllSettings(): Record<string, string> {
  * Both halves are hidden — a public key is still a credential the operator would rather
  * not have on screen, and it is treated like every other key here.
  */
+/** first4…last4 — the raw masking primitive, byte-identical to the pre-existing inline
+ *  version. Exported so any OTHER place that stores a secret value (e.g. a channel's own
+ *  API-key override) can mask it the exact same way, instead of growing a second masking
+ *  convention that could drift from this one. */
+export function shortMask(x: string): string {
+  return `${x.slice(0, 4)}…${x.slice(-4)}`;
+}
+
 function maskEntry(key: string, entry: string): string {
-  const short = (x: string) => `${x.slice(0, 4)}…${x.slice(-4)}`;
   if (key === "STORYBLOCKS_API_KEYS") {
     const i = entry.indexOf(":");
-    if (i > 0) return `${short(entry.slice(0, i))}:${short(entry.slice(i + 1))}`;
+    if (i > 0) return `${shortMask(entry.slice(0, i))}:${shortMask(entry.slice(i + 1))}`;
   }
-  return short(entry);
+  return shortMask(entry);
 }
 
 /** Safe version — masks secret keys/tokens/secrets. Handles multi-line key lists too. */

@@ -3,7 +3,8 @@ import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import db from "./db";
 import { log } from "./logger";
-import { getSetting } from "./settings";
+import { getSetting, setChannelSettingOverrides, clearChannelSettingOverrides } from "./settings";
+import { getChannel, channelSettingOverrides } from "./channels";
 import { resolveFfmpeg, resolveFfprobe, assertFfmpegAvailable } from "./ffmpeg-bin";
 import { getRunDir } from "./run-paths";
 import { pLimit } from "./plimit";
@@ -81,6 +82,12 @@ interface StudioConfig {
    * run's mode mid-video (config_json is what resumeStudioPipeline replays).
    */
   realFallback: "ai" | "strict";
+  /** The channel this run was created with (config_json.channelId, snapshotted at
+   *  /api/studio create-time). Re-resolved live at pipeline start (not itself
+   *  snapshotted) so a channel's API-key/voice-provider/character-reference overrides
+   *  edited AFTER the run was created still apply on Resume — unlike the avatar
+   *  snapshot, these are account-config, not a billable choice that must stay pinned. */
+  channelId: number | undefined;
 }
 
 function readConfig(runId: string): StudioConfig {
@@ -109,7 +116,27 @@ function readConfig(runId: string): StudioConfig {
     // Overlays default OFF: only an explicit `true` opts in. Missing/older runs → undefined,
     // which the pipeline treats exactly as OFF (byte-identical planning + assembly).
     overlays: cfg.overlays === true ? true : undefined,
+    channelId: Number.isFinite(Number((cfg as { channelId?: unknown }).channelId))
+      ? Number((cfg as { channelId?: unknown }).channelId)
+      : undefined,
   };
+}
+
+/**
+ * Establishes this run's channel overrides (API keys / voice provider / character
+ * reference) for the REST of this async execution — see settings.ts's
+ * setChannelSettingOverrides doc comment for how that propagates with zero changes to
+ * every provider file that calls getSetting(). Called once, right after readConfig, on
+ * BOTH the fresh-run and Resume paths — Resume re-enters the pipeline without going
+ * through /api/studio, so it must re-establish the context itself, exactly like the
+ * Avatar-V eligibility and avatar-existence checks already re-check live on Resume.
+ * A run with no channel gets an explicit empty override map (never a stale one).
+ */
+function activateChannelOverrides(cfg: StudioConfig): void {
+  const channel = cfg.channelId != null ? getChannel(cfg.channelId) : null;
+  const overrides = channelSettingOverrides(channel);
+  if (Object.keys(overrides).length) setChannelSettingOverrides(overrides);
+  else clearChannelSettingOverrides();
 }
 
 /**
@@ -317,6 +344,7 @@ export async function runStudioPipeline(
     // and summarized in one PERF log line at the end.
     const tStart = Date.now();
     const cfg = readConfig(runId);
+    activateChannelOverrides(cfg);
     const strictReal = strictRealFor(cfg);
     const avatar = readAvatar(runId);
     log(
@@ -772,6 +800,7 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
     beginStoryblocksRun();
     const tStart = Date.now();
     const cfg = readConfig(runId);
+    activateChannelOverrides(cfg);
     // Resume replays the ORIGINAL run's config_json, so real-footage-only survives a
     // resume even if global settings changed in between.
     const strictReal = strictRealFor(cfg);

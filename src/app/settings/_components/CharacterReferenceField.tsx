@@ -3,7 +3,20 @@
 import { useEffect, useRef, useState } from "react";
 import { useT } from "@/app/_i18n";
 
-export function CharacterReferenceField({ provider = "kie" }: { provider?: string }) {
+export function CharacterReferenceField({
+  provider = "kie",
+  endpoint = "/api/settings/character-reference",
+  label,
+  hint,
+}: {
+  provider?: string;
+  /** Lets a channel-scoped caller point this at its own
+   *  /api/channels/[id]/character-reference instead of the global setting. Same GET/
+   *  POST(multipart image)/DELETE contract on both. */
+  endpoint?: string;
+  label?: string;
+  hint?: string;
+}) {
   const tr = useT();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [hasImage, setHasImage] = useState(false);
@@ -13,11 +26,11 @@ export function CharacterReferenceField({ provider = "kie" }: { provider?: strin
 
   useEffect(() => {
     let alive = true;
-    fetch("/api/settings/character-reference", { cache: "no-store" })
+    fetch(endpoint, { cache: "no-store" })
       .then((r) => { if (alive) setHasImage(r.ok); })
       .catch(() => { if (alive) setHasImage(false); });
     return () => { alive = false; };
-  }, [previewNonce]);
+  }, [previewNonce, endpoint]);
 
   async function upload(file: File) {
     setBusy(true);
@@ -25,7 +38,7 @@ export function CharacterReferenceField({ provider = "kie" }: { provider?: strin
     try {
       const form = new FormData();
       form.set("image", file);
-      const r = await fetch("/api/settings/character-reference", { method: "POST", body: form });
+      const r = await fetch(endpoint, { method: "POST", body: form });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || r.statusText);
       setHasImage(true);
@@ -44,7 +57,7 @@ export function CharacterReferenceField({ provider = "kie" }: { provider?: strin
     setBusy(true);
     setMessage(null);
     try {
-      const r = await fetch("/api/settings/character-reference", { method: "DELETE" });
+      const r = await fetch(endpoint, { method: "DELETE" });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || r.statusText);
       setHasImage(false);
@@ -59,9 +72,9 @@ export function CharacterReferenceField({ provider = "kie" }: { provider?: strin
 
   return (
     <div style={{ display: "grid", gap: 8 }}>
-      <label className="label">{tr("Personnage de référence (optionnel)", "Character reference image (optional)")}</label>
+      <label className="label">{label ?? tr("Personnage de référence (optionnel)", "Character reference image (optional)")}</label>
       <div className="faint" style={{ fontSize: 12, lineHeight: 1.5 }}>
-        {tr(
+        {hint ?? tr(
           "Utilisée uniquement quand la scène IA mentionne une femme, une housekeeper ou une employée d'hôtel. Les scènes d'objets continuent en text-to-image normal.",
           "Used only when an AI scene mentions a woman, housekeeper, or female hotel worker. Object-only scenes stay normal text-to-image."
         )}
@@ -71,7 +84,7 @@ export function CharacterReferenceField({ provider = "kie" }: { provider?: strin
         {hasImage ? (
           <img
             key={previewNonce}
-            src={`/api/settings/character-reference?t=${previewNonce}`}
+            src={`${endpoint}?t=${previewNonce}`}
             alt={tr("Personnage de référence", "Character reference")}
             style={{ width: 96, height: 96, objectFit: "cover", borderRadius: 10, border: "1px solid var(--border)" }}
           />
