@@ -289,6 +289,163 @@ Verified live (2026-07-17) — the v3 body is built SEPARATELY from v2's in
 
 ---
 
+## Google Flow browser provider (`AI_PROVIDER=flow_browser`)
+
+An **experimental** AI b-roll provider that has no API of its own: `src/lib/services/flow-browser.ts`
+drives the normal Google Flow web UI (`labs.google/fx/tools/flow`) through a locally-attached,
+operator-owned Chrome — never the Gemini image API, the Veo API, a Google Flow API, MCP, or any
+paid fallback unless `FLOW_FALLBACK_PROVIDER=kie` is explicitly set. It generates **both**
+Nano Banana stills and Veo videos; it is not image-only.
+
+- **Normal Chrome, attached over local CDP — never a Playwright-launched browser.** `ensureNormalChrome`
+  spawns system Chrome with `--remote-debugging-port` (`FLOW_CDP_PORT`, default `9223`, loopback
+  only) + a **persistent, dedicated profile** (`FLOW_BROWSER_PROFILE_DIR`, default
+  `<DATA_DIR>/flow-chrome-profile` — never the operator's personal Chrome profile), then
+  `chromium.connectOverCDP(endpoint, { noDefaults: true })` attaches to it. `noDefaults: true` is
+  load-bearing: without it Playwright issues `Browser.setDownloadBehavior` against the default
+  context, which recent Chrome rejects with "Browser context management is not supported". A
+  `launchPersistentContext`/automated-Chromium launch was tried historically and made Google block
+  sign-in ("this browser or app may not be secure") — do not go back to it. One login persists
+  across app restarts; Resume/reconnect needs no re-login.
+- **Serialized process-wide, images and video share ONE queue** (`enqueue()` / `state.queue`,
+  a module-global surviving hot-reload via `globalThis.__facelessFlowBrowserState`). Even though
+  `studio-pipeline` requests several beats concurrently, only one prompt/generation/download is ever
+  in flight in the one controlled tab — mode switches (Image↔Video, Nano Banana↔Veo tier) can never
+  interleave with an in-progress generation.
+- **`openFlowSession()` / `flowSessionStatus()` (Settings → "Open Flow / test session") only verify
+  connectivity + login — they never generate anything and spend no credits.** Success message:
+  *"Normal Chrome is connected to Google Flow. Session is ready; no image or video was generated."*
+
+### Image path (Nano Banana) — unchanged by the Veo work
+
+`generateFlowImage()`: `ensureFlowImageMode` (mode switch + `ensureNanoBanana` — confirms the
+configured `FLOW_IMAGE_MODEL`, e.g. `nano-banana-pro`, is the ACTIVE model; **fails loud**, never
+silently generates on a different model) → `ensureFlowAspectRatio` (best-effort) →
+`prepareComposerReference` (clear any previous beat's attachment, attach the character reference
+only when `beatWantsCharacterReference(beat)` says so) → fill prompt → `submitPrompt` (accessible
+Generate button → `form.requestSubmit()` → `Enter`, in that order — the button is looked for
+**after** the prompt is filled, because Flow can leave it absent/disabled until then) → capture the
+result from network responses (`image/*` content-type, ≥512×512, chosen by
+`chooseBestCapturedImage()` against the target aspect) or, failing that, the Download button →
+`FLOW_REGEN_ATTEMPTS` (default 1) scored attempts against `REAL_MATCH_THRESHOLD`/`AI_MATCH_THRESHOLD`
+→ Ken Burns → `provider: "flow:nano-banana-pro"`.
+
+### Video path (Veo) — NEW
+
+`generateFlowVideo()` mirrors the image path's shape but is its own function, driven by
+`resolveAiMedia(beat, mediaOverride)` **exactly like every other AI provider** — Flow is no longer
+hardcoded image-only (that used to throw `"Google Flow browser is image-only, but this fallback
+beat requires video."` for any video-routed beat; removed):
+
+- `ensureFlowVideoMode` → mode switch + `ensureVeoModel`, which confirms the configured
+  `FLOW_VIDEO_MODEL` is active. **Fuzzy-matched, not a fixed string** — `normalizeFlowModelLabel`
+  lowercases and turns hyphens/underscores into spaces, and `veoModelLabelMatches` strips only
+  cosmetic decoration (`(Beta)`, `New:`, bracket/punctuation noise) before requiring EXACT equality
+  — so a stored id like `veo-3.1-fast` matches a rendered `"Veo 3.1 Fast"`, `"New: Veo 3.1 Fast"`, or
+  `"Veo 3.1 Fast (Beta)"`, but never a DIFFERENT tier (`veo-3.1` must never match a menu entry for
+  `"Veo 3.1 Fast"` just because it's a prefix). **Fails loud** on no confirmed match — same contract
+  as `ensureNanoBanana`, never silently substitutes a cheaper/different tier.
+- `ensureFlowAspectRatio` / `ensureFlowDuration` are **best-effort** (log + continue if the control
+  isn't found) — `FLOW_VIDEO_DURATION_SEC` (default `8`) is what gets requested from Flow's own
+  duration control WHEN ONE EXISTS; it is not a promise that the delivered clip is that long.
+- Reference handling goes through the SAME `prepareComposerReference` seam as images — clear-then-
+  attach can never drift between the two media kinds. If the configured Veo tier doesn't accept an
+  ingredient, the attach is not silently skipped: `confirmReferenceAttached` requires a visible
+  remove/chip control before calling it a success (see "Reference attach confirmation" below), and a
+  failed confirmation throws rather than rendering a video that looks like it used the reference
+  when it didn't.
+- **Capture prefers the official Download control** (`tryDownloadVideoFromUi`, `FLOW_VIDEO_DOWNLOAD_SELECTOR`
+  optional override) over network-response capture, because `download.saveAs()` is streamed
+  straight to disk by Chrome — never buffered in this process — whereas a captured `response.body()`
+  does buffer the whole clip in Node memory. Network capture is the fallback, filtered by
+  `isVideoResponseCandidate` (`video/*` content-type or a `.mp4`/`.webm`/`.mov`/`.m4v` URL) and a
+  minimum-byte floor so a poster frame or tracking pixel is never mistaken for the result; among
+  several matches, `newestVideoCandidate` picks the one captured LAST (capture order is chronological
+  by construction — a named, tested function rather than an inline `[length - 1]`).
+- **Validation is real, via `validateFlowVideoFile()` (ffprobe, not a duplicate FFmpeg pipeline)**:
+  file exists, non-empty, a cheap byte-sniff (`looksLikeNonVideoBody`) rejects an HTML/JSON error
+  page arriving with a `200` and an `.mp4`-shaped URL BEFORE spending an ffprobe subprocess on it,
+  then ffprobe confirms a real video stream with readable width/height/duration/codec/fps. Any
+  rejection is a `FlowBrowserError("capture")` — never a silently-accepted thumbnail or truncated
+  download.
+- **No second FFmpeg implementation for duration matching or audio removal.** The downloaded clip is
+  handed to the pipeline as-is (after validation) — exactly like `kie.ai`'s Veo path, which also just
+  downloads the raw result. The shared beat compositor (`services/studio-assemble.ts` → `renderBeat`)
+  already re-encodes EVERY beat visual (real footage, `kie:veo`, Flow's Veo alike) to the project's
+  exact frame count — `-stream_loop -1` fills a clip shorter than the beat, `-frames:v <exact beat
+  frame count>` hard-cuts one that's longer, deterministically, no slow-motion — and strips audio
+  UNCONDITIONALLY (`-an` is always in `encodeV()`'s output flags). Writing a beat-aware trim/mute
+  pass inside `generateFlowVideo` would be a second implementation of behavior the compositor already
+  guarantees for every video source; don't add one.
+- **No score/regenerate loop for video** (unlike the image path's `FLOW_REGEN_ATTEMPTS`): one
+  generation, one result — mirrors `kie.ai`'s Veo branch, which doesn't re-score/regenerate video
+  either, and avoids resubmitting the same prompt.
+- Returns `{ kind: "ai", provider: "flow:veo3" }`; Ken Burns is never applied to a video result.
+
+### Fallback — `FLOW_FALLBACK_PROVIDER` (`none` default | `kie`)
+
+Preserves the beat's media KIND on failure, for both directions: a video-routed beat that exhausts
+Flow's Veo path falls to `kie.ai`'s Veo (never its nano-banana image path), and an image-routed beat
+falls to `kie.ai`'s nano-banana (never Veo). `none` fails closed — a `FlowBrowserError` propagates
+rather than silently reaching Grok/Cloudflare/Pollinations/Meta/Magnific/Runware/kie.ai. This holds
+even though the KIE branch below is itself generic: on a Flow-video fallback, `provider` is set to
+`"kie"` and execution falls through into the SAME `resolveAiMedia()` call the kie branch already
+makes for every other route — it independently resolves back to `"video"` from the same beat/override/
+settings, so the handoff is not a special case, just letting the existing kie logic run.
+
+### Reference attach confirmation
+
+`beatWantsCharacterReference(beat)` decides whether the configured `AI_CHARACTER_REFERENCE_PATH`
+portrait is attached — explicit terms (woman/housekeeper/maid/room attendant/hotel worker/she/her/
+…) or embodied first person (`I saw/noticed/entered/checked/cleaned/wiped/examined…`, but
+deliberately NOT generic `I think/I know`, so the portrait isn't forced into explanatory object
+shots). `prepareComposerReference()` is the ONE seam both `generateFlowImage` and `generateFlowVideo`
+call: clear whatever the PREVIOUS beat left attached, then attach only if this beat wants one — so
+the two media paths can never drift on when the reference is added or removed.
+
+`dispatchEvent()` firing without a thrown error is **not proof the drag-and-drop upload worked** — a
+layout that silently ignores the synthetic `DragEvent` looks identical from the caller's side. So
+every attach path (native `input[type=file]`, the synthetic drop, and the file-chooser trigger flow)
+is followed by `confirmReferenceAttached()`, which requires a visible remove/chip control
+(`referenceRemoveControls` — the same locators `clearFlowReferences` clicks) before calling the
+attach a success. No visible evidence → `prepareComposerReference` throws, with a safe DOM-only
+diagnostic (`diagnoseComposerControls`: nearby button names/aria-labels/titles/`data-testid`s, file
+input count — never cookies, tokens, or account data).
+
+### Settings
+
+`FLOW_PROJECT_URL`, `FLOW_BROWSER_PROFILE_DIR`, `FLOW_BROWSER_EXECUTABLE`, `FLOW_CDP_PORT` (default
+`9223`, loopback-only), `FLOW_FALLBACK_PROVIDER`, `FLOW_IMAGE_MODEL`, `FLOW_ASPECT_RATIO`,
+`FLOW_REGEN_ATTEMPTS`, `FLOW_GENERATION_TIMEOUT_SEC` (default `240`s, image) — all pre-existing.
+Added for Veo: `FLOW_VIDEO_MODEL` (default `veo-3.1-fast`; kebab-case id, fuzzy-matched against
+Flow's own label text — see above), `FLOW_VIDEO_TIMEOUT_SEC` (default `600`s = 10 min — deliberately
+separate from and much larger than the image timeout; Veo renders take minutes), `FLOW_VIDEO_DURATION_SEC`
+(default `8`s — requested, not guaranteed, see above). Advanced/DB-API-only overrides (no form field,
+same convention as the pre-existing `FLOW_*_SELECTOR` keys — a settings key with no field is normal,
+not an oversight): `FLOW_VIDEO_DOWNLOAD_SELECTOR`, `FLOW_MEDIA_MODE_SELECTOR`,
+`FLOW_ASPECT_RATIO_SELECTOR`, `FLOW_DURATION_SELECTOR`. The image/video MODEL selects render
+automatically on Settings via `ProviderModelFields` (capability-driven off the `flow_browser` entry
+in `providers.ts`'s `AI_PROVIDERS`, now carrying a `video` catalog alongside `image` — Veo 3 / Veo 3
+Fast / Veo 3.1 / Veo 3.1 Fast (recommended) / Veo 3.1 Quality, plus the registry's normal "Custom…"
+free-text escape for a label Google renames or adds later). The image/video split itself reuses the
+existing run-level "AI media" selector (`KIE_AI_MEDIA`: Images only / Auto / Video only, shown on `/`
+whenever Visual mode is AI or Mix) — Flow does not get a second, parallel media-mode setting.
+
+### Not yet validated against a live Flow session
+
+Everything in this section was built by extending the PROVEN image-generation selector cascade
+(accessible role/name matching first, `FLOW_*_SELECTOR` overrides second) to video, and is covered by
+unit tests for every pure/testable piece (model-name normalization and matching, newest-result
+selection, content-type filtering, ffprobe-backed file validation, per-media timeout bounds, the
+clear-then-attach sequencing via a fake Page/Locator). What is **not** verified end-to-end against the
+real Flow UI (no CDP/Chrome session was available while building this): `ensureFlowMediaMode`'s
+Image↔Video switch control, `ensureVeoModel`'s option-picking, `ensureFlowAspectRatio`/
+`ensureFlowDuration`'s control discovery, and the network-response/official-download capture race in
+`generateFlowVideo` itself. Drive it once over a real session (Settings → Open Flow / test session,
+then a short real run) before relying on it unattended, and update this note with what was confirmed.
+
+---
+
 ## Key external services
 
 | Service | Used for | Setting |
