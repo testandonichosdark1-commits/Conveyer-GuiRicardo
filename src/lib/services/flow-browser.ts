@@ -359,6 +359,10 @@ async function selectFlowModel(page: Page, label: string): Promise<boolean> {
     return false;
   }
   await option.click();
+  // The lightweight per-prompt chip dropdown is expected to self-close on a click, but
+  // press Escape defensively regardless — a no-op if it already did, and cheap insurance
+  // against the alternative below (the project-wide Settings page) leaving itself open.
+  await page.keyboard.press("Escape").catch(() => undefined);
   return true;
 }
 
@@ -378,10 +382,19 @@ async function ensureNanoBanana(page: Page, overrideModel?: string): Promise<voi
     await page.waitForTimeout(250);
   }
 
-  // Flow normally displays the active model beside the prompt. If it doesn't, try the
-  // nearby model/options controls and select Nano Banana explicitly. We fail closed if
-  // the model cannot be confirmed: silently generating with another model would violate
-  // the operator's "Nano Banana only" selection.
+  // The chip's own dropdown (same one selectFlowModel uses for the credit fallback) is the
+  // precise control: click the current-model label, pick the right option. Try it before
+  // anything broader.
+  if (await selectFlowModel(page, wanted)) return;
+
+  // Last resort only: the generic "Model/Settings/Configurações" button search below is
+  // NOT scoped to the image model — on a real run it landed on Flow's project-wide
+  // Configurações page (image AND video defaults, with its own Salvar), found "Nano Banana"
+  // text there too, clicked it, and returned — leaving that whole page open in the browser
+  // for every subsequent call to stumble into, right next to an unrelated Veo model picker.
+  // Confirmed live: an operator watching the visible browser saw it sitting open mid-run.
+  // Always close whatever this opened, on every exit path, whether it worked or not — this
+  // path exists as a fallback, not a place to leave state behind.
   const controls = page.getByRole("button", { name: /Model|Modelo|Image|Imagem|Options|Opções|Settings|Configurações/i });
   const count = Math.min(await controls.count().catch(() => 0), 8);
   for (let i = count - 1; i >= 0; i--) {
@@ -391,6 +404,7 @@ async function ensureNanoBanana(page: Page, overrideModel?: string): Promise<voi
     const option = page.getByText(pattern, { exact: false }).last();
     if (await option.isVisible().catch(() => false)) {
       await option.click();
+      await page.keyboard.press("Escape").catch(() => undefined);
       return;
     }
     await page.keyboard.press("Escape").catch(() => undefined);
