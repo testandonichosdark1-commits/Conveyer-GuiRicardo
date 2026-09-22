@@ -3309,12 +3309,24 @@ export function beatWantsCharacterReference(beat: Pick<Beat, "aiPrompt" | "visua
   return explicitCharacter.test(scene) || embodiedFirstPerson.test(scene) || selfIntroduction.test(scene);
 }
 
+// "Do not copy the crop" alone was not enough: a tight head-and-shoulders reference
+// portrait (the common case — that IS what most operators have on hand) kept coming
+// back as another tight close-up of the same framing, no matter what the scene actually
+// called for. Confirmed live: a beat asking for "a man on his knees in a crawl space,
+// using a wrench on ductwork" — full body, hands, tools, environment — rendered as an
+// extreme close-up of just the reference's forehead and eyes, nothing else in frame.
+// Spelling out the SPECIFIC failure mode (reference = tight portrait, scene needs to be
+// wider) gives the model something concrete to counteract, not just an abstract "don't
+// copy" it can satisfy by changing lighting while keeping the same crop.
 const CHARACTER_REFERENCE_INSTRUCTION =
   "Use the supplied reference image ONLY as the identity reference for the person in the scene. " +
   "Preserve that same person's facial structure, hairstyle, apparent age, and skin tone — whatever " +
-  "their apparent gender, exactly as shown in the reference. Do not copy the reference background, " +
-  "pose, crop, or lighting; create the requested scene naturally. Do not turn them into a generic " +
-  "stock-photo model.";
+  "their apparent gender, exactly as shown in the reference. The reference is typically a tight " +
+  "head-and-shoulders portrait — do NOT reproduce that framing. Render the full scene described " +
+  "above, at whatever shot size it actually calls for (wide or medium, showing their body, hands, " +
+  "actions, tools, and surroundings): their face should occupy only its natural, small share of the " +
+  "frame, exactly like an ordinary photo of that scene would. Do not copy the reference's background, " +
+  "pose, crop, or lighting, and do not turn them into a generic stock-photo model.";
 
 /** AI b-roll for a beat — kie.ai (nano-banana image + Ken Burns, or Veo video), 69labs/Grok, or Runware. */
 async function acquireAi(
