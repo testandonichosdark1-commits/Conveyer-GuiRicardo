@@ -645,12 +645,40 @@ async function tryDownloadFromUi(page: Page, outPath: string): Promise<boolean> 
   }
 }
 
-async function detectFlowFailure(page: Page): Promise<FlowBrowserError | null> {
+interface FlowIssueCounts {
+  credits: number;
+  failed: number;
+}
+
+const CREDITS_PATTERN = /out of (?:AI |Flow )?credits|not enough credits|créditos insuficientes|sem créditos/gi;
+const FAILED_PATTERN = /generation failed|could(?:n'?t| not) generate|não foi possível gerar|tente novamente/gi;
+
+async function countFlowIssues(page: Page): Promise<FlowIssueCounts> {
   const body = (await page.locator("body").innerText({ timeout: 1500 }).catch(() => "")).slice(-12_000);
-  if (/out of (?:AI |Flow )?credits|not enough credits|créditos insuficientes|sem créditos/i.test(body)) {
+  return {
+    credits: (body.match(CREDITS_PATTERN) || []).length,
+    failed: (body.match(FAILED_PATTERN) || []).length,
+  };
+}
+
+/**
+ * A failed generation leaves a permanent "Falha / Não foi possível gerar a imagem" card
+ * sitting in Flow's own media panel — it never disappears, unlike the chat reply, which
+ * does update per attempt. Scanning the whole page for this text (the original approach)
+ * meant ONE real failure, anywhere earlier in the session, poisoned every later check for
+ * the rest of that browser session: confirmed live, a run kept reporting "Google Flow
+ * reported that image generation failed" on beat after beat while the visible browser was
+ * plainly generating new images successfully the whole time, because an old failed card
+ * from a past beat was still on screen. `baseline` is the count from BEFORE this attempt's
+ * prompt was submitted — only a count that has since gone UP is a failure that just
+ * happened, regardless of how many stale cards preceded it.
+ */
+async function detectFlowFailure(page: Page, baseline: FlowIssueCounts): Promise<FlowBrowserError | null> {
+  const now = await countFlowIssues(page);
+  if (now.credits > baseline.credits) {
     return new FlowBrowserError("Google Flow reports that this account has no credits available.", "credits");
   }
-  if (/generation failed|could(?:n'?t| not) generate|não foi possível gerar|tente novamente/i.test(body)) {
+  if (now.failed > baseline.failed) {
     return new FlowBrowserError("Google Flow reported that image generation failed.", "ui");
   }
   return null;
@@ -687,6 +715,9 @@ async function runFlowGeneration(
   page.on("response", onResponse);
   try {
     const input = await promptBox(page);
+    // Snapshot BEFORE submitting — see detectFlowFailure for why: a stale failed-card
+    // from an earlier beat must never be mistaken for this attempt's own result.
+    const baseline = await countFlowIssues(page);
     await input.fill(prompt.slice(0, 12_000));
     await submitPrompt(page, input);
     const deadline = Date.now() + timeoutMs;
@@ -696,7 +727,7 @@ async function runFlowGeneration(
       if (await pageHasLoginPrompt(page)) throw new FlowBrowserError("Google session expired during generation.", "login");
       if (candidates.length && Date.now() - lastCaptureAt >= 4_000) break;
       if (Date.now() >= nextFailureCheck) {
-        const failure = await detectFlowFailure(page);
+        const failure = await detectFlowFailure(page, baseline);
         if (failure) throw failure;
         nextFailureCheck = Date.now() + 4_000;
       }
