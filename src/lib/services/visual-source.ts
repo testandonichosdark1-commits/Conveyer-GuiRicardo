@@ -23,7 +23,7 @@ import {
 import { generateMagnificImageUrl, generateMagnificVideoUrl, downloadMagnific, magnificConfigured } from "./magnific";
 import { generateHiggsfieldImageUrl, generateHiggsfieldVideoUrl, downloadHiggsfield, higgsfieldConfigured } from "./higgsfield";
 import { generateRunwareImage, downloadRunware } from "./runware";
-import { FlowBrowserError, generateFlowImage } from "./flow-browser";
+import { FlowBrowserError, generateFlowImage, generateFlowVideo } from "./flow-browser";
 import { storyblocksSearch, reserveDownload as sbReserveDownload, resolveStoryblocksFile } from "./storyblocks";
 import { recordStoryblocksDownload, recordGoogleCseQuery, recordGemini, recordKieImage, recordKieVeo, recordLabs69, recordLabs69Image, recordMagnificImage, recordMagnificVideo, recordHiggsfieldImage, recordHiggsfieldVideo, recordRunwareImage } from "./cost-ledger";
 import { callGemini } from "./gemini-models";
@@ -3534,69 +3534,117 @@ async function acquireAi(
   }
 
   if (provider === "flow_browser") {
-    // The browser adapter is intentionally image-only and serialized inside
-    // flow-browser.ts. Even though studio-pipeline requests several beats in parallel,
-    // prompts/downloads can never cross. A videos-only fallback must not silently turn
-    // into a still; if the operator enabled kie fallback, the normal kie branch below
-    // remains able to honor it.
-    if (mediaOverride === "video") {
-      throw new FlowBrowserError("Google Flow browser is image-only, but this fallback beat requires video.", "config");
-    }
+    // Both media kinds are driven by the SAME resolver every other AI provider uses —
+    // Flow is no longer image-only. Still serialized process-wide inside flow-browser.ts
+    // (one queue shared by generateFlowImage/generateFlowVideo): even though
+    // studio-pipeline requests several beats concurrently, prompts/downloads/mode
+    // switches can never cross in the one controlled tab.
+    const { media: flowMedia, reason: flowMediaReason } = resolveAiMedia(beat, mediaOverride);
+    log(runId, "debug", `Beat ${beat.index}: Flow media = ${flowMedia} (reason=${flowMediaReason})`, { stage: "visual" });
 
-    let best: { path: string; score: number } | null = null;
-    let flowError: Error | null = null;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const tmpImg = path.join(os.tmpdir(), `flow_${runId.slice(0, 8)}_${beat.index}_${attempt}.png`);
+    if (flowMedia === "video") {
+      // No score/regenerate loop here (mirrors the kie.ai Veo branch below): a video is
+      // generated once, not re-scored by the still-image vision gate, and re-submitting
+      // the same prompt on a UI failure does not improve it.
+      let flowVideoError: Error | null = null;
       try {
         const flowPrompt = characterReferencePath
-          ? `${buildPrompt(VARIANTS[attempt % VARIANTS.length])}, ${CHARACTER_REFERENCE_INSTRUCTION}`
-          : buildPrompt(VARIANTS[attempt % VARIANTS.length]);
+          ? `${buildPrompt("")}, ${CHARACTER_REFERENCE_INSTRUCTION}`
+          : buildPrompt("");
         log(
           runId,
           "info",
-          `Beat ${beat.index}: Google Flow/Nano Banana generation started (${attempt + 1}/${maxAttempts})${characterReferencePath ? " — character reference active" : ""}`,
+          `Beat ${beat.index}: Google Flow/Veo video generation started${characterReferencePath ? " — character reference active" : ""}`,
           { stage: "visual" }
         );
-        await generateFlowImage(
+        await generateFlowVideo(
           runId,
           flowPrompt,
-          tmpImg,
+          outPath,
           getSetting("FLOW_ASPECT_RATIO") || aspect,
-          characterReferencePath ? { referenceImagePath: characterReferencePath } : undefined
+          {
+            referenceImagePath: characterReferencePath || undefined,
+            durationSec: Math.ceil(beatDurSec),
+          }
         );
+        log(runId, "info", `Beat ${beat.index}: Flow/Veo video downloaded`, { stage: "visual" });
+        log(runId, "info", `Beat ${beat.index}: Flow/Veo video validated`, { stage: "visual" });
+        log(runId, "info", `Beat ${beat.index}: AI video via Google Flow/Veo`, { stage: "visual" });
+        return { path: outPath, kind: "ai", provider: "flow:veo3" };
       } catch (e) {
-        flowError = e as Error;
-        try { fs.unlinkSync(tmpImg); } catch {}
-        log(runId, "warn", `Beat ${beat.index}: Google Flow browser failed (${(e as Error).message.slice(0, 180)})`, { stage: "visual" });
-        break; // UI/login failures are not improved by submitting the same prompt again.
+        flowVideoError = e as Error;
+        log(runId, "warn", `Beat ${beat.index}: Google Flow/Veo video failed (${(e as Error).message.slice(0, 200)})`, { stage: "visual" });
       }
-      const score = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, tmpImg);
-      if (!best || score > best.score) {
-        if (best) { try { fs.unlinkSync(best.path); } catch {} }
-        best = { path: tmpImg, score };
-      } else {
-        try { fs.unlinkSync(tmpImg); } catch {}
-      }
-      if (score >= threshold) break;
-      if (attempt < maxAttempts - 1) {
-        log(runId, "info", `Beat ${beat.index}: Flow image scored ${score}% (<${threshold}) — regenerating ${attempt + 1}/${maxAttempts - 1}`, { stage: "visual" });
-      }
-    }
-    if (best) {
-      kenBurns(best.path, outPath, beatDurSec, beat.index % 2 === 1, resolution);
-      try { fs.unlinkSync(best.path); } catch {}
-      log(runId, "info", `Beat ${beat.index}: AI still via Google Flow/Nano Banana Pro + Ken Burns — match ${best.score}%`, { stage: "visual" });
-      return { path: outPath, kind: "ai", provider: "flow:nano-banana-pro" };
-    }
 
-    if (!flowFallbackToKie) {
-      // Fail closed: "Nano Banana through Flow only" must never drift into Grok,
-      // Cloudflare, Pollinations, Meta, Magnific, or another paid model.
-      if (flowError instanceof FlowBrowserError) throw flowError;
-      throw new FlowBrowserError(`Beat ${beat.index}: Google Flow produced no image and paid fallback is disabled.`, "capture");
+      if (!flowFallbackToKie) {
+        // Fail closed, and preserve the media kind: a video-routed beat must never
+        // quietly become a Flow IMAGE just because paid fallback is off.
+        if (flowVideoError instanceof FlowBrowserError) throw flowVideoError;
+        throw new FlowBrowserError(`Beat ${beat.index}: Google Flow produced no video and paid fallback is disabled.`, "capture");
+      }
+      log(runId, "warn", `Beat ${beat.index}: Flow video unavailable — using the configured kie.ai Veo fallback`, { stage: "visual" });
+      // Falls through to the kie.ai branch below, which calls resolveAiMedia() itself
+      // with the SAME beat/mediaOverride/settings and therefore independently resolves
+      // to "video" again — the kie.ai Veo path, never its nano-banana image path, unless
+      // kie's own Veo attempt also fails (kie's pre-existing image-fallback policy,
+      // untouched here; see the kie branch below for that decision).
+      provider = "kie";
+    } else {
+      let best: { path: string; score: number } | null = null;
+      let flowError: Error | null = null;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const tmpImg = path.join(os.tmpdir(), `flow_${runId.slice(0, 8)}_${beat.index}_${attempt}.png`);
+        try {
+          const flowPrompt = characterReferencePath
+            ? `${buildPrompt(VARIANTS[attempt % VARIANTS.length])}, ${CHARACTER_REFERENCE_INSTRUCTION}`
+            : buildPrompt(VARIANTS[attempt % VARIANTS.length]);
+          log(
+            runId,
+            "info",
+            `Beat ${beat.index}: Google Flow/Nano Banana generation started (${attempt + 1}/${maxAttempts})${characterReferencePath ? " — character reference active" : ""}`,
+            { stage: "visual" }
+          );
+          await generateFlowImage(
+            runId,
+            flowPrompt,
+            tmpImg,
+            getSetting("FLOW_ASPECT_RATIO") || aspect,
+            characterReferencePath ? { referenceImagePath: characterReferencePath } : undefined
+          );
+        } catch (e) {
+          flowError = e as Error;
+          try { fs.unlinkSync(tmpImg); } catch {}
+          log(runId, "warn", `Beat ${beat.index}: Google Flow browser failed (${(e as Error).message.slice(0, 180)})`, { stage: "visual" });
+          break; // UI/login failures are not improved by submitting the same prompt again.
+        }
+        const score = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, tmpImg);
+        if (!best || score > best.score) {
+          if (best) { try { fs.unlinkSync(best.path); } catch {} }
+          best = { path: tmpImg, score };
+        } else {
+          try { fs.unlinkSync(tmpImg); } catch {}
+        }
+        if (score >= threshold) break;
+        if (attempt < maxAttempts - 1) {
+          log(runId, "info", `Beat ${beat.index}: Flow image scored ${score}% (<${threshold}) — regenerating ${attempt + 1}/${maxAttempts - 1}`, { stage: "visual" });
+        }
+      }
+      if (best) {
+        kenBurns(best.path, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+        try { fs.unlinkSync(best.path); } catch {}
+        log(runId, "info", `Beat ${beat.index}: AI still via Google Flow/Nano Banana Pro + Ken Burns — match ${best.score}%`, { stage: "visual" });
+        return { path: outPath, kind: "ai", provider: "flow:nano-banana-pro" };
+      }
+
+      if (!flowFallbackToKie) {
+        // Fail closed: "Nano Banana through Flow only" must never drift into Grok,
+        // Cloudflare, Pollinations, Meta, Magnific, or another paid model.
+        if (flowError instanceof FlowBrowserError) throw flowError;
+        throw new FlowBrowserError(`Beat ${beat.index}: Google Flow produced no image and paid fallback is disabled.`, "capture");
+      }
+      log(runId, "warn", `Beat ${beat.index}: Flow unavailable — using the configured kie.ai Nano Banana fallback`, { stage: "visual" });
+      provider = "kie";
     }
-    log(runId, "warn", `Beat ${beat.index}: Flow unavailable — using the configured kie.ai Nano Banana fallback`, { stage: "visual" });
-    provider = "kie";
   }
 
   if (provider === "kie") {

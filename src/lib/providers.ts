@@ -222,6 +222,23 @@ export const AI_PROVIDERS: AiProviderMeta[] = [
       key: "FLOW_IMAGE_MODEL",
       models: [{ id: "nano-banana-pro", label: "Nano Banana Pro", recommended: true }],
     },
+    // Ids are kebab-case; ensureVeoModel() normalizes both this and Flow's own visible
+    // label text (lowercase, hyphens/underscores → spaces, collapsed whitespace) before
+    // comparing, so "veo-3.1-fast" matches a UI that renders "Veo 3.1 Fast". The catalog
+    // is a MENU of known labels, not an allowlist — "Custom…" (ProviderModelFields) lets
+    // an operator type any label Flow shows that Google renames or adds later; whatever
+    // is saved to FLOW_VIDEO_MODEL is matched literally against the UI, never silently
+    // swapped for a different model when it can't be confirmed (see ensureVeoModel).
+    video: {
+      key: "FLOW_VIDEO_MODEL",
+      models: [
+        { id: "veo-3", label: "Veo 3" },
+        { id: "veo-3-fast", label: "Veo 3 Fast" },
+        { id: "veo-3.1", label: "Veo 3.1" },
+        { id: "veo-3.1-fast", label: "Veo 3.1 Fast", recommended: true },
+        { id: "veo-3.1-quality", label: "Veo 3.1 Quality" },
+      ],
+    },
   },
   {
     id: "69labs",

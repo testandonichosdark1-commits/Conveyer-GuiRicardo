@@ -174,6 +174,13 @@ export const SETTING_KEYS = [
   "FLOW_GENERATE_SELECTOR",    // Optional CSS selector override for Flow Generate button
   "FLOW_REFERENCE_FILE_SELECTOR", // Optional CSS selector for Flow's character-reference file input
   "FLOW_REFERENCE_REMOVE_SELECTOR", // Optional CSS selector for removing a stale Flow reference attachment
+  "FLOW_VIDEO_MODEL",          // Veo model label/id expected in Flow (e.g. "veo-3.1-fast" -> "Veo 3.1 Fast")
+  "FLOW_VIDEO_TIMEOUT_SEC",    // Max wait for one generated Veo video — separate from (and longer than) the image timeout
+  "FLOW_VIDEO_DURATION_SEC",   // Clip length requested from Flow's duration control, when Flow exposes one
+  "FLOW_VIDEO_DOWNLOAD_SELECTOR", // Optional CSS selector override for Flow's video Download control
+  "FLOW_MEDIA_MODE_SELECTOR",  // Optional CSS selector override for Flow's Image/Video mode switch
+  "FLOW_ASPECT_RATIO_SELECTOR", // Optional CSS selector override for Flow's aspect-ratio control
+  "FLOW_DURATION_SELECTOR",    // Optional CSS selector override for Flow's duration control
   "KIE_API_KEY",               // kie.ai API key (nano-banana images, Veo video)
   "KIE_IMAGE_MODEL",           // kie.ai image model id (nano-banana)
   "KIE_VIDEO_MODEL",           // kie.ai video model id (Veo)
@@ -607,6 +614,16 @@ export const DEFAULTS: Record<SettingKey, string> = {
   FLOW_GENERATE_SELECTOR: "",
   FLOW_REFERENCE_FILE_SELECTOR: "",
   FLOW_REFERENCE_REMOVE_SELECTOR: "",
+  FLOW_VIDEO_MODEL: defaultAiModel("flow_browser", "video"), // = "veo-3.1-fast"
+  // Video generation on Flow legitimately takes minutes (Veo renders, then the UI has to
+  // encode/publish the result) — far longer than a Nano Banana still. Kept separate from
+  // FLOW_GENERATION_TIMEOUT_SEC so raising one never silently raises the other.
+  FLOW_VIDEO_TIMEOUT_SEC: "600",
+  FLOW_VIDEO_DURATION_SEC: "8",
+  FLOW_VIDEO_DOWNLOAD_SELECTOR: "",
+  FLOW_MEDIA_MODE_SELECTOR: "",
+  FLOW_ASPECT_RATIO_SELECTOR: "",
+  FLOW_DURATION_SELECTOR: "",
   KIE_API_KEY: "",
   KIE_IMAGE_MODEL: defaultAiModel("kie", "image"), // = "google/nano-banana"
   KIE_VIDEO_MODEL: defaultAiModel("kie", "video"), // = "veo3_fast"

@@ -1,12 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import sharp from "sharp";
 import { chromium, type BrowserContext, type Locator, type Page, type Response } from "playwright";
 import { getSetting } from "../settings";
 import { DATA_DIR } from "../run-paths";
 import { checkCancelled } from "../cancellation";
+import { resolveFfprobe } from "../ffmpeg-bin";
+import { log } from "../logger";
 
 /**
  * Experimental Google Flow browser adapter.
@@ -59,9 +61,27 @@ const state: FlowBrowserState = globalThis.__facelessFlowBrowserState ?? {
 };
 globalThis.__facelessFlowBrowserState = state;
 
-function settingInt(key: "FLOW_GENERATION_TIMEOUT_SEC", fallback: number, min: number, max: number): number {
+// Generalized from the image-only literal so image and video can each own their own
+// bounds — video legitimately runs minutes longer than a still (Veo render + Flow's own
+// encode/publish step), and the two timeouts must be free to move independently.
+function settingInt(key: "FLOW_GENERATION_TIMEOUT_SEC" | "FLOW_VIDEO_TIMEOUT_SEC" | "FLOW_VIDEO_DURATION_SEC", fallback: number, min: number, max: number): number {
   const n = Number(getSetting(key));
   return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
+}
+
+/** Max wait for one generated Nano Banana image, in ms. */
+export function flowImageTimeoutMs(): number {
+  return settingInt("FLOW_GENERATION_TIMEOUT_SEC", 240, 30, 900) * 1000;
+}
+
+/** Max wait for one generated Veo video, in ms — separate ceiling, and much longer. */
+export function flowVideoTimeoutMs(): number {
+  return settingInt("FLOW_VIDEO_TIMEOUT_SEC", 600, 60, 1800) * 1000;
+}
+
+/** Clip length (seconds) requested from Flow's duration control, when one exists. */
+export function flowRequestedVideoDurationSec(): number {
+  return settingInt("FLOW_VIDEO_DURATION_SEC", 8, 2, 30);
 }
 
 function profileDir(): string {
@@ -352,6 +372,208 @@ async function ensureNanoBanana(page: Page): Promise<void> {
   );
 }
 
+/**
+ * Lowercase, hyphens/underscores → spaces, collapsed whitespace. Shared by the setting
+ * value (kebab-case, e.g. "veo-3.1-fast") and whatever text Flow's own UI renders (e.g.
+ * "Veo 3.1 Fast", "veo 3.1 — fast") so the two can be compared despite Google's own
+ * spacing/casing choices changing without notice. Exported for unit tests.
+ */
+export function normalizeFlowModelLabel(s: string): string {
+  return s.toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Does a candidate label (arbitrary text from the Flow UI) name the wanted Veo model?
+ * Exact match after normalization, or the wanted tokens appearing as a contiguous run
+ * inside the candidate (so "Veo 3.1 Fast (Beta)" still matches "veo-3.1-fast"). Never
+ * the reverse (a shorter candidate must not match a longer wanted string) — that would
+ * let "Veo 3" match when "Veo 3.1" was configured. Exported for unit tests.
+ */
+export function veoModelLabelMatches(wanted: string, candidateText: string): boolean {
+  const w = normalizeFlowModelLabel(wanted);
+  const c = normalizeFlowModelLabel(candidateText);
+  if (!w || !c) return false;
+  if (w === c) return true;
+  // Whole-token containment: split both on spaces and require candidate to contain the
+  // wanted token sequence contiguously, not just as a loose substring (which would let
+  // "veo 31 fast" mis-match unrelated digits glued together in a badge).
+  const wTokens = w.split(" ");
+  const cTokens = c.split(" ");
+  for (let i = 0; i + wTokens.length <= cTokens.length; i++) {
+    if (wTokens.every((t, j) => cTokens[i + j] === t)) return true;
+  }
+  return false;
+}
+
+/** The configured Veo model, normalized to plain words ("veo-3.1-fast" -> "veo 3.1 fast"). */
+function wantedVeoModel(): string {
+  return (getSetting("FLOW_VIDEO_MODEL") || "veo-3.1-fast").replace(/[-_]+/g, " ").trim();
+}
+
+/**
+ * Confirm (or select) the configured Veo model in Flow's video mode. Mirrors
+ * ensureNanoBanana's contract exactly: if the wanted model is already showing, done; else
+ * open the nearby model/options controls and select it explicitly. FAILS LOUD — never
+ * falls back to a different Veo tier — because silently rendering on another model would
+ * both violate the operator's choice and bill a different price than they saw.
+ */
+async function ensureVeoModel(page: Page): Promise<void> {
+  const wanted = wantedVeoModel();
+  const pattern = new RegExp(wanted.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s*[-\\s]?\\s*"), "i");
+  if (await page.getByText(pattern).first().isVisible().catch(() => false)) return;
+
+  const controls = page.getByRole("button", { name: /Model|Modelo|Video|Vidéo|Vídeo|Options|Opções|Settings|Configurações/i });
+  const count = Math.min(await controls.count().catch(() => 0), 8);
+  for (let i = count - 1; i >= 0; i--) {
+    const control = controls.nth(i);
+    if (!(await control.isVisible().catch(() => false))) continue;
+    await control.click().catch(() => undefined);
+    // Iterate visible option-like text nodes and pick the one that actually NAMES the
+    // wanted model (veoModelLabelMatches), rather than trusting the first text match —
+    // Flow's menu can also show "Veo 3", "Veo 3 Fast" etc. right next to each other.
+    const optionCandidates = page.getByText(/Veo/i);
+    const optCount = Math.min(await optionCandidates.count().catch(() => 0), 20);
+    for (let j = optCount - 1; j >= 0; j--) {
+      const opt = optionCandidates.nth(j);
+      if (!(await opt.isVisible().catch(() => false))) continue;
+      const text = await opt.innerText().catch(() => "");
+      if (veoModelLabelMatches(wanted, text)) {
+        await opt.click();
+        return;
+      }
+    }
+    await page.keyboard.press("Escape").catch(() => undefined);
+  }
+  throw new FlowBrowserError(
+    `Could not confirm "${wanted}" in Google Flow. Either that Veo model is not available on this account/project, or ` +
+      `Flow's menu text no longer matches. Select it once in the visible browser and retry, or correct FLOW_VIDEO_MODEL.`,
+    "ui"
+  );
+}
+
+/**
+ * Switch Flow's composer between Image and Video generation mode. Fails loud on
+ * ambiguity, same contract as ensureNanoBanana/ensureVeoModel: a beat that needs one
+ * media kind must never silently render as the other. FLOW_MEDIA_MODE_SELECTOR is tried
+ * first when set (advanced override); accessible role/name matching otherwise.
+ *
+ * NOT YET VALIDATED against a live Flow session (no CDP/Chrome available in this
+ * environment) — the selector cascade mirrors ensureNanoBanana's, which IS proven
+ * working for images, but the exact Image/Video switch control should be confirmed
+ * against the real UI before relying on it unattended.
+ */
+async function ensureFlowMediaMode(page: Page, mode: "image" | "video"): Promise<void> {
+  const label = mode === "image" ? /^(?:Image|Imagem|Imagen|Photo)$/i : /^(?:Video|Vidéo|Vídeo)$/i;
+  const custom = getSetting("FLOW_MEDIA_MODE_SELECTOR").trim();
+
+  // Already in the right mode? Flow typically shows the active mode's name near the
+  // composer (same assumption ensureNanoBanana already relies on for the model name).
+  if (await page.getByText(label).first().isVisible().catch(() => false)) return;
+
+  const switchControls = [
+    ...(custom ? [page.locator(custom)] : []),
+    page.getByRole("tab", { name: /Image|Imagem|Video|Vidéo|Vídeo/i }),
+    page.getByRole("button", { name: /Image|Imagem|Video|Vidéo|Vídeo|Mode|Modo|Model|Modelo|Options|Opções/i }),
+  ];
+  for (const group of switchControls) {
+    const count = Math.min(await group.count().catch(() => 0), 8);
+    for (let i = count - 1; i >= 0; i--) {
+      const control = group.nth(i);
+      if (!(await control.isVisible().catch(() => false))) continue;
+      await control.click().catch(() => undefined);
+      const option = page.getByText(label, { exact: false }).last();
+      if (await option.isVisible().catch(() => false)) {
+        await option.click();
+        if (await page.getByText(label).first().isVisible().catch(() => false)) return;
+      }
+      await page.keyboard.press("Escape").catch(() => undefined);
+    }
+  }
+  throw new FlowBrowserError(
+    `Could not switch Google Flow to ${mode === "image" ? "Image" : "Video"} mode. The UI may have changed — ` +
+      `set FLOW_MEDIA_MODE_SELECTOR in Advanced settings, or switch modes once manually and retry.`,
+    "ui"
+  );
+}
+
+/** Ensure Image mode + Nano Banana are active. */
+async function ensureFlowImageMode(page: Page): Promise<void> {
+  await ensureFlowMediaMode(page, "image");
+  await ensureNanoBanana(page);
+}
+
+/** Ensure Video mode + the configured Veo model are active. */
+async function ensureFlowVideoMode(page: Page): Promise<void> {
+  await ensureFlowMediaMode(page, "video");
+  await ensureVeoModel(page);
+}
+
+/**
+ * Best-effort aspect-ratio selection. Unlike the model pickers this FAILS SOFT (logs and
+ * continues) rather than throwing: Flow may default to a sane ratio on its own, and the
+ * pre-existing image path has never set this explicitly either (it only SCORES captured
+ * images against the wanted aspect after the fact via chooseBestCapturedImage). Returns
+ * whether it found and used a matching control, purely for logging.
+ */
+async function ensureFlowAspectRatio(page: Page, aspect: string): Promise<boolean> {
+  const wanted = (aspect || "16:9").trim();
+  if (!/^\d+:\d+$/.test(wanted)) return false;
+  const custom = getSetting("FLOW_ASPECT_RATIO_SELECTOR").trim();
+  const pattern = new RegExp(wanted.replace(":", "\\s*:\\s*"));
+  if (await page.getByText(pattern).first().isVisible().catch(() => false)) return true;
+
+  const controls = [
+    ...(custom ? [page.locator(custom)] : []),
+    page.getByRole("button", { name: /Aspect|Ratio|Proportion|Formato|Proporção/i }),
+  ];
+  for (const group of controls) {
+    const count = Math.min(await group.count().catch(() => 0), 6);
+    for (let i = count - 1; i >= 0; i--) {
+      const control = group.nth(i);
+      if (!(await control.isVisible().catch(() => false))) continue;
+      await control.click().catch(() => undefined);
+      const option = page.getByText(pattern).last();
+      if (await option.isVisible().catch(() => false)) {
+        await option.click();
+        return true;
+      }
+      await page.keyboard.press("Escape").catch(() => undefined);
+    }
+  }
+  return false;
+}
+
+/**
+ * Best-effort duration selection for Flow's video control, when one exists. Fails soft
+ * (like ensureFlowAspectRatio) — "quando a interface permitir" per spec: many Veo tools
+ * offer only a fixed clip length with no control to change it, and that is not an error.
+ */
+async function ensureFlowDuration(page: Page, durationSec: number): Promise<boolean> {
+  const wanted = Math.max(1, Math.round(durationSec));
+  const custom = getSetting("FLOW_DURATION_SELECTOR").trim();
+  const pattern = new RegExp(`\\b${wanted}\\s*s(?:ec)?\\b`, "i");
+
+  const controls = [
+    ...(custom ? [page.locator(custom)] : []),
+    page.getByRole("button", { name: /Duration|Length|Durée|Duração|Duración/i }),
+  ];
+  for (const group of controls) {
+    const count = Math.min(await group.count().catch(() => 0), 6);
+    for (let i = count - 1; i >= 0; i--) {
+      const control = group.nth(i);
+      if (!(await control.isVisible().catch(() => false))) continue;
+      await control.click().catch(() => undefined);
+      const option = page.getByText(pattern).last();
+      if (await option.isVisible().catch(() => false)) {
+        await option.click();
+        return true;
+      }
+      await page.keyboard.press("Escape").catch(() => undefined);
+    }
+  }
+  return false;
+}
+
 async function setReferenceOnFileInput(page: Page, referenceImagePath: string): Promise<boolean> {
   const custom = getSetting("FLOW_REFERENCE_FILE_SELECTOR").trim();
   const groups = [
@@ -404,7 +626,10 @@ async function dropReferenceOnPrompt(page: Page, input: Locator, referenceImageP
     await page.waitForTimeout(2600);
     const body = (await page.locator("body").innerText({ timeout: 1500 }).catch(() => "")).slice(-6000);
     if (/unsupported file|upload failed|could(?:n'?t| not) upload|não foi possível (?:carregar|enviar)/i.test(body)) return false;
-    return true;
+    // dispatchEvent() firing without error is NOT proof Flow acted on the drop — a layout
+    // that silently ignores the synthetic DragEvent looks identical from here. Require a
+    // visible remove/chip control before calling the drop a success.
+    return await confirmReferenceAttached(page);
   } catch {
     return false;
   }
@@ -484,9 +709,10 @@ async function uploadFlowReference(page: Page, input: Locator, referenceImagePat
   );
 }
 
-async function clearFlowReferences(page: Page): Promise<number> {
+/** Shared by clearFlowReferences (click to remove) and confirmReferenceAttached (look, don't click). */
+function referenceRemoveControls(page: Page): Locator[] {
   const custom = getSetting("FLOW_REFERENCE_REMOVE_SELECTOR").trim();
-  const candidates = [
+  return [
     ...(custom ? [page.locator(custom)] : []),
     page.locator('button[aria-label*="remove" i][aria-label*="ingredient" i]'),
     page.locator('button[aria-label*="remove" i][aria-label*="reference" i]'),
@@ -495,17 +721,75 @@ async function clearFlowReferences(page: Page): Promise<number> {
     page.locator('button[title*="remove" i][title*="ingredient" i], button[title*="remove" i][title*="reference" i]'),
     page.getByRole("button", { name: /^Remove (?:image|ingredient|reference|attachment|media)/i }),
   ];
+}
+
+async function clearFlowReferences(page: Page): Promise<number> {
   let removed = 0;
   // Repeat because each click can re-render the attachment row and invalidate
   // indices. The narrow accessible-name match avoids touching generated outputs.
   for (let pass = 0; pass < 6; pass++) {
-    const item = await firstVisible(candidates);
+    const item = await firstVisible(referenceRemoveControls(page));
     if (!item) break;
     await item.click().catch(() => undefined);
     removed++;
     await page.waitForTimeout(250);
   }
   return removed;
+}
+
+/**
+ * Visual evidence that a reference is actually attached — a removable chip/attachment
+ * control became reachable. This is the check that distinguishes "we told the DOM to
+ * accept a file" from "Flow shows the file was accepted"; dispatchEvent() succeeding is
+ * NOT itself that evidence (see dropReferenceOnPrompt).
+ */
+async function confirmReferenceAttached(page: Page): Promise<boolean> {
+  return (await firstVisible(referenceRemoveControls(page))) !== null;
+}
+
+/**
+ * Safe diagnostic snapshot for a failed reference attach: button names/aria-labels/titles/
+ * data-testids near the composer, plus how many file inputs exist. Never reads cookies,
+ * tokens, or any account/session data — only DOM structure.
+ */
+async function diagnoseComposerControls(page: Page): Promise<string> {
+  try {
+    const info = await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll("button, [role=button]")).slice(0, 40);
+      const names = btns
+        .map((b) => (b.getAttribute("aria-label") || b.getAttribute("title") || b.textContent || "").trim())
+        .filter(Boolean)
+        .slice(0, 20);
+      const testIds = Array.from(document.querySelectorAll("[data-testid]"))
+        .map((el) => el.getAttribute("data-testid") || "")
+        .filter(Boolean)
+        .slice(0, 20);
+      const fileInputs = document.querySelectorAll('input[type="file"]').length;
+      return { names, testIds, fileInputs };
+    });
+    return `diagnostics: buttons=[${info.names.join(" | ").slice(0, 400)}] data-testids=[${info.testIds.join(",").slice(0, 200)}] fileInputs=${info.fileInputs}`;
+  } catch {
+    return "diagnostics: unavailable";
+  }
+}
+
+/**
+ * Clear whatever reference the PREVIOUS beat may have left attached, then optionally
+ * attach a new one — the single seam both generateFlowImage and generateFlowVideo call,
+ * so "clear before every beat, attach only when this beat wants it" can never drift
+ * between the image and video paths. Returns whether a reference ended up attached.
+ */
+async function prepareComposerReference(page: Page, input: Locator, referenceImagePath: string | null): Promise<boolean> {
+  await clearFlowReferences(page);
+  if (!referenceImagePath) return false;
+  await uploadFlowReference(page, input, referenceImagePath);
+  if (await confirmReferenceAttached(page)) return true;
+  const diag = await diagnoseComposerControls(page);
+  throw new FlowBrowserError(
+    `Character reference was sent to Google Flow but no attachment could be confirmed afterward — treating this as a ` +
+      `failed upload rather than silently generating without the reference. ${diag}`,
+    "ui"
+  );
 }
 
 function isCandidateResponse(response: Response): boolean {
@@ -582,13 +866,13 @@ async function tryDownloadFromUi(page: Page, outPath: string): Promise<boolean> 
   }
 }
 
-async function detectFlowFailure(page: Page): Promise<FlowBrowserError | null> {
+async function detectFlowFailure(page: Page, media: "image" | "video" = "image"): Promise<FlowBrowserError | null> {
   const body = (await page.locator("body").innerText({ timeout: 1500 }).catch(() => "")).slice(-12_000);
   if (/out of (?:AI |Flow )?credits|not enough credits|créditos insuficientes|sem créditos/i.test(body)) {
     return new FlowBrowserError("Google Flow reports that this account has no credits available.", "credits");
   }
   if (/generation failed|could(?:n'?t| not) generate|não foi possível gerar|tente novamente/i.test(body)) {
-    return new FlowBrowserError("Google Flow reported that image generation failed.", "ui");
+    return new FlowBrowserError(`Google Flow reported that ${media} generation failed.`, "ui");
   }
   return null;
 }
@@ -609,15 +893,13 @@ export async function generateFlowImage(
       throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
     }
     const input = await promptBox(page);
-    await ensureNanoBanana(page);
+    await ensureFlowImageMode(page);
+    await ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
     // Remove any composer attachment left by a previous beat. Then attach the
     // portrait only for a beat explicitly routed as a character scene. This keeps
     // object/detail shots from inheriting the housekeeper by accident.
-    await clearFlowReferences(page);
-    if (options?.referenceImagePath) {
-      await uploadFlowReference(page, input, options.referenceImagePath);
-    }
-    const timeoutMs = settingInt("FLOW_GENERATION_TIMEOUT_SEC", 240, 30, 900) * 1000;
+    await prepareComposerReference(page, input, options?.referenceImagePath ?? null);
+    const timeoutMs = flowImageTimeoutMs();
     const candidates: CapturedImage[] = [];
     const tasks = new Set<Promise<void>>();
     let lastCaptureAt = 0;
@@ -658,6 +940,290 @@ export async function generateFlowImage(
       if (await tryDownloadFromUi(page, outPath)) return outPath;
       throw new FlowBrowserError(
         `No full-size Flow image was captured within ${Math.round(timeoutMs / 1000)}s. The UI may have changed.`,
+        "timeout"
+      );
+    } finally {
+      page.off("response", onResponse);
+    }
+  });
+}
+
+// ── Veo video ────────────────────────────────────────────────────────────────
+
+/**
+ * Video-shaped network response: real video content-type, or a URL ending in a common
+ * video container extension. Excludes nothing by size here (unlike images, Flow does not
+ * appear to serve tiny video "icons"), but callers still gate on a minimum byte count once
+ * the body is actually fetched. Exported for unit tests.
+ */
+export function isVideoResponseCandidate(contentType: string, url: string): boolean {
+  const type = (contentType || "").toLowerCase();
+  if (type.startsWith("video/")) return true;
+  return /\.(mp4|webm|mov|m4v)(?:[?#]|$)/i.test(url.split("?")[0] ?? url);
+}
+
+/** Below this, a "video" response is almost certainly a poster frame or a tracking pixel, not a real clip. */
+const MIN_FLOW_VIDEO_BYTES = 150_000;
+
+interface FlowVideoCandidate {
+  response: Response;
+  url: string;
+  capturedAt: number;
+}
+
+/**
+ * Among several matched network responses, the NEWEST one — i.e. the last one Flow sent
+ * during this generation. Candidates are pushed in the order responses arrive, so the last
+ * element is the newest by construction; this is a named, testable seam rather than an
+ * inline `[length - 1]` so "choose the newest" is a documented, reviewable decision (per
+ * spec: "se houver vários resultados, identifique o resultado mais novo"). Exported for tests.
+ */
+export function newestVideoCandidate<T extends { capturedAt: number }>(candidates: T[]): T | null {
+  if (candidates.length === 0) return null;
+  return candidates.reduce((newest, c) => (c.capturedAt >= newest.capturedAt ? c : newest));
+}
+
+/**
+ * Cheap pre-ffprobe sniff: is this actually HTML or a JSON error body wearing a video
+ * extension/content-type? A failed/expired download often still arrives as a 200 status
+ * carrying an HTML error page from a CDN edge. Catching it from the first bytes avoids
+ * spending an ffprobe subprocess on something that was never going to be a video, and
+ * avoids ffprobe's own error text (which can be cryptic) as the operator-facing reason.
+ * Exported for unit tests.
+ */
+export function looksLikeNonVideoBody(buf: Buffer): boolean {
+  const head = buf.subarray(0, 512).toString("utf8").trimStart().toLowerCase();
+  return head.startsWith("<") || head.startsWith("{") || head.startsWith("[");
+}
+
+/** What validateFlowVideoFile confirmed about a downloaded clip. */
+export interface FlowVideoProbe {
+  durationSec: number;
+  width: number;
+  height: number;
+  codec: string | null;
+  fps: number | null;
+}
+
+/**
+ * Validate a downloaded Flow video BEFORE it is handed to the pipeline: exists, non-empty,
+ * not an HTML/JSON error body, and ffprobe confirms a real video stream with a readable
+ * duration and dimensions. Throws FlowBrowserError("capture") with a specific reason on
+ * any rejection — never silently accepts a thumbnail, an incomplete download, or an error
+ * page as a video.
+ *
+ * Deliberately does NOT re-encode or scale here: the shared beat compositor
+ * (studio-assemble.ts renderBeat) already re-encodes EVERY beat visual to the project's
+ * codec/resolution/fps and strips audio unconditionally (`-an` in encodeV), exactly the
+ * same way it already does for every kie.ai Veo / real-footage clip. Duplicating that
+ * normalization here would be a second FFmpeg implementation for behavior the compositor
+ * already guarantees — this function's job is strictly PASS/REJECT.
+ */
+export async function validateFlowVideoFile(filePath: string): Promise<FlowVideoProbe> {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    throw new FlowBrowserError("Downloaded Flow video is missing on disk.", "capture");
+  }
+  if (stat.size <= 0) throw new FlowBrowserError("Downloaded Flow video is empty (0 bytes).", "capture");
+
+  const head = Buffer.alloc(Math.min(512, stat.size));
+  const fd = fs.openSync(filePath, "r");
+  try {
+    fs.readSync(fd, head, 0, head.length, 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (looksLikeNonVideoBody(head)) {
+    throw new FlowBrowserError("The downloaded file looks like an HTML/JSON error page, not a video.", "capture");
+  }
+
+  const r = spawnSync(
+    resolveFfprobe(),
+    [
+      "-v", "error",
+      "-select_streams", "v:0",
+      "-show_entries", "stream=codec_name,width,height,avg_frame_rate",
+      "-show_entries", "format=duration",
+      "-of", "json",
+      filePath,
+    ],
+    { encoding: "utf8", timeout: 30_000 }
+  );
+  if (r.status !== 0) {
+    throw new FlowBrowserError(
+      `ffprobe could not read the downloaded Flow video (rc=${r.status ?? "null"}): ${(r.stderr || "").toString().slice(0, 200)}`,
+      "capture"
+    );
+  }
+  let parsed: { streams?: Array<{ codec_name?: string; width?: number; height?: number; avg_frame_rate?: string }>; format?: { duration?: string } };
+  try {
+    parsed = JSON.parse(r.stdout || "{}");
+  } catch {
+    throw new FlowBrowserError("ffprobe returned unreadable output for the downloaded Flow video.", "capture");
+  }
+  const stream = parsed.streams?.[0];
+  if (!stream) {
+    throw new FlowBrowserError("The downloaded Flow file has no video stream — rejecting it (likely a thumbnail or an error body).", "capture");
+  }
+  const width = Number(stream.width) || 0;
+  const height = Number(stream.height) || 0;
+  const durationSec = Number(parsed.format?.duration) || 0;
+  if (width <= 0 || height <= 0) throw new FlowBrowserError("The downloaded Flow video has no readable dimensions.", "capture");
+  if (!(durationSec > 0)) throw new FlowBrowserError("The downloaded Flow video has no readable duration.", "capture");
+  let fps: number | null = null;
+  const fr = stream.avg_frame_rate;
+  if (fr && fr.includes("/")) {
+    const [n, d] = fr.split("/").map(Number);
+    if (d > 0 && Number.isFinite(n)) fps = n / d;
+  }
+  return { durationSec, width, height, codec: stream.codec_name ?? null, fps };
+}
+
+/**
+ * Official-download path for a finished Veo result — preferred over network-response
+ * capture because Chrome streams the save straight to disk (Playwright's `download.saveAs`)
+ * without ever buffering the file in this process, unlike `response.body()`.
+ */
+async function tryDownloadVideoFromUi(page: Page, tmpPath: string): Promise<boolean> {
+  const custom = getSetting("FLOW_VIDEO_DOWNLOAD_SELECTOR").trim();
+  const downloadButton = await firstVisible([
+    ...(custom ? [page.locator(custom)] : []),
+    page.getByRole("button", { name: /Download video|Baixar vídeo|Download|Baixar|Télécharger|Export|Exporter|Save|Salvar/i }),
+    page.locator('button[aria-label*="download" i]'),
+    page.locator('button[title*="download" i]'),
+    page.locator('[data-testid*="download" i]'),
+  ]);
+  if (!downloadButton) return false;
+  try {
+    const downloadPromise = page.waitForEvent("download", { timeout: 20_000 });
+    await downloadButton.click();
+    const download = await downloadPromise;
+    await download.saveAs(tmpPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Generate one video through the Google Flow web UI (Veo) and save it as MP4.
+ *
+ * Serialized on the SAME queue as generateFlowImage (enqueue() shares process-wide
+ * `state.queue`) — image and video generations can never overlap in the controlled tab,
+ * whatever order studio-pipeline's concurrent beats request them in.
+ *
+ * Audio: deliberately NOT handled here. The shared beat compositor
+ * (studio-assemble.ts renderBeat) re-encodes every beat visual with `-an` unconditionally,
+ * so Veo's own ambient audio never reaches the mux regardless of what this function
+ * downloads. Duration matching is the same story — renderBeat loops a short clip
+ * (`-stream_loop -1`) and hard-cuts a long one (`-frames:v <exact beat frame count>`), so
+ * this function does not pre-trim to the beat length either. That is not an omission: it is
+ * reusing the one mechanism every other video source (kie.ai Veo, real footage) already
+ * goes through, rather than adding a second, beat-unaware trim pass here.
+ */
+export async function generateFlowVideo(
+  runId: string,
+  prompt: string,
+  outPath: string,
+  aspect = "16:9",
+  options?: { referenceImagePath?: string; durationSec?: number }
+): Promise<string> {
+  return enqueue(async () => {
+    if (runId) checkCancelled(runId);
+    const { page } = await launchBrowser();
+    await gotoFlow(page);
+    if (await pageHasLoginPrompt(page)) {
+      throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
+    }
+    const input = await promptBox(page);
+    await ensureFlowVideoMode(page);
+    await ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
+    const requestedDurationSec = options?.durationSec && options.durationSec > 0 ? options.durationSec : flowRequestedVideoDurationSec();
+    await ensureFlowDuration(page, requestedDurationSec);
+    // Reference handling mirrors the image path exactly (prepareComposerReference is the
+    // shared seam): cleared before every beat, attached only when this beat wants it, and
+    // NEVER silently skipped — a failed attach throws rather than rendering a video that
+    // looks like it used the reference when it didn't.
+    await prepareComposerReference(page, input, options?.referenceImagePath ?? null);
+
+    const timeoutMs = flowVideoTimeoutMs();
+    const candidates: FlowVideoCandidate[] = [];
+    let lastCaptureAt = 0;
+    const onResponse = (response: Response) => {
+      if (!isVideoResponseCandidate(response.headers()["content-type"] || "", response.url())) return;
+      candidates.push({ response, url: response.url(), capturedAt: Date.now() });
+      lastCaptureAt = Date.now();
+    };
+    page.on("response", onResponse);
+
+    let promptSent = false;
+    let downloadButtonSeen = false;
+    const tmpPath = path.join(os.tmpdir(), `flow_veo_${Date.now()}_${Math.random().toString(36).slice(2)}.mp4`);
+    try {
+      await input.fill(prompt.slice(0, 12_000));
+      await submitPrompt(page, input);
+      promptSent = true; // never re-submitted below — one prompt, one generation, whatever happens next
+
+      const deadline = Date.now() + timeoutMs;
+      let nextFailureCheck = Date.now() + 5_000;
+      // Longer quiet window than images: Flow can stream a proxy/preview response before
+      // the final encoded result, and a short window would grab the preview.
+      const QUIET_MS = 8_000;
+      while (Date.now() < deadline) {
+        if (runId) checkCancelled(runId);
+        if (await pageHasLoginPrompt(page)) throw new FlowBrowserError("Google session expired during video generation.", "login");
+        if (candidates.length && Date.now() - lastCaptureAt >= QUIET_MS) break;
+        if (await firstVisible([page.getByRole("button", { name: /Download video|Baixar vídeo/i })])) {
+          downloadButtonSeen = true;
+          break;
+        }
+        if (Date.now() >= nextFailureCheck) {
+          const failure = await detectFlowFailure(page, "video");
+          if (failure) throw failure;
+          nextFailureCheck = Date.now() + 5_000;
+        }
+        await page.waitForTimeout(750);
+      }
+
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+
+      // 1) Prefer the official Download control — streamed straight to disk by Chrome.
+      if (await tryDownloadVideoFromUi(page, tmpPath)) {
+        try {
+          await validateFlowVideoFile(tmpPath);
+          if (path.resolve(tmpPath) !== path.resolve(outPath)) fs.renameSync(tmpPath, outPath);
+          return outPath;
+        } catch (e) {
+          try { fs.unlinkSync(tmpPath); } catch {}
+          // Fall through to network-capture below rather than failing immediately — the
+          // Download button existing is not proof the file behind it was good.
+          log(runId, "debug", `Flow video download button produced an invalid file (${(e as Error).message.slice(0, 140)}) — trying captured network response`, { stage: "visual" });
+        }
+      }
+
+      // 2) Fall back to the newest matching network response.
+      const chosen = newestVideoCandidate(candidates);
+      if (chosen) {
+        try {
+          const buffer = await chosen.response.body();
+          if (buffer.byteLength >= MIN_FLOW_VIDEO_BYTES) {
+            fs.writeFileSync(tmpPath, buffer);
+            await validateFlowVideoFile(tmpPath);
+            fs.renameSync(tmpPath, outPath);
+            return outPath;
+          }
+        } catch {
+          // fall through to the timeout error below with full diagnostics
+        }
+      }
+      try { fs.unlinkSync(tmpPath); } catch {}
+
+      throw new FlowBrowserError(
+        `No valid Flow/Veo video was captured within ${Math.round(timeoutMs / 1000)}s ` +
+          `[model="${wantedVeoModel()}", mode=video, promptSent=${promptSent}, ` +
+          `resultAppeared=${candidates.length > 0}, downloadButtonSeen=${downloadButtonSeen}]. The UI may have changed.`,
         "timeout"
       );
     } finally {
