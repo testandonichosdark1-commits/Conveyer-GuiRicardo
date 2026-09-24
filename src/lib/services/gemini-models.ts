@@ -237,31 +237,34 @@ export function classifyGeminiError(message: string): "transient" | "permanent" 
 }
 
 /**
- * Is this failure the API key running out of quota, rather than Gemini being busy?
+ * Is this failure the API key running out of quota/credit, rather than Gemini being busy?
  *
- * Both arrive as HTTP 429 and both are classified "transient" above — correctly, since a
- * per-minute rate limit really does clear on its own. But an EXHAUSTED quota never clears
- * inside a run: every subsequent call 429s too, the planner falls through to the keyword
- * fallback for every beat, and the operator gets a video with no overlay cards and search
- * queries cut from the raw narration. That looked identical to "Gemini had a bad minute" in
- * the logs, so it is called out separately (see noteGeminiQuota).
+ * A per-minute rate limit (bare 429, no body detail) is classified "transient" above —
+ * correctly, since it really does clear on its own. But an EXHAUSTED quota or a depleted
+ * prepaid balance never clears inside a run: every subsequent call fails too, the planner
+ * falls through to the keyword fallback for every beat, and the operator gets a video with
+ * no overlay cards, search queries cut from the raw narration, and image quality control
+ * silently switched off. That looked identical to "Gemini had a bad minute" in the logs, so
+ * it is called out separately (see noteGeminiQuota).
  *
- * Google words it as a `RESOURCE_EXHAUSTED` status with "Quota exceeded for quota metric …",
- * and our thrown message carries the first 200 bytes of that body. A bare 429 with no body
- * detail stays UNMATCHED here: it is far likelier to be a momentary rate limit, and calling
- * that "your key is out of quota" would send the operator to fix a bill that is already paid.
+ * Google words a rate-limited/quota-exceeded key as a `RESOURCE_EXHAUSTED` status with
+ * "Quota exceeded for quota metric …", HTTP 429, and our thrown message carries the first 200
+ * bytes of that body.
  *
- * A pay-as-you-go key exhausts a DIFFERENT way: the body reads "Your prepayment credit
- * balance is too low …", not "quota"/"RESOURCE_EXHAUSTED" at all — confirmed live: a real run's
- * 429 body put its `"status": "RESOURCE_EXHAUSTED"` field far enough into the JSON (after a
- * long `message`) that the 200-byte slice above cut it off before this check ever saw it, so
- * the quota wall went completely unreported for the rest of that run. "prepayment" is matched
- * on its own, independent of the RESOURCE_EXHAUSTED/quota wording, precisely so a truncated
- * body still classifies correctly.
+ * A pay-as-you-go key with an empty prepaid balance is a DIFFERENT failure in TWO ways, not
+ * one: the body reads "Your prepayment credit balance is too low …" / "…credits are
+ * depleted…" instead of "quota"/"RESOURCE_EXHAUSTED" — AND confirmed live, Google returns
+ * **HTTP 402**, not 429, for this specific case (a real run logged `Gemini 402: {"error":
+ * {"code":402,"message":"Your prepayment credits are depleted...`, 782 times across every
+ * single beat, never once matching the 429-only check this function used to have — the run
+ * finished, but with keyword-only planning and no AI vision judging for its ENTIRE length,
+ * and nothing paused it or told the operator why). So both 429 and 402 are accepted status
+ * codes here; "prepayment" is matched independent of the RESOURCE_EXHAUSTED/quota wording so
+ * a 200-byte-truncated body still classifies correctly either way.
  */
 export function isGeminiQuotaError(message: string): boolean {
-  if (!/\bGemini 429\b/.test(message)) return false;
-  return /RESOURCE_EXHAUSTED|quota exceeded|exceeded your current quota|prepayment credit/i.test(message);
+  if (!/\bGemini (?:429|402)\b/.test(message)) return false;
+  return /RESOURCE_EXHAUSTED|quota exceeded|exceeded your current quota|prepayment credit|prepayment credits|credits? (?:are |is )?depleted/i.test(message);
 }
 
 /**
