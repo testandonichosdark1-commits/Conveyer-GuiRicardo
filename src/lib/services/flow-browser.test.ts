@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import sharp from "sharp";
 
 /**
  * Unit tests for the pieces of the Flow/Veo browser adapter that don't require a live
@@ -36,6 +37,10 @@ import {
   flowRequestedVideoDurationSec,
   chooseBestCapturedImage,
   prepareComposerReference,
+  looksLikeReferenceEcho,
+  classifyFlowFailureBody,
+  failureBaselineOf,
+  chipShowsModel,
   FlowBrowserError,
 } from "./flow-browser";
 
@@ -86,6 +91,39 @@ describe("flowModelLabelMatches — Nano Banana tiers (same matcher, shared with
     expect(flowModelLabelMatches("nano-banana", "Nano Banana Pro")).toBe(false);
     expect(flowModelLabelMatches("nano-banana-pro", "Nano Banana 2")).toBe(false);
     expect(flowModelLabelMatches("nano-banana-2", "Nano Banana Pro")).toBe(false);
+  });
+});
+
+describe("chipShowsModel — which model does the composer chip / family select show as ACTIVE", () => {
+  // Strings captured from the live Flow DOM (innerText, "\n" shown as newlines).
+  const CHIP_2 = "🍌 Nano Banana 2\ncrop_16_9\nx1";
+  const SELECT_2 = "🍌 Nano Banana 2\narrow_drop_down";
+
+  it("reads the active model off the real chip and select text, ignoring the furniture", () => {
+    expect(chipShowsModel(CHIP_2, "nano banana 2")).toBe(true);
+    expect(chipShowsModel(SELECT_2, "nano-banana-2")).toBe(true);
+  });
+
+  it("does not report a different tier as active", () => {
+    expect(chipShowsModel(CHIP_2, "nano banana pro")).toBe(false);
+    expect(chipShowsModel(CHIP_2, "nano banana")).toBe(false); // "2" continues the name
+    expect(chipShowsModel("🍌 Nano Banana 2 Lite\ncrop_16_9\nx1", "nano banana 2")).toBe(false);
+    expect(chipShowsModel("🍌 Nano Banana Pro\ncrop_16_9\nx1", "nano banana 2")).toBe(false);
+  });
+
+  it("recognises Pro when it is the active one", () => {
+    expect(chipShowsModel("🍌 Nano Banana Pro\ncrop_16_9\nx1", "nano banana pro")).toBe(true);
+  });
+
+  it("handles Veo-style names too", () => {
+    expect(chipShowsModel("Veo 3.1 - Fast\ncrop_16_9\nx1", "veo 3.1 fast")).toBe(true);
+    expect(chipShowsModel("Veo 3.1 - Fast\ncrop_16_9\nx1", "veo 3.1")).toBe(false);
+    expect(chipShowsModel("Veo 3.1 - Quality\ncrop_16_9\nx1", "veo 3.1 fast")).toBe(false);
+  });
+
+  it("empty inputs are never a match", () => {
+    expect(chipShowsModel("", "nano banana 2")).toBe(false);
+    expect(chipShowsModel(CHIP_2, "")).toBe(false);
   });
 });
 
@@ -251,6 +289,87 @@ describe("validateFlowVideoFile", () => {
   });
 });
 
+// ── looksLikeReferenceEcho — reject Flow echoing the attached photo as the "result" ────
+
+describe("looksLikeReferenceEcho", () => {
+  const REF = path.join(TMP, "reference.png");
+  let refBuffer: Buffer;
+  let differentBuffer: Buffer;
+
+  beforeAll(async () => {
+    // A busy, multi-region image (not a flat color) so a resize-based pixel comparison
+    // is meaningful — a solid color would trivially "match" any other solid color at a
+    // tiny thumbnail size regardless of hue.
+    refBuffer = await sharp({
+      create: { width: 640, height: 480, channels: 3, background: { r: 200, g: 120, b: 60 } },
+    })
+      .composite([{ input: await sharp({ create: { width: 300, height: 300, channels: 3, background: { r: 20, g: 200, b: 20 } } }).png().toBuffer(), left: 20, top: 20 }])
+      .png()
+      .toBuffer();
+    fs.writeFileSync(REF, refBuffer);
+    differentBuffer = await sharp({
+      create: { width: 640, height: 480, channels: 3, background: { r: 10, g: 10, b: 200 } },
+    })
+      .composite([{ input: await sharp({ create: { width: 300, height: 300, channels: 3, background: { r: 220, g: 220, b: 10 } } }).png().toBuffer(), left: 300, top: 100 }])
+      .png()
+      .toBuffer();
+  });
+
+  it("no reference configured → never an echo", async () => {
+    expect(await looksLikeReferenceEcho(refBuffer, undefined)) .toBe(false);
+  });
+
+  it("reference file missing on disk → never an echo (fails open, doesn't throw)", async () => {
+    expect(await looksLikeReferenceEcho(refBuffer, path.join(TMP, "does-not-exist.png"))).toBe(false);
+  });
+
+  it("byte-identical to the reference → echo", async () => {
+    expect(await looksLikeReferenceEcho(Buffer.from(refBuffer), REF)).toBe(true);
+  });
+
+  it("re-encoded/resized copy of the reference → still an echo", async () => {
+    const reencoded = await sharp(refBuffer).resize(512, 384).jpeg({ quality: 90 }).toBuffer();
+    expect(await looksLikeReferenceEcho(reencoded, REF)).toBe(true);
+  });
+
+  it("a genuinely different image → not an echo", async () => {
+    expect(await looksLikeReferenceEcho(differentBuffer, REF)).toBe(false);
+  });
+});
+
+// ── classifyFlowFailureBody — recognizing Flow's OWN failure cards ─────────────────────
+
+describe("classifyFlowFailureBody", () => {
+  it("recognizes the live PT-BR policy-violation card (regression: this exact string was previously missed entirely)", () => {
+    const body = "Falha\nEsta geração talvez viole nossas políticas. Tente usar outro comando ou envie feedback.\nNão houve cobrança por esta geração.";
+    const err = classifyFlowFailureBody(body, "image");
+    expect(err).toBeInstanceOf(FlowBrowserError);
+    expect(err!.code).toBe("policy");
+    expect(err!.message).toMatch(/policy violation/i);
+  });
+
+  it("recognizes the English policy-violation phrasing", () => {
+    const err = classifyFlowFailureBody("This generation may violate our policies.", "video");
+    expect(err).toBeInstanceOf(FlowBrowserError);
+    expect(err!.code).toBe("policy");
+  });
+
+  it("still recognizes credits exhaustion, in English and Portuguese", () => {
+    expect(classifyFlowFailureBody("You are out of AI credits.")?.code).toBe("credits");
+    expect(classifyFlowFailureBody("Você não tem créditos insuficientes para continuar.")?.code).toBe("credits");
+  });
+
+  it("still recognizes a generic generation failure", () => {
+    expect(classifyFlowFailureBody("Generation failed. Please try again.")?.code).toBe("ui");
+    expect(classifyFlowFailureBody("Não foi possível gerar. Tente novamente.")?.code).toBe("ui");
+  });
+
+  it("does not fire on ordinary page text", () => {
+    expect(classifyFlowFailureBody("Generate a video of a cat playing piano.")).toBeNull();
+    expect(classifyFlowFailureBody("")).toBeNull();
+  });
+});
+
 // ── prepareComposerReference — clear-then-attach sequencing, with a fake Playwright Page ──
 //
 // This is not a DOM emulator: it implements just enough of the Locator/Page surface that
@@ -266,6 +385,9 @@ function makeFakePage(state: { chipVisible: boolean }) {
     const self = {
       count: async () => 1,
       nth: () => self,
+      first: () => self,
+      last: () => self,
+      filter: () => self,
       isVisible: async () => {
         if (spec.kind === "fileInput") return true;
         if (spec.kind === "removeButton") return state.chipVisible;
@@ -288,7 +410,8 @@ function makeFakePage(state: { chipVisible: boolean }) {
 
   const page = {
     locator: (sel: string) => {
-      // input[type="file"] is the FIRST strategy uploadFlowReference tries.
+      // The asset-picker strategy runs first but finds nothing here (no "+" is visible), so the
+      // file-input strategy is what attaches in this fake.
       if (sel.includes('input[type="file"]')) return locatorFor({ kind: "fileInput" });
       // Everything else (remove-reference selectors) behaves as the remove control.
       return locatorFor({ kind: "removeButton" });
@@ -323,5 +446,39 @@ describe("prepareComposerReference — clear before every beat, attach only when
     const attached = await prepareComposerReference(page as any, page.locator("input") as any, null);
     expect(attached).toBe(false);
     expect(state.chipVisible).toBe(false); // cleaned up — does not leak into this beat
+  });
+});
+
+describe("isModelIndependentFailure — policy refusals", () => {
+  it("never retries a different model tier after a policy refusal", () => {
+    expect(isModelIndependentFailure("policy")).toBe(true);
+    expect(isModelIndependentFailure("ui")).toBe(false);
+  });
+});
+
+describe("failure baseline — a stale card from an earlier generation is not this generation failing", () => {
+  const stale = "Falha\nEsta geração talvez viole nossas políticas. Tente usar outro comando.";
+  it("ignores a refusal already on the page before submit", () => {
+    const baseline = failureBaselineOf(stale);
+    expect(classifyFlowFailureBody(stale, "image", baseline)).toBeNull();
+  });
+  it("still reports a NEW refusal that appears after the baseline", () => {
+    const baseline = failureBaselineOf(stale);
+    const err = classifyFlowFailureBody(stale + "\n" + stale, "image", baseline);
+    expect(err?.code).toBe("policy");
+  });
+  it("without a baseline behaves exactly as before", () => {
+    expect(classifyFlowFailureBody(stale)?.code).toBe("policy");
+  });
+});
+
+describe("usage-limit card", () => {
+  it("recognizes the live PT-BR limit card as credits exhaustion", () => {
+    const body = "Falha\nVocê chegou ao limite de uso. Tente de novo mais tarde.\nNão houve cobrança por esta geração.";
+    expect(classifyFlowFailureBody(body)?.code).toBe("credits");
+  });
+  it("ignores a limit card that was already there before submit (the limit may have reset)", () => {
+    const body = "Falha\nVocê chegou ao limite de uso. Tente de novo mais tarde.";
+    expect(classifyFlowFailureBody(body, "image", failureBaselineOf(body))).toBeNull();
   });
 });

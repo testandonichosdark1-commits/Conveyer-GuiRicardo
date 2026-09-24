@@ -258,6 +258,9 @@ tryAddColumn("channels", "voice_provider TEXT");
 // NULL = global AI_CHARACTER_REFERENCE_PATH. Same global-vs-channel model as voice_id —
 // see src/app/api/channels/[id]/character-reference/route.ts.
 tryAddColumn("channels", "character_reference_path TEXT");
+// Per-channel words that make a beat "show the character" (comma-separated). NULL/empty =
+// the built-in list (housekeeper vocabulary), so existing channels behave exactly as before.
+tryAddColumn("channels", "character_terms TEXT");
 // Per-channel API-key overrides — JSON object `{ "HEYGEN_API_KEY": "...", ... }`, restricted
 // to isSecretKey() settings only (see channels.ts channelSettingOverrides()). NULL/'{}' = use
 // every global key. Lets one channel run entirely on a different client's provider accounts

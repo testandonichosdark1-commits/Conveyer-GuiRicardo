@@ -31,6 +31,7 @@ function baseChannel(overrides: Partial<Channel> = {}): Channel {
     voice_speed: null,
     voice_provider: null,
     character_reference_path: null,
+    character_terms: null,
     api_keys_json: null,
     interval_sec: 4.5,
     format: "1920x1080",

@@ -66,6 +66,7 @@ export function FlowBrowserBlock({ val, set }: { val: Val; set: Set }) {
           <select className="input" value={val("FLOW_FALLBACK_PROVIDER") || "none"} onChange={(e) => set("FLOW_FALLBACK_PROVIDER", e.target.value)}>
             <option value="none">{tr("Mettre en pause / échouer (aucun coût)", "Pause / fail (no paid fallback)")}</option>
             <option value="kie">{tr("Utiliser kie.ai (Nano Banana / Veo)", "Use kie.ai (Nano Banana / Veo)")}</option>
+            <option value="chain">{tr("Cloudflare → Pollinations → Muse Meta → kie.ai (images)", "Cloudflare → Pollinations → Meta Muse → kie.ai (images)")}</option>
           </select>
           <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
             {tr(

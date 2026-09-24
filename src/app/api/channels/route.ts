@@ -27,6 +27,7 @@ export async function POST(req: Request) {
       visual_mode: body.visual_mode as "ai" | "real" | "mix" | undefined,
       ai_style: body.ai_style != null ? String(body.ai_style) : null,
       visual_prompt: body.visual_prompt != null ? String(body.visual_prompt) : null,
+      character_terms: body.character_terms != null ? String(body.character_terms) : null,
       voice_id: voiceId,
       voice_speed: body.voice_speed != null && body.voice_speed !== "" ? Number(body.voice_speed) : null,
       // Derived, never trusted from the client — see deriveVoiceProvider()'s doc comment.

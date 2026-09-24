@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import sharp from "sharp";
 import { chromium, type BrowserContext, type Locator, type Page, type Response } from "playwright";
@@ -20,7 +21,7 @@ import { log } from "../logger";
  */
 
 export class FlowBrowserError extends Error {
-  constructor(message: string, public readonly code: "config" | "login" | "ui" | "timeout" | "credits" | "capture") {
+  constructor(message: string, public readonly code: "config" | "login" | "ui" | "timeout" | "credits" | "capture" | "policy") {
     super(message);
     this.name = "FlowBrowserError";
   }
@@ -46,6 +47,8 @@ interface FlowBrowserState {
   page: Page | null;
   launching: Promise<{ context: BrowserContext; page: Page }> | null;
   queue: Promise<void>;
+  /** model -> epoch ms until which Flow said its usage limit is hit (survives hot reload). */
+  limitedModels?: Map<string, number>;
 }
 
 declare global {
@@ -58,7 +61,9 @@ const state: FlowBrowserState = globalThis.__facelessFlowBrowserState ?? {
   page: null,
   launching: null,
   queue: Promise.resolve(),
+  limitedModels: new Map<string, number>(),
 };
+state.limitedModels ??= new Map<string, number>();
 globalThis.__facelessFlowBrowserState = state;
 
 // Generalized from the image-only literal so image and video can each own their own
@@ -348,6 +353,141 @@ async function submitPrompt(page: Page, input: Locator): Promise<void> {
 }
 
 /**
+ * Turns whatever option labels WERE visible (but didn't match) into a compact, readable
+ * diagnostic appended to the "could not confirm" error. Without this, a mismatch (e.g. the
+ * wanted tier's row carrying an extra price/description segment the matcher doesn't
+ * recognize) is indistinguishable from the option simply not existing — the operator, or
+ * the next person debugging this from a run log, has to reproduce the failure live in a
+ * browser just to learn what Flow actually rendered. Capped and deduplicated; this is DOM
+ * text only, never cookies/tokens/account data (same rule as diagnoseComposerControls).
+ */
+function describeSeenLabels(seen: string[]): string {
+  const unique = Array.from(new Set(seen.map((s) => s.replace(/\s+/g, " ").trim()).filter(Boolean))).slice(0, 10);
+  return unique.length ? ` Saw: ${unique.map((s) => `"${s}"`).join(", ")}.` : " No matching option was visible.";
+}
+
+/**
+ * Close whatever menu/popover is open. Escape alone is NOT enough: in the wide layout the
+ * add-menu popover is a CDK overlay that ignores it and stays open behind a backdrop —
+ * observed live — and every later click is then swallowed ("<div class=cdk-overlay-backdrop>
+ * intercepts pointer events"), which is exactly how a failed reference attach used to poison
+ * the next model switch. Clicking the backdrop is what closes it.
+ */
+async function dismissOpenOverlays(page: Page): Promise<void> {
+  await page.keyboard.press("Escape").catch(() => undefined);
+  const backdrop = page.locator(".cdk-overlay-backdrop-showing");
+  for (let i = 0; i < 3 && (await backdrop.count().catch(() => 0)) > 0; i++) {
+    await backdrop.last().click({ force: true, position: { x: 5, y: 5 }, timeout: 2500 }).catch(() => undefined);
+    await page.waitForTimeout(250);
+  }
+}
+
+async function waitForVisible(page: Page, candidates: Locator[], timeoutMs: number): Promise<Locator | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const found = await firstVisible(candidates);
+    if (found) return found;
+    await page.waitForTimeout(150);
+  }
+  return null;
+}
+
+/**
+ * Switch the model through Flow's composer chip — the mechanism verified against the live
+ * DOM (2026-09-23, pt-BR account). The composer carries a chip button whose text is the
+ * ACTIVE model plus furniture ("🍌 Nano Banana 2 | crop_16_9 | x1" — `crop_16_9` is a
+ * Material-icon ligature leaking into innerText). Clicking it opens a popover holding a
+ * SECOND button, the family select (`aria-haspopup="menu"`, text "🍌 Nano Banana 2 |
+ * arrow_drop_down"); clicking THAT expands a `role=menu` whose `role=menuitem` buttons are
+ * the tiers ("Nano Banana Pro" / "Nano Banana 2" / "Nano Banana 2 Lite").
+ *
+ * Two clicks, then, and the old single-click routine never made the second one: it opened
+ * the popover, looked for tier labels, found only the (collapsed) select's own text, and
+ * gave up. That is why "nano banana pro" never confirmed while "nano banana 2" did — the
+ * latter only passed because it was already the active model.
+ *
+ * Locators deliberately avoid accessible NAMES: the chip's aria-label is "Gatilho de
+ * configurações" and the select's "Selecionar família de modelos" — both localized, so a
+ * name-based lookup would break on any other account language. Structure (aria-haspopup,
+ * role=menuitem) plus the model-family text is language-neutral.
+ *
+ *  - "ok"      the wanted model is now confirmed ACTIVE on the chip
+ *  - "failed"  a chip exists but the wanted tier could not be selected/confirmed
+ *  - "no-chip" no composer chip for this family (different layout) — caller falls back
+ */
+export async function selectModelViaComposer(
+  page: Page,
+  wanted: string,
+  family: RegExp,
+  seen: string[]
+): Promise<"ok" | "failed" | "no-chip"> {
+  const chipLoc = page.locator('button:not([aria-haspopup]):not([role="menuitem"])').filter({ hasText: family });
+  const selectLoc = page.locator('button[aria-haspopup="menu"]').filter({ hasText: family });
+  const itemLoc = page.locator('[role="menuitem"]').filter({ hasText: family });
+
+  await dismissOpenOverlays(page);
+  const chip = await firstVisible([chipLoc]);
+  if (!chip) return "no-chip";
+  const chipText = await chip.innerText().catch(() => "");
+  if (chipShowsModel(chipText, wanted)) return "ok";
+  if (chipText) seen.push(chipText);
+
+  // Open the popover unless its select is already on screen (a previous attempt may have
+  // left it open).
+  let select = await firstVisible([selectLoc]);
+  if (!select) {
+    for (let attempt = 0; attempt < 3 && !select; attempt++) {
+      await chip.click({ timeout: 4000 }).catch(() => undefined);
+      select = await waitForVisible(page, [selectLoc], 2500);
+      if (!select) await dismissOpenOverlays(page);
+    }
+  }
+  if (!select) {
+    await dismissOpenOverlays(page);
+    return "failed";
+  }
+  const selectText = await select.innerText().catch(() => "");
+  if (chipShowsModel(selectText, wanted)) {
+    await dismissOpenOverlays(page);
+    return "ok";
+  }
+  if (selectText) seen.push(selectText);
+
+  if ((await select.getAttribute("aria-expanded").catch(() => null)) !== "true") {
+    await select.click().catch(() => undefined);
+  }
+  await waitForVisible(page, [itemLoc], 3000);
+  const count = Math.min(await itemLoc.count().catch(() => 0), 20);
+  let clicked = false;
+  for (let i = 0; i < count && !clicked; i++) {
+    const item = itemLoc.nth(i);
+    if (!(await item.isVisible().catch(() => false))) continue;
+    const text = await item.innerText().catch(() => "");
+    if (text) seen.push(text);
+    if (flowModelLabelMatches(wanted, text)) {
+      await item.click().catch(() => undefined);
+      clicked = true;
+    }
+  }
+  if (!clicked) {
+    await dismissOpenOverlays(page);
+    await dismissOpenOverlays(page);
+    return "failed";
+  }
+
+  // Close whatever is still open, then read the chip back: the click is not proof, the
+  // chip showing the wanted model is.
+  await page.waitForTimeout(500);
+  await dismissOpenOverlays(page);
+  await page.waitForTimeout(300);
+  const after = await firstVisible([chipLoc]);
+  if (!after) return "ok"; // chip not readable any more — the exact tier row was clicked
+  const afterText = await after.innerText().catch(() => "");
+  if (afterText) seen.push(afterText);
+  return chipShowsModel(afterText, wanted) ? "ok" : "failed";
+}
+
+/**
  * Confirm (or select) a specific image-model tier by exact label — "nano-banana-pro" ->
  * "Nano Banana Pro", "nano-banana-2" -> "Nano Banana 2", etc. Shared by the primary model
  * and its configured fallback (see FLOW_IMAGE_MODEL_FALLBACK / generateFlowImage), so both
@@ -356,12 +496,18 @@ async function submitPrompt(page: Page, input: Locator): Promise<void> {
  */
 async function ensureImageModel(page: Page, wantedRaw: string): Promise<void> {
   const wanted = wantedRaw.replace(/[-_]+/g, " ").trim();
-  if (await page.getByText(new RegExp(wanted.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")).first().isVisible().catch(() => false)) return;
+  const seenLabels: string[] = [];
+  const via = await selectModelViaComposer(page, wanted, /Nano Banana/i, seenLabels);
+  if (via === "ok") return;
 
-  // Flow normally displays the active model beside the prompt. If it doesn't, try the
-  // nearby model/options controls and select it explicitly. We fail closed if the model
-  // cannot be confirmed: silently generating with another model would violate the
-  // operator's selection (or, on the fallback path, misreport which tier actually ran).
+  // Legacy path, kept for layouts without the composer chip. The loose "is this text on the
+  // page" shortcut is skipped once a chip existed and selection failed: the popover's own
+  // option labels are on the page by then and would fake a confirmation.
+  if (via === "no-chip" && await page.getByText(new RegExp(wanted.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")).first().isVisible().catch(() => false)) return;
+
+  // We fail closed if the model cannot be confirmed: silently generating with another model
+  // would violate the operator's selection (or, on the fallback path, misreport which tier
+  // actually ran).
   const controls = page.getByRole("button", { name: /Model|Modelo|Image|Imagem|Options|Opções|Settings|Configurações/i });
   const count = Math.min(await controls.count().catch(() => 0), 8);
   for (let i = count - 1; i >= 0; i--) {
@@ -378,6 +524,7 @@ async function ensureImageModel(page: Page, wantedRaw: string): Promise<void> {
       const opt = optionCandidates.nth(j);
       if (!(await opt.isVisible().catch(() => false))) continue;
       const text = await opt.innerText().catch(() => "");
+      if (text) seenLabels.push(text);
       if (flowModelLabelMatches(wanted, text)) {
         await opt.click();
         return;
@@ -386,7 +533,8 @@ async function ensureImageModel(page: Page, wantedRaw: string): Promise<void> {
     await page.keyboard.press("Escape").catch(() => undefined);
   }
   throw new FlowBrowserError(
-    `Could not confirm "${wanted}" in Google Flow. Select it once in the visible browser and retry, or correct the model setting.`,
+    `Could not confirm "${wanted}" in Google Flow. Select it once in the visible browser and retry, or correct the model setting.` +
+      describeSeenLabels(seenLabels),
     "ui"
   );
 }
@@ -415,21 +563,63 @@ export function normalizeFlowModelLabel(s: string): string {
  *  the match. */
 const FLOW_LABEL_DECORATION = /\b(new|beta|preview)\b/g;
 
+/** One cleaned/normalized line, ready for exact comparison against a wanted model id. */
+function cleanModelLabelLine(line: string): string {
+  const cleaned = line.replace(/[()[\]]/g, " ").replace(/[^a-zA-Z0-9.\s-]/g, " ");
+  return normalizeFlowModelLabel(cleaned).replace(FLOW_LABEL_DECORATION, " ").replace(/\s+/g, " ").trim();
+}
+
 /**
  * Does a candidate label (arbitrary text from the Flow UI) name the wanted model/tier?
  * Strips only cosmetic decoration (brackets, stray punctuation, "New"/"Beta"/"Preview")
  * and requires the REMAINDER to equal the wanted string exactly — not merely contain it —
  * so "nano-banana" never matches a menu entry for "Nano Banana Pro" just because it
  * contains the shorter string as a prefix (and "veo-3.1" never matches "Veo 3.1 Fast").
+ *
+ * A Flow menu ROW's innerText can carry more than the model name in the same node — a
+ * price/credit cost or a one-line description stacked below it ("Nano Banana Pro\n8
+ * credits", "Nano Banana Pro · Best quality"). Comparing the WHOLE innerText against the
+ * wanted string would then never match, even though the row unambiguously names the right
+ * tier — this was observed live: "nano banana pro" never confirmed while "nano banana 2"
+ * did, on the same menu, in the same run. So each newline- or middot-separated SEGMENT is
+ * checked on its own, and matching ANY segment exactly is enough. This only ever makes MORE
+ * labels match, never fewer — a segment must still equal the wanted string exactly, so a
+ * segment naming a different tier ("Nano Banana 2") still never matches "nano banana pro".
  * Exported for unit tests. Used for both Veo tiers and Nano Banana tiers — the matching
  * rule doesn't care which family of model names it's applied to.
  */
 export function flowModelLabelMatches(wanted: string, candidateText: string): boolean {
   const w = normalizeFlowModelLabel(wanted);
   if (!w) return false;
-  const cleaned = candidateText.replace(/[()[\]]/g, " ").replace(/[^a-zA-Z0-9.\s-]/g, " ");
-  const c = normalizeFlowModelLabel(cleaned).replace(FLOW_LABEL_DECORATION, " ").replace(/\s+/g, " ").trim();
-  return c === w;
+  const segments = candidateText.split(/\n|·|•/);
+  return segments.some((segment) => cleanModelLabelLine(segment) === w);
+}
+
+/** Words that, directly after a model name, mean the chip shows a DIFFERENT tier of it
+ *  ("Nano Banana 2 Lite" is not "Nano Banana 2"), or a longer version ("Nano Banana 2" is
+ *  not "Nano Banana"). Anything else trailing the name is chip furniture. */
+const TIER_CONTINUATION = /^(?:\d|lite\b|pro\b|fast\b|quality\b|ultra\b|max\b|plus\b|flash\b|preview\b|low\b|priority\b|relaxed\b)/;
+
+/**
+ * Does the text of Flow's composer chip / family select show the wanted model as the
+ * ACTIVE one? Unlike flowModelLabelMatches this cannot demand equality of the whole text:
+ * the live chip reads "🍌 Nano Banana 2 | crop_16_9 | x1" (aspect-ratio icon ligature and
+ * output count ride along) and the select "🍌 Nano Banana 2 | arrow_drop_down". So the
+ * wanted name is looked for as whole words, and what FOLLOWS it decides: another tier word
+ * or a further digit means a different model ("nano banana 2 lite", "nano banana 2" when
+ * "nano banana" was wanted) — anything else is furniture. When unsure this returns false,
+ * which merely costs an extra look inside the popover; a false positive would skip a needed
+ * switch, so the rule leans conservative. Exported for unit tests.
+ */
+export function chipShowsModel(chipText: string, wantedRaw: string): boolean {
+  const w = normalizeFlowModelLabel(wantedRaw);
+  if (!w) return false;
+  const c = cleanModelLabelLine(chipText);
+  const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = new RegExp(`(?:^|\\s)${escaped}(?=$|\\s)`).exec(c);
+  if (!m) return false;
+  const rest = c.slice(m.index + m[0].length).trim();
+  return !TIER_CONTINUATION.test(rest);
 }
 
 /** @deprecated kept as an alias — call sites and existing tests use the neutral
@@ -450,8 +640,15 @@ function wantedVeoModel(): string {
  */
 async function ensureVeoModel(page: Page): Promise<void> {
   const wanted = wantedVeoModel();
+  const seenLabels: string[] = [];
+  // Same composer-chip mechanism as the image models. Verified live for Nano Banana only;
+  // the Veo popover is assumed to have the same shape. If it doesn't, this returns
+  // "failed"/"no-chip" and the legacy routine below still runs exactly as before.
+  const via = await selectModelViaComposer(page, wanted, /Veo/i, seenLabels);
+  if (via === "ok") return;
+
   const pattern = new RegExp(wanted.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s*[-\\s]?\\s*"), "i");
-  if (await page.getByText(pattern).first().isVisible().catch(() => false)) return;
+  if (via === "no-chip" && await page.getByText(pattern).first().isVisible().catch(() => false)) return;
 
   const controls = page.getByRole("button", { name: /Model|Modelo|Video|Vidéo|Vídeo|Options|Opções|Settings|Configurações/i });
   const count = Math.min(await controls.count().catch(() => 0), 8);
@@ -468,6 +665,7 @@ async function ensureVeoModel(page: Page): Promise<void> {
       const opt = optionCandidates.nth(j);
       if (!(await opt.isVisible().catch(() => false))) continue;
       const text = await opt.innerText().catch(() => "");
+      if (text) seenLabels.push(text);
       if (veoModelLabelMatches(wanted, text)) {
         await opt.click();
         return;
@@ -477,7 +675,8 @@ async function ensureVeoModel(page: Page): Promise<void> {
   }
   throw new FlowBrowserError(
     `Could not confirm "${wanted}" in Google Flow. Either that Veo model is not available on this account/project, or ` +
-      `Flow's menu text no longer matches. Select it once in the visible browser and retry, or correct FLOW_VIDEO_MODEL.`,
+      `Flow's menu text no longer matches. Select it once in the visible browser and retry, or correct FLOW_VIDEO_MODEL.` +
+      describeSeenLabels(seenLabels),
     "ui"
   );
 }
@@ -669,13 +868,138 @@ async function dropReferenceOnPrompt(page: Page, input: Locator, referenceImageP
   }
 }
 
+/** The chip Flow shows in the command box once an asset is attached: a button holding an
+ *  `img` whose alt reads "Imagem do elemento" (pt-BR) — verified live 2026-09-24, and it is
+ *  also what clicking removes again. Structural (an img alt containing "lement") rather than
+ *  the localized aria-label, and NOT `[aria-label*="lemen"]`: the "+" button itself is named
+ *  "Adicionar ELEMENTOS à caixa de comando". */
+function attachedElementChips(page: Page): Locator[] {
+  return [
+    page.locator('button:has(img[alt*="lement" i])'),
+    page.locator('button[aria-label="Elemento"], button[aria-label="Element" i]'),
+  ];
+}
+
+/**
+ * Attach the reference through Flow's own asset picker — the ONLY mechanism verified
+ * against a real account (2026-09-24, pt-BR), in BOTH layouts Flow renders depending on
+ * window width:
+ *   - compact: "+" opens a `role=dialog` overlay; its upload button is labeled "Enviar mídia".
+ *   - wide:    "+" opens an inline popover (`flow-add-menu-popover-content`); no dialog, and the
+ *              upload button has NO aria-label — only the visible text "upload Enviar mídia".
+ * In both, the asset list is `flow-add-menu-asset-list` → `[role=option]` rows whose first
+ * line is the file name, and CLICKING an existing row closes the picker and attaches it (the
+ * chip above appears). A native file chooser exists only behind the upload button.
+ *
+ * What went wrong before: the old code only ever UPLOADED, never selected, and confirmed the
+ * attach by looking for English "remove … reference" buttons. Every beat re-uploaded the file
+ * (four identical assets piled up in the project), the confirmation could never recognise the
+ * pt-BR chip, and worse, the chip that DID attach was never cleared — so a later beat that
+ * wanted no reference was generated with the previous beat's still attached and came back as
+ * the reference photo itself.
+ *
+ * The asset is uploaded under a name derived from the file's CONTENT, so it is uploaded once
+ * per portrait and reused by name afterwards — and replacing the portrait can never resolve to
+ * a stale asset that merely shares its file name. Returns false (never throws) so the caller
+ * can fall through to the older heuristics for a layout this structure doesn't describe.
+ */
+export async function attachFlowReferenceViaAssetPicker(page: Page, referenceImagePath: string): Promise<boolean> {
+  const buffer = fs.readFileSync(referenceImagePath);
+  const ext = (path.extname(referenceImagePath) || ".jpg").toLowerCase();
+  const mimeType = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
+  const assetName = `character-reference-${sha256(buffer).slice(0, 8)}${ext}`;
+
+  const plusCandidates = [
+    page.locator('button[aria-label*="Adicionar elementos" i]'),
+    page.locator('button[aria-label*="Add elements" i]'),
+  ];
+  const options = page.locator('flow-add-menu-asset-list [role="option"]');
+  const chipVisible = async () => (await firstVisible(attachedElementChips(page))) !== null;
+  const openPicker = async (): Promise<boolean> => {
+    if (await options.first().isVisible().catch(() => false)) return true;
+    const plus = await firstVisible(plusCandidates);
+    if (!plus) return false;
+    await plus.click().catch(() => undefined);
+    return (await waitForVisible(page, [options], 3000)) !== null;
+  };
+  const clickNamedAsset = async (): Promise<boolean> => {
+    const count = Math.min(await options.count().catch(() => 0), 60);
+    for (let i = 0; i < count; i++) {
+      const row = options.nth(i);
+      if (!(await row.isVisible().catch(() => false))) continue;
+      const firstLine = ((await row.innerText().catch(() => "")) || "").split("\n")[0].trim();
+      if (firstLine === assetName) {
+        await row.click().catch(() => undefined);
+        return true;
+      }
+    }
+    return false;
+  };
+  const closePicker = () => dismissOpenOverlays(page);
+
+  if (!(await openPicker())) {
+    await closePicker();
+    return false;
+  }
+
+  // 1) Already uploaded on an earlier beat/run: just select it.
+  if (await clickNamedAsset()) {
+    return (await waitForVisible(page, attachedElementChips(page), 4000)) !== null;
+  }
+
+  // 2) Upload it once. The upload button is found by its Material icon ligature ("upload"),
+  //    which is language-neutral, alongside the localized labels. NOTE the live button's
+  //    textContent is "uploadEnviar mídia" — the icon text is GLUED to the label, so there is no
+  //    word boundary after "upload" and a `\b` there never matches (found live: 0 of 3 selectors).
+  const upload = await firstVisible([
+    page.locator("button.sidebar-upload-btn"),
+    page.locator('flow-add-menu-popover-content button, [role="dialog"] button').filter({ hasText: /^\s*upload/i }),
+    page.locator('button[aria-label="Enviar mídia"], button[aria-label*="Upload media" i]'),
+  ]);
+  if (!upload) {
+    await closePicker();
+    return false;
+  }
+  const chooserPromise = page.waitForEvent("filechooser", { timeout: 4000 }).catch(() => null);
+  await upload.click().catch(() => undefined);
+  const chooser = await chooserPromise;
+  if (!chooser) {
+    await closePicker();
+    return false;
+  }
+  await chooser.setFiles({ name: assetName, mimeType, buffer });
+
+  // The upload may attach the file on its own, or may only add it to the list (and the
+  // picker may or may not stay open) — not observed which, so handle each: wait for the chip,
+  // and otherwise select the freshly listed asset by name.
+  const deadline = Date.now() + 25_000;
+  while (Date.now() < deadline) {
+    if (await chipVisible()) return true;
+    // A freshly uploaded asset is LISTED well before it is clickable (~15 s live): a click on it
+    // can be ignored, so keep retrying until the chip appears or the deadline passes — do not
+    // give up on the first click that produced nothing.
+    if ((await openPicker()) && (await clickNamedAsset())) {
+      if ((await waitForVisible(page, attachedElementChips(page), 3000)) !== null) return true;
+    }
+    await page.waitForTimeout(700);
+  }
+  await closePicker();
+  return false;
+}
+
 async function uploadFlowReference(page: Page, input: Locator, referenceImagePath: string): Promise<void> {
   if (!fs.existsSync(referenceImagePath)) {
     throw new FlowBrowserError("The configured character reference image no longer exists on disk.", "config");
   }
 
+  // The verified live path — see attachFlowReferenceViaAssetPicker's doc comment. FIRST, ahead
+  // of the older heuristics below: feeding a stray hidden file input directly can UPLOAD the
+  // file without attaching it, which is indistinguishable from success until the confirmation
+  // fails one step later.
+  if (await attachFlowReferenceViaAssetPicker(page, referenceImagePath)) return;
+
   // In some Flow layouts the hidden image input is already mounted and can be fed
-  // directly. This is the most stable path because it does not depend on button text.
+  // directly. (None exists at rest in the layouts verified live.)
   if (await setReferenceOnFileInput(page, referenceImagePath)) {
     await page.waitForTimeout(2200);
     return;
@@ -688,12 +1012,29 @@ async function uploadFlowReference(page: Page, input: Locator, referenceImagePat
 
   // Other layouts mount the file input only after Add ingredient / Reference is
   // opened. Support both a direct file chooser and a two-step popover with Upload.
+  //
+  // Bilingual on purpose (EN + pt-BR): every OTHER accessible-name regex in this file that
+  // targets a menu/mode control already carries a pt-BR alternative (ensureFlowMediaMode,
+  // ensureFlowAspectRatio, ensureFlowDuration, tryDownloadFromUi, detectFlowFailure's own
+  // policy-violation text) — this trigger list was the one left English-only, on an account
+  // whose UI is confirmed pt-BR (its OTHER composer controls read "Gatilho de
+  // configurações" / "Selecionar família de modelos"). The generic "+"-style attach button
+  // next to the prompt box (visible in the live UI) plausibly carries a name like
+  // "Adicionar mídia"/"Anexar arquivo" that none of the EN-only patterns below could ever
+  // match — which is a simpler explanation for "no upload control found" than the control
+  // not existing at all.
   const triggers = [
-    page.getByRole("button", { name: /Add (?:an? )?(?:ingredient|reference|image|media)|Reference image|Character reference|Ingredient|Upload image/i }),
+    page.getByRole("button", {
+      name: /Add (?:an? )?(?:ingredient|reference|image|media)|Reference image|Character reference|Ingredient|Upload image|Adicionar (?:um[a]? )?(?:ingrediente|refer[êe]ncia|imagem|m[íi]dia|anexo)|Imagem de refer[êe]ncia|Refer[êe]ncia de personagem|Ingrediente|Carregar imagem|Anexar (?:arquivo|imagem|m[íi]dia)?/i,
+    }),
     page.locator('button[aria-label*="ingredient" i], [role="button"][aria-label*="ingredient" i]'),
     page.locator('button[aria-label*="reference" i], [role="button"][aria-label*="reference" i]'),
     page.locator('button[aria-label*="upload" i], [role="button"][aria-label*="upload" i]'),
-    page.locator('[data-testid*="ingredient" i], [data-testid*="reference" i], [data-testid*="upload" i]'),
+    page.locator('button[aria-label*="ingrediente" i], [role="button"][aria-label*="ingrediente" i]'),
+    page.locator('button[aria-label*="refer" i], [role="button"][aria-label*="refer" i]'), // matches both "reference" and "referência"
+    page.locator('button[aria-label*="anexar" i], [role="button"][aria-label*="anexar" i]'),
+    page.locator('button[aria-label*="adicionar" i], [role="button"][aria-label*="adicionar" i]'),
+    page.locator('[data-testid*="ingredient" i], [data-testid*="reference" i], [data-testid*="upload" i], [data-testid*="attach" i]'),
   ];
   for (const group of triggers) {
     const count = Math.min(await group.count().catch(() => 0), 8);
@@ -737,8 +1078,15 @@ async function uploadFlowReference(page: Page, input: Locator, referenceImagePat
     }
   }
 
+  // Closes whatever the last failed trigger may have opened (a panel that ignored
+  // Escape, or one opened by a trigger candidate that had no Escape-safe path). The
+  // NEXT thing to run in this same page is either another attempt (a different model,
+  // via generateFlowImage's fallback) or another beat entirely — either must start from
+  // a clean composer, not from whatever this failed search left on screen.
+  await page.keyboard.press("Escape").catch(() => undefined);
+  const diag = await diagnoseComposerControls(page);
   throw new FlowBrowserError(
-    "Could not find Flow's reference-image upload control. Open an image-generation project with Nano Banana, or set FLOW_REFERENCE_FILE_SELECTOR in Advanced settings.",
+    `Could not find Flow's reference-image upload control. Open an image-generation project with Nano Banana, or set FLOW_REFERENCE_FILE_SELECTOR in Advanced settings. ${diag}`,
     "ui"
   );
 }
@@ -748,6 +1096,10 @@ function referenceRemoveControls(page: Page): Locator[] {
   const custom = getSetting("FLOW_REFERENCE_REMOVE_SELECTOR").trim();
   return [
     ...(custom ? [page.locator(custom)] : []),
+    // The real chip (verified live, pt-BR): clicking it removes the attachment. None of the
+    // English aria-label patterns below can match it, which is why a leftover attachment used
+    // to survive into the next beat.
+    ...attachedElementChips(page),
     page.locator('button[aria-label*="remove" i][aria-label*="ingredient" i]'),
     page.locator('button[aria-label*="remove" i][aria-label*="reference" i]'),
     page.locator('button[aria-label*="remove" i][aria-label*="attachment" i]'),
@@ -817,15 +1169,89 @@ async function diagnoseComposerControls(page: Page): Promise<string> {
 // re-implementing the clear-then-attach sequencing. Nothing else imports it directly.
 export async function prepareComposerReference(page: Page, input: Locator, referenceImagePath: string | null): Promise<boolean> {
   await clearFlowReferences(page);
-  if (!referenceImagePath) return false;
-  await uploadFlowReference(page, input, referenceImagePath);
-  if (await confirmReferenceAttached(page)) return true;
+  if (!referenceImagePath) {
+    // Fail closed: a beat that asked for NO reference must never be generated with the
+    // previous beat's still attached. Observed live: it came back as the reference photo
+    // itself, in place of the scene the beat described.
+    if (await confirmReferenceAttached(page)) {
+      const diag = await diagnoseComposerControls(page);
+      throw new FlowBrowserError(
+        `A reference image from a previous beat is still attached and could not be cleared — refusing to generate a ` +
+          `beat that wants no reference with one attached. ${diag}`,
+        "ui"
+      );
+    }
+    return false;
+  }
+  // The attach is a multi-step UI dance and was observed to miss once under load right after
+  // a failed generation, while succeeding on an idle tab — so retry from a clean slate
+  // (overlays closed, no half-attached chip) before declaring the upload failed.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      await dismissOpenOverlays(page);
+      await clearFlowReferences(page);
+      await page.waitForTimeout(1500);
+    }
+    await uploadFlowReference(page, input, referenceImagePath).catch((e) => {
+      if (e instanceof FlowBrowserError && e.code === "config") throw e;
+    });
+    if (await confirmReferenceAttached(page)) return true;
+  }
   const diag = await diagnoseComposerControls(page);
   throw new FlowBrowserError(
     `Character reference was sent to Google Flow but no attachment could be confirmed afterward — treating this as a ` +
       `failed upload rather than silently generating without the reference. ${diag}`,
     "ui"
   );
+}
+
+function sha256(buf: Buffer): string {
+  return crypto.createHash("sha256").update(buf).digest("hex");
+}
+
+/**
+ * Is `buf` the reference photo itself, not a generated result? Flow's own UI can echo the
+ * just-attached reference back over the network — e.g. to render its attachment chip/
+ * preview — WHILE the per-generation response listener is already active, and the capture
+ * heuristic (any full-size image response) has no other way to tell that echo apart from
+ * the real output. Observed in the field: a beat that requested a character-reference
+ * scene sometimes produced the raw reference photo, unmodified, as its "generated" visual.
+ *
+ * Two checks, cheapest first:
+ *  - byte-identical (sha256): the echo is a verbatim pass-through of the uploaded file —
+ *    zero false-positive risk, since this can only be the SAME file.
+ *  - near-identical pixels at a tiny thumbnail: catches a re-encoded/resized echo (still
+ *    the same photo, different bytes). The threshold is deliberately tight — a genuinely
+ *    different generated image (even one that faithfully reuses the reference's identity,
+ *    which is the whole point of attaching it) differs far more than this at pixel level,
+ *    since pose/background/lighting/crop all change; only the SAME photo survives this bar.
+ */
+export async function looksLikeReferenceEcho(buf: Buffer, referenceImagePath: string | undefined): Promise<boolean> {
+  if (!referenceImagePath) return false;
+  let refBuf: Buffer;
+  try {
+    refBuf = fs.readFileSync(referenceImagePath);
+  } catch {
+    return false;
+  }
+  if (buf.length === refBuf.length && sha256(buf) === sha256(refBuf)) return true;
+  try {
+    // removeAlpha()+toColourspace("srgb") forces both raw buffers to the SAME channel
+    // count regardless of source format — an opaque JPEG echo decodes to RGB (3
+    // channels) while the reference PNG can decode to RGBA (4), and without normalizing
+    // that mismatch the two buffers would never be the same length and this check would
+    // always (silently) fail open for exactly the cross-format case it needs to catch.
+    const [a, b] = await Promise.all([
+      sharp(buf).resize(32, 32, { fit: "fill" }).removeAlpha().toColourspace("srgb").raw().toBuffer(),
+      sharp(refBuf).resize(32, 32, { fit: "fill" }).removeAlpha().toColourspace("srgb").raw().toBuffer(),
+    ]);
+    if (a.length === 0 || a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff += Math.abs(a[i] - b[i]);
+    return diff / a.length < 3; // mean per-channel diff, 0-255 scale — near-identical pixels only
+  } catch {
+    return false;
+  }
 }
 
 function isCandidateResponse(response: Response): boolean {
@@ -864,7 +1290,7 @@ export function chooseBestCapturedImage(images: CapturedImage[], aspect = "16:9"
   })[0] ?? null;
 }
 
-async function tryDownloadFromUi(page: Page, outPath: string): Promise<boolean> {
+async function tryDownloadFromUi(page: Page, outPath: string, referenceImagePath?: string): Promise<boolean> {
   const largeImages = page.locator("img");
   let bestIndex = -1;
   let bestArea = 0;
@@ -894,6 +1320,9 @@ async function tryDownloadFromUi(page: Page, outPath: string): Promise<boolean> 
     await download.saveAs(tmp);
     const meta = await sharp(tmp).metadata();
     if ((meta.width ?? 0) < 512 || (meta.height ?? 0) < 512) throw new Error("download is not a full-size image");
+    if (await looksLikeReferenceEcho(fs.readFileSync(tmp), referenceImagePath)) {
+      throw new Error("download is the attached reference photo, not a generated result");
+    }
     await sharp(tmp).png().toFile(outPath);
     try { fs.unlinkSync(tmp); } catch {}
     return true;
@@ -902,15 +1331,64 @@ async function tryDownloadFromUi(page: Page, outPath: string): Promise<boolean> 
   }
 }
 
-async function detectFlowFailure(page: Page, media: "image" | "video" = "image"): Promise<FlowBrowserError | null> {
-  const body = (await page.locator("body").innerText({ timeout: 1500 }).catch(() => "")).slice(-12_000);
-  if (/out of (?:AI |Flow )?credits|not enough credits|créditos insuficientes|sem créditos/i.test(body)) {
-    return new FlowBrowserError("Google Flow reports that this account has no credits available.", "credits");
+/**
+ * Pure classifier over whatever text is currently visible on the Flow page — split out
+ * from detectFlowFailure so it can be unit-tested with a plain string instead of a fake
+ * Playwright Page. Exported for tests only.
+ */
+const CREDITS_FAILURE_RE = /out of (?:AI |Flow )?credits|not enough credits|créditos insuficientes|sem créditos|limite de uso|usage limit|reached (?:your |the )?(?:usage )?limit/i;
+const POLICY_FAILURE_RE = /may violate|might violate|against our polic|policy violation|talvez viol[ae]|viola(?:m)? (?:nossas |as )?pol[íi]ticas/i;
+const GENERIC_FAILURE_RE = /generation failed|could(?:n'?t| not) generate|não foi possível gerar|tente novamente/i;
+
+/** How many failure cards of each kind are ALREADY on the page. Flow keeps a failed tile in
+ *  the project grid, so a refusal from an earlier beat/run is still in `body` — without a
+ *  baseline it is read as this generation failing (measured: three object-only beats with
+ *  no reference were "refused" ~17 s after submit by a stale card). */
+export interface FlowFailureBaseline { policy: number; generic: number; credits: number }
+
+function countMatches(body: string, re: RegExp): number {
+  return (body.match(new RegExp(re.source, "gi")) || []).length;
+}
+
+export function failureBaselineOf(body: string): FlowFailureBaseline {
+  return { policy: countMatches(body, POLICY_FAILURE_RE), generic: countMatches(body, GENERIC_FAILURE_RE), credits: countMatches(body, CREDITS_FAILURE_RE) };
+}
+
+export function classifyFlowFailureBody(body: string, media: "image" | "video" = "image", baseline?: FlowFailureBaseline): FlowBrowserError | null {
+  if (CREDITS_FAILURE_RE.test(body) && (!baseline || countMatches(body, CREDITS_FAILURE_RE) > baseline.credits)) {
+    return new FlowBrowserError("Google Flow reports that this account has no credits available or has reached its usage limit.", "credits");
   }
-  if (/generation failed|could(?:n'?t| not) generate|não foi possível gerar|tente novamente/i.test(body)) {
+  // Google's own safety/content-policy classifier rejecting the prompt — observed live as
+  // "Esta geração talvez viole nossas políticas. Tente usar outro comando ou envie
+  // feedback." This is its OWN failure card, phrased differently from a generic generation
+  // failure ("tente novamente" never appears in it), so the pattern below used to miss it
+  // entirely: the wait loop just sat there polling for an image that would never arrive
+  // until the FULL per-attempt timeout elapsed, instead of failing in ~4s and handing off
+  // to the configured fallback (kie.ai) the way every other detected failure already does.
+  // A character-reference scene (identity locked to an uploaded photo) is a plausible
+  // repeat trigger for this — see CLAUDE.md's Flow browser section for the caveat that
+  // Avatar V/character-consistency features are unverified against Google's own policy
+  // surface. This detector does not attempt to work around the classifier in any way; it
+  // only recognizes Flow's OWN refusal message so the beat can fail fast and move on.
+  if (POLICY_FAILURE_RE.test(body) && (!baseline || countMatches(body, POLICY_FAILURE_RE) > baseline.policy)) {
+    return new FlowBrowserError(`Google Flow declined this ${media} generation as a possible policy violation.`, "policy");
+  }
+  if (GENERIC_FAILURE_RE.test(body) && (!baseline || countMatches(body, GENERIC_FAILURE_RE) > baseline.generic)) {
     return new FlowBrowserError(`Google Flow reported that ${media} generation failed.`, "ui");
   }
   return null;
+}
+
+async function readFlowBody(page: Page): Promise<string> {
+  return (await page.locator("body").innerText({ timeout: 1500 }).catch(() => "")).slice(-12_000);
+}
+
+async function flowFailureBaseline(page: Page): Promise<FlowFailureBaseline> {
+  return failureBaselineOf(await readFlowBody(page));
+}
+
+async function detectFlowFailure(page: Page, media: "image" | "video" = "image", baseline?: FlowFailureBaseline): Promise<FlowBrowserError | null> {
+  return classifyFlowFailureBody(await readFlowBody(page), media, baseline);
 }
 
 /** Generate one full-size image through the Google Flow web UI and save it as PNG. */
@@ -930,6 +1408,14 @@ async function attemptFlowImage(
   if (await pageHasLoginPrompt(page)) {
     throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
   }
+  // A previous attempt in this SAME page (a failed reference-image search tries several
+  // trigger buttons; the fallback-model retry in generateFlowImage reuses this same tab)
+  // can leave a menu/panel open. Start every attempt from a clean composer — observed live:
+  // "nano banana pro" confirmed fine on a beat's first attempt, then the SAME beat's
+  // fallback-model retry failed to confirm "nano banana 2" right after a failed reference
+  // search, which is consistent with (not yet proven to be) something that search opened
+  // still sitting in front of the model picker on the retry.
+  await dismissOpenOverlays(page);
   const input = await promptBox(page);
   await ensureFlowImageMode(page, model);
   await ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
@@ -942,11 +1428,16 @@ async function attemptFlowImage(
   const tasks = new Set<Promise<void>>();
   let lastCaptureAt = 0;
   const onResponse = (response: Response) => {
-    const task = captureResponse(response).then((image) => {
-      if (image) {
-        candidates.push(image);
-        lastCaptureAt = Date.now();
-      }
+    const task = captureResponse(response).then(async (image) => {
+      if (!image) return;
+      // Reject the attached reference photo itself (Flow can echo it back over the
+      // network, e.g. to render its attachment chip). Filtered HERE, not just at
+      // final selection, so a quiet echo-only capture never satisfies the "a result
+      // arrived" wait-loop condition below and cuts generation short before the real
+      // image shows up.
+      if (await looksLikeReferenceEcho(image.buffer, options?.referenceImagePath)) return;
+      candidates.push(image);
+      lastCaptureAt = Date.now();
     }).finally(() => tasks.delete(task));
     tasks.add(task);
   };
@@ -954,6 +1445,7 @@ async function attemptFlowImage(
 
   try {
     await input.fill(prompt.slice(0, 12_000));
+    const failureBaseline = await flowFailureBaseline(page);
     await submitPrompt(page, input);
     const deadline = Date.now() + timeoutMs;
     let nextFailureCheck = Date.now() + 4_000;
@@ -962,7 +1454,7 @@ async function attemptFlowImage(
       if (await pageHasLoginPrompt(page)) throw new FlowBrowserError("Google session expired during generation.", "login");
       if (candidates.length && Date.now() - lastCaptureAt >= 4_000) break;
       if (Date.now() >= nextFailureCheck) {
-        const failure = await detectFlowFailure(page);
+        const failure = await detectFlowFailure(page, "image", failureBaseline);
         if (failure) throw failure;
         nextFailureCheck = Date.now() + 4_000;
       }
@@ -975,7 +1467,7 @@ async function attemptFlowImage(
       await sharp(best.buffer).png().toFile(outPath);
       return outPath;
     }
-    if (await tryDownloadFromUi(page, outPath)) return outPath;
+    if (await tryDownloadFromUi(page, outPath, options?.referenceImagePath)) return outPath;
     throw new FlowBrowserError(
       `No full-size Flow image was captured within ${Math.round(timeoutMs / 1000)}s. The UI may have changed.`,
       "timeout"
@@ -988,7 +1480,7 @@ async function attemptFlowImage(
 /** A failure this specific rather than "the model tier is unavailable/limited" — trying a
  *  different model would not help, so the fallback tier is never attempted for these. */
 export function isModelIndependentFailure(code: FlowBrowserError["code"] | undefined): boolean {
-  return code === "login" || code === "config";
+  return code === "login" || code === "config" || code === "policy";
 }
 
 export interface FlowImageResult {
@@ -1024,11 +1516,35 @@ export async function generateFlowImage(
     const primaryModel = (getSetting("FLOW_IMAGE_MODEL") || "nano-banana-pro").replace(/[-_]+/g, " ").trim();
     const fallbackModel = getSetting("FLOW_IMAGE_MODEL_FALLBACK").replace(/[-_]+/g, " ").trim();
 
+    const LIMIT_COOLDOWN_MS = 30 * 60_000;
+    const limited = state.limitedModels ?? (state.limitedModels = new Map<string, number>());
+    const isLimited = (m: string) => (limited.get(m) ?? 0) > Date.now();
+    const markLimited = (m: string, err: unknown) => {
+      if (err instanceof FlowBrowserError && err.code === "credits") limited.set(m, Date.now() + LIMIT_COOLDOWN_MS);
+    };
+
+    if (isLimited(primaryModel) && (!fallbackModel || isLimited(fallbackModel))) {
+      throw new FlowBrowserError("Google Flow usage limit was reached a moment ago on every configured model — not retrying yet.", "credits");
+    }
+
+    // The primary hit its usage limit a moment ago: don't spend ~20 s per beat re-discovering it.
+    if (fallbackModel && isLimited(primaryModel) && !isLimited(fallbackModel)) {
+      log(runId, "info", `Google Flow: "${primaryModel}" is at its usage limit — using "${fallbackModel}" directly`, { stage: "visual" });
+      try {
+        const p = await attemptFlowImage(runId, prompt, outPath, aspect, options, fallbackModel);
+        return { path: p, model: fallbackModel };
+      } catch (e) {
+        markLimited(fallbackModel, e);
+        throw e;
+      }
+    }
+
     try {
       const p = await attemptFlowImage(runId, prompt, outPath, aspect, options, primaryModel);
       return { path: p, model: primaryModel };
     } catch (e) {
       const err = e as Error;
+      markLimited(primaryModel, err);
       const code = err instanceof FlowBrowserError ? err.code : undefined;
       if (!fallbackModel || isModelIndependentFailure(code)) throw err;
       log(
@@ -1037,8 +1553,13 @@ export async function generateFlowImage(
         `Google Flow: "${primaryModel}" failed (${err.message.slice(0, 160)}) — trying fallback model "${fallbackModel}"`,
         { stage: "visual" }
       );
-      const p = await attemptFlowImage(runId, prompt, outPath, aspect, options, fallbackModel);
-      return { path: p, model: fallbackModel };
+      try {
+        const p = await attemptFlowImage(runId, prompt, outPath, aspect, options, fallbackModel);
+        return { path: p, model: fallbackModel };
+      } catch (e2) {
+        markLimited(fallbackModel, e2);
+        throw e2;
+      }
     }
   });
 }
@@ -1232,6 +1753,9 @@ export async function generateFlowVideo(
     if (await pageHasLoginPrompt(page)) {
       throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
     }
+    // Same reasoning as attemptFlowImage: a previous beat's failed reference-image search
+    // can leave a menu/panel open in this shared page. Start clean.
+    await dismissOpenOverlays(page);
     const input = await promptBox(page);
     await ensureFlowVideoMode(page);
     await ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
@@ -1258,6 +1782,7 @@ export async function generateFlowVideo(
     const tmpPath = path.join(os.tmpdir(), `flow_veo_${Date.now()}_${Math.random().toString(36).slice(2)}.mp4`);
     try {
       await input.fill(prompt.slice(0, 12_000));
+      const failureBaseline = await flowFailureBaseline(page);
       await submitPrompt(page, input);
       promptSent = true; // never re-submitted below — one prompt, one generation, whatever happens next
 
@@ -1275,7 +1800,7 @@ export async function generateFlowVideo(
           break;
         }
         if (Date.now() >= nextFailureCheck) {
-          const failure = await detectFlowFailure(page, "video");
+          const failure = await detectFlowFailure(page, "video", failureBaseline);
           if (failure) throw failure;
           nextFailureCheck = Date.now() + 5_000;
         }

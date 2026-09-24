@@ -47,6 +47,8 @@ export interface Channel {
    *  /api/channels/[id]/character-reference, never by updateChannel). NULL = global
    *  AI_CHARACTER_REFERENCE_PATH. */
   character_reference_path: string | null;
+  /** Comma-separated words that attach the character reference to a beat. NULL = built-in list. */
+  character_terms: string | null;
   /** JSON object of SETTING_KEY -> override value, restricted to isSecretKey() keys
    *  (enforced on write in channelApiKeyOverrides / the API route). NULL/'{}' = every
    *  global key applies. Raw string — parse with channelApiKeyOverrides(). */
@@ -60,13 +62,13 @@ export interface Channel {
 
 const COLS =
   "id, name, visual_mode, ai_style, visual_prompt, voice_id, voice_speed, voice_provider, " +
-  "character_reference_path, api_keys_json, interval_sec, format, avatar_id, created_at, updated_at";
+  "character_reference_path, character_terms, api_keys_json, interval_sec, format, avatar_id, created_at, updated_at";
 const listStmt = db.prepare(`SELECT ${COLS} FROM channels ORDER BY name COLLATE NOCASE ASC`);
 const getStmt = db.prepare(`SELECT ${COLS} FROM channels WHERE id = ?`);
 const getByNameStmt = db.prepare(`SELECT ${COLS} FROM channels WHERE name = ?`);
 const insertStmt = db.prepare(
-  `INSERT INTO channels (name, visual_mode, ai_style, visual_prompt, voice_id, voice_speed, voice_provider, interval_sec, format, avatar_id)
-   VALUES (@name, @visual_mode, @ai_style, @visual_prompt, @voice_id, @voice_speed, @voice_provider, @interval_sec, @format, @avatar_id)`
+  `INSERT INTO channels (name, visual_mode, ai_style, visual_prompt, character_terms, voice_id, voice_speed, voice_provider, interval_sec, format, avatar_id)
+   VALUES (@name, @visual_mode, @ai_style, @visual_prompt, @character_terms, @voice_id, @voice_speed, @voice_provider, @interval_sec, @format, @avatar_id)`
 );
 const deleteStmt = db.prepare("DELETE FROM channels WHERE id = ?");
 // Deliberately SEPARATE from insertStmt/updateStmt below: character_reference_path is
@@ -92,6 +94,7 @@ export interface ChannelInput {
   visual_mode?: VisualMode;
   ai_style?: string | null;
   visual_prompt?: string | null;
+  character_terms?: string | null;
   voice_id?: string | null;
   voice_speed?: number | null;
   voice_provider?: string | null;
@@ -109,6 +112,13 @@ export interface ChannelInput {
  *  client-supplied value. Exported so both API routes (create + update) share one rule. */
 export function deriveVoiceProvider(voiceId: string | null | undefined): string | null {
   return voiceId?.trim() ? "ai33" : null;
+}
+
+/** Comma/newline separated words, trimmed and de-duplicated; empty -> NULL (use the built-in list). */
+export function normCharacterTerms(raw: string | null | undefined): string | null {
+  const words = (raw || "").split(/[,\n;]/).map((w) => w.trim()).filter(Boolean);
+  const uniq = [...new Set(words.map((w) => w.toLowerCase()))];
+  return uniq.length ? uniq.join(", ") : null;
 }
 
 function normMode(m: string | undefined): VisualMode {
@@ -129,6 +139,7 @@ export function createChannel(input: ChannelInput): number {
     visual_mode: normMode(input.visual_mode),
     ai_style: input.ai_style?.trim() || null,
     visual_prompt: input.visual_prompt?.trim() || null,
+    character_terms: normCharacterTerms(input.character_terms),
     voice_id: input.voice_id?.trim() || null,
     voice_speed: normSpeed(input.voice_speed),
     voice_provider: input.voice_provider?.trim() || null,
@@ -148,7 +159,7 @@ export function updateChannel(id: number, input: ChannelInput): void {
   const name = input.name.trim();
   if (!name) throw new Error("Channel name cannot be empty");
   db.prepare(
-    `UPDATE channels SET name=@name, visual_mode=@visual_mode, ai_style=@ai_style, visual_prompt=@visual_prompt,
+    `UPDATE channels SET name=@name, visual_mode=@visual_mode, ai_style=@ai_style, visual_prompt=@visual_prompt, character_terms=@character_terms,
        voice_id=@voice_id, voice_speed=@voice_speed, voice_provider=@voice_provider,
        interval_sec=@interval_sec, format=@format, avatar_id=@avatar_id, updated_at=datetime('now')
      WHERE id=@id`
@@ -158,6 +169,7 @@ export function updateChannel(id: number, input: ChannelInput): void {
     visual_mode: normMode(input.visual_mode),
     ai_style: input.ai_style?.trim() || null,
     visual_prompt: input.visual_prompt?.trim() || null,
+    character_terms: normCharacterTerms(input.character_terms),
     voice_id: input.voice_id?.trim() || null,
     voice_speed: normSpeed(input.voice_speed),
     voice_provider: input.voice_provider?.trim() || null,
@@ -293,5 +305,6 @@ export function channelSettingOverrides(channel: Channel | null): Record<string,
   const out: Record<string, string> = { ...filterToSecretKeys(channel.api_keys_json) };
   if (channel.voice_provider?.trim()) out.VOICEOVER_PROVIDER = channel.voice_provider.trim();
   if (channel.character_reference_path?.trim()) out.AI_CHARACTER_REFERENCE_PATH = channel.character_reference_path.trim();
+  if (channel.character_terms?.trim()) out.AI_CHARACTER_TERMS = channel.character_terms.trim();
   return out;
 }

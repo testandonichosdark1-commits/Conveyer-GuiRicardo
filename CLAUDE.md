@@ -362,6 +362,21 @@ run log are never misattributed to the primary model when the fallback produced 
   Flow really offer a distinct "Nano Banana 2" menu entry, and does switching mid-session work
   cleanly — has not been driven against a real account. Confirm once and update this note.
 
+**Model switching is a two-click flow through the composer chip — verified against the live DOM
+(2026-09-23, pt-BR account).** The chip (`aria-label="Gatilho de configurações"`, innerText
+`🍌 Nano Banana 2 | crop_16_9 | x1` — `crop_16_9` is a Material-icon ligature leaking into the text)
+opens a popover with a SECOND button, the family select (`aria-label="Selecionar família de modelos"`,
+`aria-haspopup="menu"`); that opens a `role=menu` of `role=menuitem` tiers (Nano Banana Pro / 2 /
+2 Lite). `selectModelViaComposer` does exactly that and confirms by reading the chip back
+(`chipShowsModel`). Two traps it exists to avoid: (1) the old routine made only the FIRST click, saw
+just the collapsed select's own text, and gave up — so Pro never confirmed while "2" only passed
+because it was already active; (2) locators must not use accessible names (both labels are localized)
+— structure (`aria-haspopup`, `role=menuitem`) plus the model-family text is language-neutral. The
+Veo path reuses the same helper but its popover has NOT been inspected live; if it differs the legacy
+routine still runs as fallback. `flow-model-select.test.ts` drives the logic in real headless Chrome
+against a structural mock — it proves the click/wait/verify logic, not that Google hasn't moved its
+markup, so re-inspect the live page when a run fails to confirm a model.
+
 ### Video path (Veo) — NEW
 
 `generateFlowVideo()` mirrors the image path's shape but is its own function, driven by
@@ -424,6 +439,74 @@ even though the KIE branch below is itself generic: on a Flow-video fallback, `p
 `"kie"` and execution falls through into the SAME `resolveAiMedia()` call the kie branch already
 makes for every other route — it independently resolves back to `"video"` from the same beat/override/
 settings, so the handoff is not a special case, just letting the existing kie logic run.
+
+**Attaching the reference — verified live (2026-09-24, pt-BR), and it is SELECT-or-upload, in two
+layouts.** The composer's "+" (`aria-label="Adicionar elementos à caixa de comando"`) opens Flow's
+own asset picker — a `role=dialog` in the compact layout, an inline `flow-add-menu-popover-content`
+in the wide one (no dialog there). Both hold `flow-add-menu-asset-list` → `[role=option]` rows (first
+line = file name). **Clicking an existing row closes the picker and attaches it**; a native file
+chooser exists only behind the upload button (`button.sidebar-upload-btn`; compact: aria-label
+"Enviar mídia"; wide: no aria-label, and its `textContent` is `"uploadEnviar mídia"` — icon glued to
+the label, so a `\b` after "upload" never matches). `attachFlowReferenceViaAssetPicker` uploads the
+portrait ONCE under a content-hash name (`character-reference-<sha8>.jpg`) and selects it by exact name
+on every later beat — so replacing the portrait can never resolve to a stale asset that merely shares a
+file name. A fresh upload is listed only ~15 s later and is not clickable until then, hence the retry loop.
+The attachment is a chip: `button:has(img[alt="Imagem do elemento"])` (aria-label "Elemento"; clicking it
+removes it). Match it structurally — `[aria-label*="lemen"]` also matches the "+" ("Adicionar ELEMENTOS").
+
+What this fixed, all one root cause: the old code only UPLOADED (never selected), and looked for English
+"remove … reference" buttons, so (1) the attach was never confirmed, (2) every beat re-uploaded the file
+(four identical assets piled up in the project), and (3) worst, the chip that DID attach was never cleared —
+a later beat that wanted no reference was generated with the previous beat's still attached and came back as
+the reference photo itself. `prepareComposerReference` now fails CLOSED if a stale attachment can't be cleared.
+
+**Escape does not close the wide layout's popover** — it is a CDK overlay that stays open behind a
+`.cdk-overlay-backdrop-showing` and swallows every later click. `dismissOpenOverlays` (Escape, then click the
+backdrop) is what closes it; that leftover was how a failed attach used to poison the next model switch.
+
+**Layout depends on the window width, and only the compact one is what this code was built for.** The model
+chip (`Gatilho de configurações`) exists only in the compact composer. The wide layout has an "Agente" pill and
+no chip: the models live behind a `tune` button in a "Configurações do agente" panel (image/video default
+model selects) that is NOT closed by Escape (use its back arrow — never "Salvar"). Model switching in the wide
+layout is not implemented, and generation semantics there (agent "confirmar antes de gerar") are unverified.
+Keep the Flow window in the compact layout. `flow-reference-upload.test.ts` drives all of this in real headless
+Chrome against a structural mock (both layouts) — it proves the logic, not that Google hasn't moved the markup.
+
+### Failure handling, fallback chain, sequencing (2026-09-24)
+
+- **Failure cards are counted against a baseline.** Flow keeps failed tiles in the project grid, so an
+  old refusal / usage-limit card is still in `body`. `failureBaselineOf(body)` is taken right before
+  submit and `classifyFlowFailureBody(body, media, baseline)` only reports a card that is NEW. Without
+  it, object-only beats were "refused" ~17 s after submit by a stale card.
+- **`FlowBrowserError` code `policy`** = Google's "talvez viole nossas políticas". Never worked around.
+  It is model-independent (`isModelIndependentFailure`: no retry on the fallback model) and counts as
+  a beat-exhausted failure (`isFlowBeatExhausted`: neighbour reuse, the run does not crash). The
+  refusal was traced to the identity prompt ("preserve facial structure … likeness"), NOT the attached
+  photo: `CHARACTER_REFERENCE_INSTRUCTION` is now "same outfit, hairstyle and general look".
+- **Usage limit** ("Você chegou ao limite de uso", live-observed) is code `credits`. `generateFlowImage`
+  remembers per model, for 30 min (`state.limitedModels`, in-process), that it hit its limit and goes
+  straight to `FLOW_IMAGE_MODEL_FALLBACK`; both limited -> throws at once. In `visual-source.ts`, a
+  credits error or 3 consecutive non-policy failures marks the run's Flow "spent"
+  (`flowSpentRuns`) and later beats go straight to the fallback.
+- **`FLOW_FALLBACK_PROVIDER=chain`**: Cloudflare -> Pollinations -> Meta Muse -> kie.ai for ordinary
+  stills. Character-reference beats and videos never use the cheap chain (only kie Edit / kie Veo).
+- **One beat at a time with Flow** (`visualConcurrency()` in studio-pipeline.ts): AI_PROVIDER=flow_browser
+  forces visual concurrency 1, so a beat that falls back to another provider cannot free a slot.
+  Neighbour reuse for an exhausted beat is intentionally kept.
+- **Attach retries**: `prepareComposerReference` retries the attach 3x (close overlays, clear chips)
+  before failing closed.
+- **Style slot**: when the style has `[INSIRA O ASSUNTO AQUI]`, the subject goes through
+  `fitSubjectToSlot` ("An over-the-shoulder shot of X." -> "X, over-the-shoulder shot") and the
+  "in a documentary about: …" anchor is omitted. Prompts without a slot are byte-identical to before.
+
+### Per-channel character words (`channels.character_terms`)
+
+Comma-separated words that decide which beats get the reference photo, edited in Channels and
+delivered as `AI_CHARACTER_TERMS` through `channelSettingOverrides`. Empty = the built-in housekeeper
+list AND the cleaning-verb first-person rule; a channel with its own words uses only those (plural
+tolerant, whole-word, regex-escaped: `characterTermsRegex`). Matched against the planner's visual
+description first, narration only when there is none. Prefer role/name/pronoun words; avoid bare
+`man`/`person`, which pull the portrait into bystander beats.
 
 ### Reference attach confirmation
 

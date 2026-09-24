@@ -12,6 +12,7 @@ interface Channel {
   visual_mode: "ai" | "real" | "mix";
   ai_style: string | null;
   visual_prompt: string | null;
+  character_terms: string | null;
   voice_id: string | null;
   voice_speed: number | null;
   voice_provider: string | null;
@@ -31,6 +32,7 @@ interface Draft {
   format: string;
   // User-facing:
   ai_style: string;
+  character_terms: string;
   voice_id: string; // ai33.pro voice id — see ChannelAi33VoiceField
   voice_speed: string;
   avatar_id: number | null;
@@ -44,6 +46,7 @@ const EMPTY: Draft = {
   interval_sec: 4.5,
   format: "1920x1080",
   ai_style: "",
+  character_terms: "",
   voice_id: "",
   voice_speed: "",
   avatar_id: null,
@@ -84,6 +87,7 @@ export default function ChainesPage() {
       // Preserved from existing/default values — not user-editable here anymore.
       visual_mode: d.visual_mode,
       ai_style: d.ai_style,
+      character_terms: d.character_terms,
       visual_prompt: d.visual_prompt,
       interval_sec: d.interval_sec,
       format: d.format,
@@ -108,6 +112,7 @@ export default function ChainesPage() {
       name: c.name,
       visual_mode: c.visual_mode,
       ai_style: c.ai_style ?? "",
+      character_terms: c.character_terms ?? "",
       visual_prompt: c.visual_prompt ?? "",
       interval_sec: c.interval_sec,
       format: c.format,
@@ -173,6 +178,23 @@ export default function ChainesPage() {
         />
         <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
           {tr("Ajouté au prompt de chaque plan IA (image et vidéo) généré pour cette chaîne.", "Appended to every AI beat's prompt (image and video) generated for this channel.")}
+        </div>
+      </div>
+
+      <div>
+        <label className="label">{tr("Mots qui déclenchent le personnage (optionnel)", "Words that bring in the character (optional)")}</label>
+        <textarea
+          className="input"
+          rows={2}
+          value={d.character_terms}
+          onChange={(e) => set({ ...d, character_terms: e.target.value })}
+          placeholder={tr("ex. « detective, inspector, he, him » — vide = liste par défaut (femme de chambre)", "e.g. \"detective, inspector, he, him\" — empty = built-in list (housekeeper)")}
+        />
+        <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+          {tr(
+            "La photo de référence n'est jointe qu'aux plans dont la description contient l'un de ces mots. Séparez par des virgules.",
+            "The reference photo is attached only to beats whose visual description contains one of these words. Separate with commas."
+          )}
         </div>
       </div>
 

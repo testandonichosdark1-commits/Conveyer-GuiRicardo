@@ -48,6 +48,22 @@ import { DATA_DIR } from "../run-paths";
 // probing Cloudflare for the rest of that run and continue with Pollinations/Meta/kie.ai.
 const cloudflareDisabledRuns = new Set<string>();
 const pollinationsDisabledRuns = new Set<string>();
+
+/** Runs whose Flow session is spent (credits gone, or repeated non-policy failures). Once a
+ *  run is here every remaining beat goes straight to the fallback instead of paying a
+ *  ~20-40 s failed attempt each. A policy refusal never counts — it is about ONE beat. */
+const flowSpentRuns = new Set<string>();
+const flowConsecutiveFailures = new Map<string, number>();
+const FLOW_FAILURES_BEFORE_SPENT = 3;
+
+function noteFlowFailure(runId: string, e: unknown): void {
+  if (!(e instanceof FlowBrowserError) || e.code === "policy") return;
+  if (e.code === "credits") { flowSpentRuns.add(runId); return; }
+  const n = (flowConsecutiveFailures.get(runId) ?? 0) + 1;
+  flowConsecutiveFailures.set(runId, n);
+  if (n >= FLOW_FAILURES_BEFORE_SPENT) flowSpentRuns.add(runId);
+}
+function noteFlowSuccess(runId: string): void { flowConsecutiveFailures.delete(runId); }
 const metaDisabledRuns = new Set<string>();
 
 /**
@@ -3288,21 +3304,88 @@ export function keepPositiveClauses(clauses: string): string {
  * portrait into object-only scenes.
  */
 export function beatWantsCharacterReference(beat: Pick<Beat, "aiPrompt" | "visualQuery" | "text">): boolean {
-  const scene = [beat.aiPrompt, beat.visualQuery, beat.text].filter(Boolean).join(" ");
-  const explicitCharacter = /\b(?:woman|women|female|housekeeper|housekeeping\s+(?:attendant|staff)|room\s+attendant|maid|cleaning\s+lady|professional\s+cleaner|cleaning\s+professional|cleaning\s+worker|hotel\s+(?:attendant|worker|staff|employee)|hospitality\s+professional|worker|employee|staff\s+member|she|her|hers)\b/i;
+  // Plural forms are covered on purpose: with a trailing \b and only the singular spelled
+  // out, "Hotel housekeepers are trained…" silently failed to match "housekeeper" (no word
+  // boundary between the r and the s), so the most natural way to name the subject was the
+  // one form that never routed a beat to the reference.
+  const defaultExplicitCharacter = /\b(?:woman|women|females?|housekeepers?|housekeeping\s+(?:attendants?|staff)|room\s+attendants?|maids?|cleaning\s+(?:lady|ladies)|professional\s+cleaners?|cleaning\s+professionals?|cleaning\s+workers?|hotel\s+(?:attendants?|workers?|staff|employees?)|hospitality\s+professionals?|workers?|employees?|staff\s+members?|she|her|hers)\b/i;
   // A configured portrait represents the channel's first-person presenter. Embodied
   // actions are a useful signal even when the narration says only “I” and the planner
   // omits “housekeeper” from its visual prompt. Avoid generic “I think / I know” so the
   // portrait is not forced into explanatory object shots.
-  const embodiedFirstPerson = /\bI\s+(?:saw|noticed|looked|stepped|walked|entered|checked|cleaned|wiped|found|reached|picked|opened|closed|touched|examined|watched|worked|held|removed|sprayed)\b/i;
-  return explicitCharacter.test(scene) || embodiedFirstPerson.test(scene);
+  const customTerms = characterTermsRegex(getSetting("AI_CHARACTER_TERMS"));
+  const explicitCharacter = customTerms ?? defaultExplicitCharacter;
+  const defaultEmbodiedFirstPerson = /\bI\s+(?:saw|noticed|looked|stepped|walked|entered|checked|cleaned|wiped|found|reached|picked|opened|closed|touched|examined|watched|worked|held|removed|sprayed)\b/i;
+
+  // The planner's OWN visual description (aiPrompt/visualQuery) is the authoritative
+  // signal for whether THIS BEAT'S VISUAL shows the character — check it on its own first.
+  const visualScene = [beat.aiPrompt, beat.visualQuery].filter(Boolean).join(" ");
+  if (explicitCharacter.test(visualScene)) return true;
+
+  // Only fall back to the spoken narration (beat.text) when the planner produced no
+  // visual description to judge from at all. Reading beat.text unconditionally used to
+  // false-positive hard on any script whose narration follows ONE recurring character
+  // throughout (e.g. "she"/"the housekeeper"/"the worker" said constantly) — those
+  // generic pronoun/role words then matched on beats whose VISUAL is a bare object (a
+  // spray bottle, a timer, a hinge), because the surrounding sentence mentioned "she"
+  // even though nothing about her is on screen in that shot. The video ended up peppered
+  // with portrait-like renders of the reference photo instead of the described object.
+  if (!visualScene && explicitCharacter.test(beat.text || "")) return true;
+
+  // Embodied first-person narration ("I saw/cleaned/…") is read from beat.text
+  // unconditionally — it is inherently a NARRATION-only phrasing the planner's
+  // third-person visual description would never produce, so it carries no false-positive
+  // risk from the "whole script about one character" pattern above.
+  // The first-person verbs are cleaning-flavoured, so a channel with its OWN character words
+  // opts out of them: its words decide, and nothing about "I wiped" is assumed for its show.
+  return !customTerms && defaultEmbodiedFirstPerson.test(beat.text || "");
+}
+
+/**
+ * A channel's own character words ("detective, inspector, he, him") as one matcher, or null
+ * when it has none (-> the built-in list). Every word is escaped and matched as a whole word,
+ * with an optional plural "s"/"es" so "detective" also catches "detectives".
+ */
+export function characterTermsRegex(raw: string | null | undefined): RegExp | null {
+  const words = (raw || "").split(/[,\n;]/).map((w) => w.trim()).filter(Boolean);
+  if (!words.length) return null;
+  const alt = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"));
+  return new RegExp(`\\b(?:${alt.join("|")})(?:e?s)?\\b`, "i");
 }
 
 const CHARACTER_REFERENCE_INSTRUCTION =
-  "Use the supplied reference image ONLY as the identity reference for the adult female character. " +
-  "Preserve the same woman's facial structure, hairstyle, apparent age, skin tone, and overall likeness. " +
-  "Do not copy the reference background, pose, crop, or lighting; create the requested scene naturally. " +
-  "Do not turn her into a generic stock-photo model.";
+  "Use the attached image as a character reference: same outfit, hairstyle and general look.";
+
+/**
+ * Operators can write AI_IMAGE_STYLE as a template that embeds the beat's own subject
+ * inline — e.g. "Amateur smartphone photo of [INSIRA O ASSUNTO AQUI], casual snapshot,
+ * taken on a mid-range phone camera, ..." — instead of always having `base` prepended as
+ * its own leading clause ahead of the style text. Case-insensitive and tolerant of the
+ * common EN/PT-BR phrasings so an operator isn't locked into one exact wording.
+ */
+const STYLE_SUBJECT_PLACEHOLDER = /\[\s*(?:insert\s+subject\s+here|subject|insira\s+o\s+assunto\s+aqui)\s*\]/i;
+
+/**
+ * The planner writes `ai_prompt` as a whole shot description ("An over-the-shoulder shot of
+ * the housekeeper cleaning a bathroom."). Dropped into "Amateur smartphone photo of [..]"
+ * verbatim it reads "photo of An over-the-shoulder shot of…" and leaves ".," before the next
+ * clause. Only used when the operator's style has a subject slot; exported for tests.
+ */
+export function fitSubjectToSlot(subject: string): string {
+  let s = subject.trim().replace(/[\s.;,:]+$/, "");
+  const wrapped = s.match(/^(?:an?\s+)?((?:[\w-]+\s+){0,4}?)(shot|photo|photograph|snapshot|image|picture|view)\s+of\s+(.+)$/i);
+  const bare = s.match(/^(?:an?\s+)?(close-?up|macro|wide|aerial|overhead)\s+of\s+(.+)$/i);
+  if (wrapped) {
+    const framing = `${wrapped[1]}${wrapped[2]}`.trim();
+    s = /^(?:shot|photo|photograph|snapshot|image|picture|view)$/i.test(framing) ? wrapped[3] : `${wrapped[3]}, ${framing}`;
+  } else if (bare) {
+    s = `${bare[2]}, ${bare[1]}`;
+  }
+  return s
+    .replace(/^(?:the|an?)\s+(?=[A-Z]?[a-z])/i, (m) => m.toLowerCase())
+    .replace(/\.\s+(?=[A-Z])/g, ", ")
+    .replace(/,\s*,/g, ",");
+}
 
 /** AI b-roll for a beat — kie.ai (nano-banana image + Ken Burns, or Veo video), 69labs/Grok, or Runware. */
 async function acquireAi(
@@ -3319,7 +3402,10 @@ async function acquireAi(
 ): Promise<VisualResult> {
   let provider = (getSetting("AI_PROVIDER") || "kie").toLowerCase();
   const selectedFlowBrowser = provider === "flow_browser";
-  const flowFallbackToKie = selectedFlowBrowser && getSetting("FLOW_FALLBACK_PROVIDER").toLowerCase() === "kie";
+  const flowFallbackSetting = getSetting("FLOW_FALLBACK_PROVIDER").toLowerCase();
+  // "chain" = Cloudflare -> Pollinations -> Meta Muse -> kie.ai for ordinary stills.
+  const flowFallbackChain = selectedFlowBrowser && flowFallbackSetting === "chain";
+  const flowFallbackToKie = selectedFlowBrowser && (flowFallbackSetting === "kie" || flowFallbackChain);
   const style = (aiStyle ?? getSetting("AI_IMAGE_STYLE")) || "";
   const configuredCharacterRef = (getSetting("AI_CHARACTER_REFERENCE_PATH") || "").trim();
   const providerSupportsCharacterRef = provider === "kie" || provider === "flow_browser";
@@ -3357,31 +3443,43 @@ async function acquireAi(
   const noText = noTextProduct ?? noTextDefault;
   // Anchor the generation to the WHOLE video's topic, not just this sentence —
   // an abstract per-scene prompt was producing off-topic art (e.g. a fantasy
-  // mage for a laundry-detergent video). Plus hard quality + realism negatives.
+  // mage for a laundry-detergent video).
   const topic = (videoContext || "").trim().slice(0, 160);
   const contextAnchor = topic ? `in a documentary about: ${topic}` : "";
-  // The realism clause is two halves: what we WANT, and what we must AVOID. Split into
-  // named constants so Runware can route the avoid-half to its native negativePrompt
-  // while `realism` below still composes to the byte-identical string kie / 69labs /
-  // Magnific have always received. (Pinned by a test — this must not drift.)
-  const realismWant =
-    "photorealistic, real-world, high quality, sharp focus, high resolution, natural lighting, documentary photography";
+  // Realism used to also carry a fixed POSITIVE clause ("photorealistic, real-world,
+  // high quality, sharp focus, ...") baked into every prompt regardless of style. That
+  // assumed every style wants a crisp, high-quality look — but an operator's own
+  // AI_IMAGE_STYLE can deliberately want the opposite (a candid amateur-phone-photo style
+  // explicitly asks for "low sharpness", "visible digital noise", "slight motion blur"),
+  // and a hardcoded "sharp focus, high quality" clause would directly contradict that. So
+  // only the AVOID half survives as shared boilerplate: "NOT fantasy/sci-fi/surreal/..."
+  // rules out drift into non-photographic renders regardless of which realistic look the
+  // style asks for, and it still feeds Runware's negativePrompt below.
   const realismAvoid =
     "NOT fantasy, NOT sci-fi, NOT surreal, NOT abstract, NOT digital art, NOT illustration, NOT 3D render, no glowing magic, no neon";
-  const realism = `${realismWant}. ${realismAvoid}`;
   // Prefer the rich Gemini-written generation prompt; fall back to the short stock
   // query, then to KEYWORDS of the narration — never the raw sentence (it gets
   // rendered as on-screen text).
   const base = beat.aiPrompt || beat.visualQuery || keywordsOnly(beat.text);
+  // An operator's AI_IMAGE_STYLE can embed a subject placeholder (STYLE_SUBJECT_PLACEHOLDER)
+  // so `base` lands INSIDE their template instead of always being prepended as its own
+  // leading clause. When no placeholder is present, base/style compose exactly as before.
+  const styleWithSubject = style.replace(STYLE_SUBJECT_PLACEHOLDER, () => fitSubjectToSlot(base));
+  const styleHasSubjectSlot = styleWithSubject !== style;
   const VARIANTS = ["", "alternative composition, different camera angle", "another realistic shot, cleaner simple framing", "wider establishing shot", "tighter close-up detail"];
-  const buildPrompt = (v: string) => [base, contextAnchor, style, realism, noText, v].filter(Boolean).join(", ");
-  // Runware variant: the SAME pieces, with both ban lists lifted out of the positive
+  const buildPrompt = (v: string) =>
+    (styleHasSubjectSlot ? [styleWithSubject, noText, v] : [base, contextAnchor, style, noText, v])
+      .filter(Boolean).join(", ");
+  // Runware variant: the SAME pieces, with the ban list lifted out of the positive
   // prompt into the native negativePrompt below. Only the placement differs — base,
   // contextAnchor, style and the variant are shared verbatim, so there is no second
   // prompt to keep in sync. Positive-instruction clauses ("blank unlabeled plain
   // packaging") stay on the positive side, where they belong.
   const buildCleanPrompt = (v: string) =>
-    [base, contextAnchor, style, realismWant, keepPositiveClauses(noText), v].filter(Boolean).join(", ");
+    (styleHasSubjectSlot
+      ? [styleWithSubject, keepPositiveClauses(noText), v]
+      : [base, contextAnchor, style, keepPositiveClauses(noText), v]
+    ).filter(Boolean).join(", ");
   const negativePrompt = toNegativeTerms(`${noText}, ${realismAvoid}`);
   const aspect = aiAspect(resolution);
   const gateQuery = visualPromptToQuery(beat.visualQuery || beat.text) || base;
@@ -3533,6 +3631,11 @@ async function acquireAi(
     }
   }
 
+  if (provider === "flow_browser" && flowFallbackToKie && flowSpentRuns.has(runId)) {
+    log(runId, "debug", `Beat ${beat.index}: Flow session spent for this run — going straight to the fallback`, { stage: "visual" });
+    provider = "kie";
+  }
+
   if (provider === "flow_browser") {
     // Both media kinds are driven by the SAME resolver every other AI provider uses —
     // Flow is no longer image-only. Still serialized process-wide inside flow-browser.ts
@@ -3548,8 +3651,12 @@ async function acquireAi(
       // the same prompt on a UI failure does not improve it.
       let flowVideoError: Error | null = null;
       try {
+        // The identity instruction leads the prompt rather than trailing it — buildPrompt
+        // already appends topic/style/no-text boilerplate that can run to 100+ words, and
+        // burying the ONE instruction that keeps this beat's face matching the reference
+        // photo at the very end of that risks it being diluted or truncated.
         const flowPrompt = characterReferencePath
-          ? `${buildPrompt("")}, ${CHARACTER_REFERENCE_INSTRUCTION}`
+          ? `${CHARACTER_REFERENCE_INSTRUCTION} ${buildPrompt("")}`
           : buildPrompt("");
         log(
           runId,
@@ -3567,12 +3674,14 @@ async function acquireAi(
             durationSec: Math.ceil(beatDurSec),
           }
         );
+        noteFlowSuccess(runId);
         log(runId, "info", `Beat ${beat.index}: Flow/Veo video downloaded`, { stage: "visual" });
         log(runId, "info", `Beat ${beat.index}: Flow/Veo video validated`, { stage: "visual" });
         log(runId, "info", `Beat ${beat.index}: AI video via Google Flow/Veo`, { stage: "visual" });
         return { path: outPath, kind: "ai", provider: "flow:veo3" };
       } catch (e) {
         flowVideoError = e as Error;
+        noteFlowFailure(runId, e);
         log(runId, "warn", `Beat ${beat.index}: Google Flow/Veo video failed (${(e as Error).message.slice(0, 200)})`, { stage: "visual" });
       }
 
@@ -3596,8 +3705,10 @@ async function acquireAi(
         const tmpImg = path.join(os.tmpdir(), `flow_${runId.slice(0, 8)}_${beat.index}_${attempt}.png`);
         let usedModel = "";
         try {
+          // Identity instruction leads the prompt — see the matching comment on the Veo
+          // branch above.
           const flowPrompt = characterReferencePath
-            ? `${buildPrompt(VARIANTS[attempt % VARIANTS.length])}, ${CHARACTER_REFERENCE_INSTRUCTION}`
+            ? `${CHARACTER_REFERENCE_INSTRUCTION} ${buildPrompt(VARIANTS[attempt % VARIANTS.length])}`
             : buildPrompt(VARIANTS[attempt % VARIANTS.length]);
           log(
             runId,
@@ -3613,8 +3724,10 @@ async function acquireAi(
             characterReferencePath ? { referenceImagePath: characterReferencePath } : undefined
           );
           usedModel = result.model;
+          noteFlowSuccess(runId);
         } catch (e) {
           flowError = e as Error;
+          noteFlowFailure(runId, e);
           try { fs.unlinkSync(tmpImg); } catch {}
           log(runId, "warn", `Beat ${beat.index}: Google Flow browser failed (${(e as Error).message.slice(0, 180)})`, { stage: "visual" });
           break; // UI/login failures are not improved by submitting the same prompt again.
@@ -3691,7 +3804,7 @@ async function acquireAi(
     // Cloudflare -> Pollinations Z-Image -> Meta Muse -> kie.ai/Nano Banana.
     // Every intermediate image goes through the same Gemini quality gate. Character-reference
     // scenes deliberately skip the chain and stay on Nano Banana Edit for identity consistency.
-    if (!characterReferencePath && !selectedFlowBrowser) {
+    if (!characterReferencePath && (!selectedFlowBrowser || flowFallbackChain)) {
       if (cloudflareImageConfigured() && !cloudflareDisabledRuns.has(runId)) {
         const cfImg = path.join(os.tmpdir(), `cf_${runId.slice(0, 8)}_${beat.index}.png`);
         try {
@@ -3800,7 +3913,9 @@ async function acquireAi(
         }
       }
     } else {
-      log(runId, "debug", `Beat ${beat.index}: cheap-provider chain skipped — character reference scene stays on Nano Banana Edit`, { stage: "visual" });
+      log(runId, "debug", characterReferencePath
+        ? `Beat ${beat.index}: cheap-provider chain skipped — character reference scene stays on Nano Banana Edit`
+        : `Beat ${beat.index}: cheap-provider chain skipped — Flow fallback is set to kie.ai only`, { stage: "visual" });
     }
 
     let best: { path: string; score: number } | null = null;
@@ -3808,8 +3923,10 @@ async function acquireAi(
       const tmpImg = path.join(os.tmpdir(), `kie_${runId.slice(0, 8)}_${beat.index}_${attempt}.png`);
       try {
         const variantPrompt = buildPrompt(VARIANTS[attempt % VARIANTS.length]);
+        // Identity instruction leads the prompt — see the matching comment on the Flow
+        // image branch above.
         const prompt = characterReferencePath
-          ? `${variantPrompt}, ${CHARACTER_REFERENCE_INSTRUCTION}`
+          ? `${CHARACTER_REFERENCE_INSTRUCTION} ${variantPrompt}`
           : variantPrompt;
         const url = await generateImageUrl(
           runId,

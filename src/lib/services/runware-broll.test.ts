@@ -125,8 +125,6 @@ const OPTS = { aiStyle: "cinematic", resolution: "1920x1080", videoContext: "wid
  */
 const LEGACY_KIE_PROMPT =
   "a widget on a bench, in a documentary about: widgets, cinematic, " +
-  "photorealistic, real-world, high quality, sharp focus, high resolution, natural lighting, documentary photography. " +
-  "NOT fantasy, NOT sci-fi, NOT surreal, NOT abstract, NOT digital art, NOT illustration, NOT 3D render, no glowing magic, no neon, " +
   "absolutely no text, no captions, no words, no letters, no numbers, no labels, no brand names, no logos, " +
   "no signs, no posters, no handwriting, no writing on any object, blank unlabeled plain packaging, no watermark";
 
@@ -203,14 +201,39 @@ describe("Runware b-roll generation", () => {
   });
 });
 
+describe("AI_IMAGE_STYLE subject placeholder", () => {
+  it("merges base into the style template instead of prepending it as its own clause", async () => {
+    const opts = { ...OPTS, aiStyle: "Amateur smartphone photo of [INSIRA O ASSUNTO AQUI], casual snapshot, low sharpness" };
+    await acquireVisual("run", beat(), OUT, new Set(), opts);
+    const positive = rw.gen.mock.calls[0][0] as string;
+    expect(positive).toBe(
+      "Amateur smartphone photo of a widget on a bench, casual snapshot, low sharpness, " +
+        "blank unlabeled plain packaging"
+    );
+    // base must not ALSO appear as its own leading clause — the placeholder consumed it.
+    expect(positive.match(/a widget on a bench/g)?.length).toBe(1);
+  });
+
+  it("supports the English phrasing too", async () => {
+    const opts = { ...OPTS, aiStyle: "A photo of [insert subject here], vintage film grain" };
+    await acquireVisual("run", beat(), OUT, new Set(), opts);
+    const positive = rw.gen.mock.calls[0][0] as string;
+    expect(positive).toContain("A photo of a widget on a bench, vintage film grain");
+  });
+
+  it("without a placeholder, base still leads the prompt exactly as before", async () => {
+    await acquireVisual("run", beat(), OUT, new Set(), OPTS);
+    const positive = rw.gen.mock.calls[0][0] as string;
+    expect(positive.startsWith("a widget on a bench, in a documentary about: widgets, cinematic")).toBe(true);
+  });
+});
+
 describe("prompt split", () => {
   it("the POSITIVE prompt is clean — no ban clauses leak into it", async () => {
     await acquireVisual("run", beat(), OUT, new Set(), OPTS);
     const positive = rw.gen.mock.calls[0][0] as string;
     expect(positive).toBe(
-      "a widget on a bench, in a documentary about: widgets, cinematic, " +
-        "photorealistic, real-world, high quality, sharp focus, high resolution, natural lighting, documentary photography, " +
-        "blank unlabeled plain packaging"
+      "a widget on a bench, in a documentary about: widgets, cinematic, blank unlabeled plain packaging"
     );
     expect(positive).not.toMatch(/\bno |NOT /);
   });

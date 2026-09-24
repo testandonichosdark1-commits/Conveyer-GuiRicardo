@@ -167,7 +167,7 @@ export const SETTING_KEYS = [
   "FLOW_BROWSER_HEADLESS",     // 0 = visible (recommended), 1 = headless
   "FLOW_CDP_PORT",             // localhost debugging port used to attach to normal Chrome
   "FLOW_GENERATION_TIMEOUT_SEC", // Max wait for one generated image
-  "FLOW_FALLBACK_PROVIDER",    // none | kie — what to do if the Flow UI fails
+  "FLOW_FALLBACK_PROVIDER",    // none | kie | chain — what to do if the Flow UI fails
   "FLOW_IMAGE_MODEL",          // Model label/id expected in Flow (Nano Banana Pro)
   "FLOW_IMAGE_MODEL_FALLBACK", // Model to switch to when FLOW_IMAGE_MODEL hits a limit mid-run (e.g. Nano Banana Pro -> Nano Banana 2). Empty = no fallback (today's behavior).
   "FLOW_ASPECT_RATIO",         // Image aspect ratio selected/validated by the worker
@@ -258,6 +258,7 @@ export const SETTING_KEYS = [
   "HEYGEN_UPLOAD_RETRIES",     // extra retries for the HeyGen voiceover upload on TRANSIENT failures (transport/DNS/timeout, 429, 5xx) before dropping the beat to b-roll. Permanent 4xx fail fast. attempts = retries + 1. 0 = one-shot (old behavior). Default 2 (clamped 0–5).
   "HEYGEN_DOWNLOAD_RETRIES",   // H1b: extra retries for the FINAL rendered-MP4 download (has a 120s per-attempt timeout) on TRANSIENT failures (transport/DNS/connect-timeout, 429, 5xx). Permanent 4xx (e.g. expired signed URL) fail fast. attempts = retries + 1. 0 = one-shot (old behavior). Default 2 (clamped 0–5).
   "AI_IMAGE_STYLE",            // default style suffix for AI image/video prompts (channel can override)
+  "AI_CHARACTER_TERMS",          // comma-separated words that attach the character reference to a beat (per channel; empty = built-in list)
   "AI_CHARACTER_REFERENCE_PATH", // local reference portrait used by kie.ai image-to-image when a female/housekeeper scene is detected
   "KIE_IMAGE_EDIT_MODEL",        // kie.ai image-to-image model used when a character reference is active
 
@@ -740,6 +741,7 @@ export const DEFAULTS: Record<SettingKey, string> = {
   HEYGEN_DOWNLOAD_RETRIES: "2",
   AI_IMAGE_STYLE: "cinematic, photo realistic, natural lighting, documentary",
   AI_CHARACTER_REFERENCE_PATH: "",
+  AI_CHARACTER_TERMS: "",
   KIE_IMAGE_EDIT_MODEL: "google/nano-banana-edit",
 
   // Reliability / scaling

@@ -28,6 +28,37 @@ import { beginStoryblocksRun } from "./services/storyblocks";
 import { FlowBrowserError } from "./services/flow-browser";
 
 /**
+ * With Google Flow as the AI provider, beats run ONE AT A TIME: a beat only starts once the
+ * previous one has finished with a result — from whichever source produced it (Flow Pro,
+ * Flow 2, Cloudflare, Pollinations, Meta Muse, kie.ai). Otherwise a beat falling back to
+ * another provider frees its slot and the next beat starts while the first is still working,
+ * which is the overlap the operator asked to remove. Other providers keep VISUAL_CONCURRENCY.
+ */
+function visualConcurrency(): number {
+  if ((getSetting("AI_PROVIDER") || "").toLowerCase() === "flow_browser") return 1;
+  return Math.max(1, Number(getSetting("VISUAL_CONCURRENCY") || "3"));
+}
+
+/**
+ * A FlowBrowserError with code "capture" means this ONE beat exhausted every source it
+ * was allowed — Flow itself, and (when FLOW_FALLBACK_PROVIDER is configured) its kie.ai
+ * fallback too — the exact "this provider produced nothing" outcome every other AI
+ * provider (kie/Cloudflare/Pollinations/Meta) already degrades from below: log a warning
+ * and let the beat reuse the nearest good neighbour instead of a black frame. Every other
+ * code (login/credits/config/ui/timeout) only reaches here when the operator explicitly
+ * disabled the fallback (strict Flow-only mode) — "never reuse an unrelated image" is
+ * still honored for THAT case by failing the whole run closed, same as before.
+ *
+ * Before this distinction existed, every FlowBrowserError aborted the run outright —
+ * including "capture", so a single beat losing both Flow and its configured kie.ai
+ * fallback (a transient, single-beat hiccup) could crash a run over an hour into
+ * rendering, discarding every beat already finished. See CLAUDE.md's Flow browser section.
+ */
+function isFlowBeatExhausted(e: FlowBrowserError): boolean {
+  return e.code === "capture" || e.code === "policy";
+}
+
+/**
  * AVATAR DOCUMENTARY pipeline.
  *
  *   script → ElevenLabs voiceover (+ word timings) → beats → per beat:
@@ -450,7 +481,7 @@ export async function runStudioPipeline(
     // seeking is approximate, which offset every slice except the first and
     // made later avatar lips drift from the master track.
     const voiceoverWav = decodeToWav(voiceover.filePath, path.join(runDir, "voiceover.wav"));
-    const visualConc = Math.max(1, Number(getSetting("VISUAL_CONCURRENCY") || "3"));
+    const visualConc = visualConcurrency();
     const avatarConc = Math.max(1, Number(getSetting("AVATAR_CONCURRENCY") || "2"));
     const limitVisual = pLimit(visualConc);
     const limitAvatar = pLimit(avatarConc);
@@ -505,7 +536,7 @@ export async function runStudioPipeline(
             credits.set(beat.index, creditFrom(beat.index, res));
           } catch (e) {
             if (e instanceof CancelledError) throw e; // cancel aborts the beat — never fall back to more work
-            if (e instanceof FlowBrowserError) throw e; // Flow-only mode fails closed; never reuse an unrelated image
+            if (e instanceof FlowBrowserError && !isFlowBeatExhausted(e)) throw e; // strict Flow-only mode fails closed; never reuse an unrelated image
             log(runId, "warn", `Beat ${beat.index} visual failed (${(e as Error).message.slice(0, 120)}) — will reuse a neighbour`, {
               stage: "visual",
             });
@@ -548,7 +579,7 @@ export async function runStudioPipeline(
                 credits.set(beat.index, creditFrom(beat.index, res));
               } catch (e) {
                 if (e instanceof CancelledError) throw e; // cancel aborts the beat
-                if (e instanceof FlowBrowserError) throw e;
+                if (e instanceof FlowBrowserError && !isFlowBeatExhausted(e)) throw e;
                 visualPath = null; // filled from the nearest good visual after all beats resolve
               }
             }
@@ -825,7 +856,7 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
     );
 
     const voiceoverWav = decodeToWav(voiceoverPath, path.join(runDir, "voiceover.wav"));
-    const visualConc = Math.max(1, Number(getSetting("VISUAL_CONCURRENCY") || "3"));
+    const visualConc = visualConcurrency();
     const avatarConc = Math.max(1, Number(getSetting("AVATAR_CONCURRENCY") || "2"));
     const limitVisual = pLimit(visualConc);
     const limitAvatar = pLimit(avatarConc);
@@ -865,7 +896,7 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
               regenVisual++;
             } catch (e) {
               if (e instanceof CancelledError) throw e;
-              if (e instanceof FlowBrowserError) throw e;
+              if (e instanceof FlowBrowserError && !isFlowBeatExhausted(e)) throw e;
               log(runId, "warn", `Beat ${beat.index} visual failed (${(e as Error).message.slice(0, 120)}) — will reuse a neighbour`, {
                 stage: "visual",
               });
@@ -913,7 +944,7 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
                     regenVisual++;
                   } catch (e2) {
                     if (e2 instanceof CancelledError) throw e2;
-                    if (e2 instanceof FlowBrowserError) throw e2;
+                    if (e2 instanceof FlowBrowserError && !isFlowBeatExhausted(e2)) throw e2;
                     visualPath = null;
                   }
                 }
