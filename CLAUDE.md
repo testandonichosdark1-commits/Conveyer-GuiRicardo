@@ -490,9 +490,11 @@ Chrome against a structural mock (both layouts) — it proves the logic, not tha
   (`flowSpentRuns`) and later beats go straight to the fallback.
 - **`FLOW_FALLBACK_PROVIDER=chain`**: Cloudflare -> Pollinations -> Meta Muse -> kie.ai for ordinary
   stills. Character-reference beats and videos never use the cheap chain (only kie Edit / kie Veo).
-- **One beat at a time with Flow** (`visualConcurrency()` in studio-pipeline.ts): AI_PROVIDER=flow_browser
-  forces visual concurrency 1, so a beat that falls back to another provider cannot free a slot.
-  Neighbour reuse for an exhausted beat is intentionally kept.
+- **Beats run in parallel with Flow (`VISUAL_CONCURRENCY`, default 3).** Flow generation stays serial through its own
+  process-wide queue, so parallel beats never overlap inside the one controlled tab; they only let Pexels/YouTube
+  beats and fallback providers work while Flow generates. (A short-lived rule forcing concurrency 1 under
+  `AI_PROVIDER=flow_browser` was removed: it made a 157-beat run take ~2.7 h.) Neighbour reuse for an exhausted
+  beat is intentionally kept.
 - **Attach retries**: `prepareComposerReference` retries the attach 3x (close overlays, clear chips)
   before failing closed.
 - **Style slot**: when the style has `[INSIRA O ASSUNTO AQUI]`, the subject goes through

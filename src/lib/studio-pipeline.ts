@@ -28,14 +28,13 @@ import { beginStoryblocksRun } from "./services/storyblocks";
 import { FlowBrowserError } from "./services/flow-browser";
 
 /**
- * With Google Flow as the AI provider, beats run ONE AT A TIME: a beat only starts once the
- * previous one has finished with a result — from whichever source produced it (Flow Pro,
- * Flow 2, Cloudflare, Pollinations, Meta Muse, kie.ai). Otherwise a beat falling back to
- * another provider frees its slot and the next beat starts while the first is still working,
- * which is the overlap the operator asked to remove. Other providers keep VISUAL_CONCURRENCY.
+ * How many beats are acquired at once (VISUAL_CONCURRENCY, default 3). With Google Flow as the AI
+ * provider this stays parallel on purpose: Flow itself is serialized process-wide by its own queue
+ * (flow-browser.ts `enqueue`), so parallel beats never overlap inside the one controlled tab — they
+ * only let real-footage beats and fallback providers work while Flow generates. Forcing 1 made a
+ * 157-beat run take ~2.7 h, since half the beats (Pexels/YouTube) never needed Flow at all.
  */
 function visualConcurrency(): number {
-  if ((getSetting("AI_PROVIDER") || "").toLowerCase() === "flow_browser") return 1;
   return Math.max(1, Number(getSetting("VISUAL_CONCURRENCY") || "3"));
 }
 
