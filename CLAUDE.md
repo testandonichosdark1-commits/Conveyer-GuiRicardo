@@ -515,6 +515,11 @@ Chrome against a structural mock (both layouts) — it proves the logic, not tha
 - Capture order: download button (none exists passively) → direct fetch → network response. The run log says
   which one won: `Flow video captured via: …`.
 
+- **Out of Veo credits -> the beat is rendered as a Flow IMAGE.** A `credits` failure on a video beat (or a run
+  already marked in `flowVideoSpentRuns`) switches that beat to the Flow Nano Banana image path (Ken Burns) in
+  `acquireAi` — no kie.ai Veo attempt, no wait. Skipped when the operator pinned "Videos only"
+  (`KIE_AI_MEDIA=video` / `mediaOverride==="video"`), which keeps the old fail/fallback behaviour. Covered by
+  `flow-media-routing.test.ts`.
 - **Insufficient-credits alert (observed 2026-09-25, semantics partly unverified).** When the balance cannot
   cover a generation Flow swaps the arrow for `button.prompt-warning-button` (aria "Alerta de créditos
   insuficientes") and shows NO failure card. `flowInsufficientCreditsWarning` checks for it right before

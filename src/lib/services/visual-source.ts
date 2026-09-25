@@ -3649,7 +3649,17 @@ async function acquireAi(
     const { media: flowMedia, reason: flowMediaReason } = resolveAiMedia(beat, mediaOverride);
     log(runId, "debug", `Beat ${beat.index}: Flow media = ${flowMedia} (reason=${flowMediaReason})`, { stage: "visual" });
 
-    if (flowMedia === "video") {
+    // A video beat whose Veo credits ran out is rendered as a Flow IMAGE (Nano Banana) instead of
+    // being handed to a paid video fallback or left waiting. Not done when the operator pinned
+    // "Videos only" (a still would violate that choice) — those keep the old fail/fallback path.
+    let flowMediaNow: "image" | "video" = flowMedia;
+    const canDegradeToImage = mediaOverride !== "video" && flowMediaReason !== "global:video";
+    if (flowMediaNow === "video" && canDegradeToImage && flowVideoSpentRuns.has(runId)) {
+      log(runId, "info", `Beat ${beat.index}: Flow is out of Veo credits — rendering this beat as a Flow image instead`, { stage: "visual" });
+      flowMediaNow = "image";
+    }
+
+    if (flowMediaNow === "video") {
       // No score/regenerate loop here (mirrors the kie.ai Veo branch below): a video is
       // generated once, not re-scored by the still-image vision gate, and re-submitting
       // the same prompt on a UI failure does not improve it.
@@ -3692,6 +3702,10 @@ async function acquireAi(
         log(runId, "warn", `Beat ${beat.index}: Google Flow/Veo video failed (${(e as Error).message.slice(0, 200)})`, { stage: "visual" });
       }
 
+      if (flowVideoError instanceof FlowBrowserError && flowVideoError.code === "credits" && canDegradeToImage) {
+        log(runId, "warn", `Beat ${beat.index}: Flow is out of Veo credits — rendering this beat as a Flow image instead`, { stage: "visual" });
+        flowMediaNow = "image";
+      } else {
       if (!flowFallbackToKie) {
         // Fail closed, and preserve the media kind: a video-routed beat must never
         // quietly become a Flow IMAGE just because paid fallback is off.
@@ -3705,7 +3719,9 @@ async function acquireAi(
       // kie's own Veo attempt also fails (kie's pre-existing image-fallback policy,
       // untouched here; see the kie branch below for that decision).
       provider = "kie";
-    } else {
+      }
+    }
+    if (flowMediaNow === "image") {
       let best: { path: string; score: number; model: string } | null = null;
       let flowError: Error | null = null;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {

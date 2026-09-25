@@ -21,7 +21,7 @@ const { SETTINGS } = vi.hoisted(() => ({ SETTINGS: {} as Record<string, string> 
 const kieGen = vi.hoisted(() => ({ image: vi.fn(), video: vi.fn() }));
 const flowGen = vi.hoisted(() => ({ image: vi.fn(), video: vi.fn() }));
 const kb = vi.hoisted(() => ({ used: vi.fn() }));
-const ctl = vi.hoisted(() => ({ flowImageFails: false, flowVideoFails: false }));
+const ctl = vi.hoisted(() => ({ flowImageFails: false, flowVideoFails: false, flowVideoNoCredits: false }));
 
 vi.mock("../settings", () => ({ getSetting: (k: string) => SETTINGS[k] ?? "" }));
 vi.mock("../logger", () => ({ log: () => {} }));
@@ -46,6 +46,7 @@ vi.mock("./flow-browser", () => ({
   },
   generateFlowVideo: (_runId: string, _prompt: string, outPath: string) => {
     flowGen.video(outPath);
+    if (ctl.flowVideoNoCredits) return Promise.reject(new FakeFlowBrowserError("no credits for this video", "credits"));
     if (ctl.flowVideoFails) return Promise.reject(new FakeFlowBrowserError("flow video UI failure", "ui"));
     fs.writeFileSync(outPath, "mp4-bytes");
     return Promise.resolve(outPath);
@@ -81,6 +82,7 @@ beforeEach(() => {
   kb.used.mockClear();
   ctl.flowImageFails = false;
   ctl.flowVideoFails = false;
+  ctl.flowVideoNoCredits = false;
   for (const k of Object.keys(SETTINGS)) delete SETTINGS[k];
   Object.assign(SETTINGS, {
     AI_PROVIDER: "flow_browser",
@@ -154,5 +156,37 @@ describe("Flow browser — fallback preserves the media KIND", () => {
     await acquireVisual("run", aiBeat(), OUT, new Set(), {});
     expect(kieGen.image).toHaveBeenCalled();
     expect(kieGen.video).not.toHaveBeenCalled();
+  });
+});
+
+describe("Flow browser — out of Veo credits: the beat becomes a Flow IMAGE, never a wait or a paid video", () => {
+  const videoBeat = (i: number): Beat => ({ ...aiBeat(), index: i, aiMedia: "video" } as Beat);
+
+  it("renders the beat as a Flow image (Ken Burns), leaves kie.ai untouched, and skips Veo for the rest of the run", async () => {
+    SETTINGS.KIE_AI_MEDIA = "auto";
+    SETTINGS.FLOW_FALLBACK_PROVIDER = "kie";
+    SETTINGS.KIE_API_KEY = "test-key";
+    ctl.flowVideoNoCredits = true;
+    const r1 = await acquireVisual("run-credits-a", videoBeat(0), OUT, new Set(), {});
+    expect(flowGen.video).toHaveBeenCalledTimes(1);
+    expect(flowGen.image).toHaveBeenCalledTimes(1);
+    expect(kieGen.video).not.toHaveBeenCalled();
+    expect(kieGen.image).not.toHaveBeenCalled();
+    expect(kb.used).toHaveBeenCalled();
+    expect(r1.provider).toBe("flow:nano-banana-pro");
+
+    flowGen.video.mockClear();
+    flowGen.image.mockClear();
+    await acquireVisual("run-credits-a", videoBeat(1), OUT, new Set(), {});
+    expect(flowGen.video).not.toHaveBeenCalled(); // no second 10-credit attempt, no second wait
+    expect(flowGen.image).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT degrade when the operator pinned Videos only", async () => {
+    SETTINGS.KIE_AI_MEDIA = "video";
+    SETTINGS.FLOW_FALLBACK_PROVIDER = "none";
+    ctl.flowVideoNoCredits = true;
+    await expect(acquireVisual("run-credits-b", videoBeat(0), OUT, new Set(), {})).rejects.toThrow();
+    expect(flowGen.image).not.toHaveBeenCalled();
   });
 });
