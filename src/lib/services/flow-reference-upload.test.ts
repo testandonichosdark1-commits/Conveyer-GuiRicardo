@@ -106,7 +106,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await browser?.close();
   try { if (refPath) fs.unlinkSync(refPath); } catch {}
-});
+}, 20_000);
 
 const state = () => page.evaluate(() => ({
   picked: (window as unknown as { __picked: string | null }).__picked,

@@ -499,6 +499,30 @@ Chrome against a structural mock (both layouts) — it proves the logic, not tha
   `fitSubjectToSlot` ("An over-the-shoulder shot of X." -> "X, over-the-shoulder shot") and the
   "in a documentary about: …" anchor is omitted. Prompts without a slot are byte-identical to before.
 
+### Veo video capture — verified live (2026-09-25)
+
+- **A finished video is NOT reliably visible to `page.on("response")`.** Flow binds `<video src>` (a
+  `flow-content.google/video/<uuid>?Expires=…` URL, no file extension) as soon as the card renders, but the
+  browser may not fetch the bytes until the element is scrolled/played. A clip ready in ~83 s once sat there
+  while the passive listener waited the full 600 s. `generateFlowVideo` now snapshots the page's `<video>` srcs
+  BEFORE submitting (`currentFlowVideoSrcs`), breaks out as soon as a NEW src appears, and fetches it directly
+  (`fetchVideoFromResultElement`, `page.request.get`). The baseline is what stops an older video in this
+  shared project grid from being taken as the beat's result.
+- **Direct fetch = the manual download.** md5-identical to the file the card's ⋮ menu saves
+  (`Mais opções` → `Fazer o download` → submenu `270p GIF animado` / `720p Tamanho original` / `1080p` and `4K`
+  "Aprimorada"). Clicking that menu makes Chrome save into ~/Downloads and Playwright (attached with
+  `noDefaults`) gets NO `download` event — so the menu is deliberately not used by the pipeline.
+- Capture order: download button (none exists passively) → direct fetch → network response. The run log says
+  which one won: `Flow video captured via: …`.
+
+- **Insufficient-credits alert (observed 2026-09-25, semantics partly unverified).** When the balance cannot
+  cover a generation Flow swaps the arrow for `button.prompt-warning-button` (aria "Alerta de créditos
+  insuficientes") and shows NO failure card. `flowInsufficientCreditsWarning` checks for it right before
+  submit (image and video) and throws code `credits`; a video-side credits failure is tracked apart
+  (`flowVideoSpentRuns`) so it does not send the still images to the fallback chain. NOT verified: whether
+  Flow truly blocks submission while the alert shows — one Veo beat still finished (~5 min) with the alert on
+  screen, so it may also appear after a submit reserves credits.
+
 ### Per-channel character words (`channels.character_terms`)
 
 Comma-separated words that decide which beats get the reference photo, edited in Channels and

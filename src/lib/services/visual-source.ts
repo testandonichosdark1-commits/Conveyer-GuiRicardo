@@ -56,9 +56,13 @@ const flowSpentRuns = new Set<string>();
 const flowConsecutiveFailures = new Map<string, number>();
 const FLOW_FAILURES_BEFORE_SPENT = 3;
 
-function noteFlowFailure(runId: string, e: unknown): void {
+/** Videos cost more than stills (Veo ~10 credits): running short for video must not take the
+ *  still-image path down with it, so it is tracked apart from `flowSpentRuns`. */
+const flowVideoSpentRuns = new Set<string>();
+
+function noteFlowFailure(runId: string, e: unknown, kind: "image" | "video" = "image"): void {
   if (!(e instanceof FlowBrowserError) || e.code === "policy") return;
-  if (e.code === "credits") { flowSpentRuns.add(runId); return; }
+  if (e.code === "credits") { (kind === "video" ? flowVideoSpentRuns : flowSpentRuns).add(runId); return; }
   const n = (flowConsecutiveFailures.get(runId) ?? 0) + 1;
   flowConsecutiveFailures.set(runId, n);
   if (n >= FLOW_FAILURES_BEFORE_SPENT) flowSpentRuns.add(runId);
@@ -3651,6 +3655,9 @@ async function acquireAi(
       // the same prompt on a UI failure does not improve it.
       let flowVideoError: Error | null = null;
       try {
+        if (flowFallbackToKie && flowVideoSpentRuns.has(runId)) {
+          throw new FlowBrowserError("Google Flow is out of credits for video in this run — skipping straight to the fallback.", "credits");
+        }
         // The identity instruction leads the prompt rather than trailing it — buildPrompt
         // already appends topic/style/no-text boilerplate that can run to 100+ words, and
         // burying the ONE instruction that keeps this beat's face matching the reference
@@ -3681,7 +3688,7 @@ async function acquireAi(
         return { path: outPath, kind: "ai", provider: "flow:veo3" };
       } catch (e) {
         flowVideoError = e as Error;
-        noteFlowFailure(runId, e);
+        noteFlowFailure(runId, e, "video");
         log(runId, "warn", `Beat ${beat.index}: Google Flow/Veo video failed (${(e as Error).message.slice(0, 200)})`, { stage: "visual" });
       }
 

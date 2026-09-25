@@ -353,6 +353,21 @@ async function submitPrompt(page: Page, input: Locator): Promise<void> {
 }
 
 /**
+ * Flow refuses to SUBMIT a generation the account cannot pay for: the arrow button is replaced by
+ * a red "info" button (`.prompt-warning-button`, aria-label "Alerta de créditos insuficientes")
+ * and NO failure card is ever created — so the wait loop below has nothing to detect and used to
+ * idle for the full timeout (10 minutes for video; observed live 2026-09-25, a Veo beat that
+ * costs 10 credits with the balance short). Recognised by the structural class first (language-
+ * neutral), the localized label second. Exported for tests.
+ */
+export async function flowInsufficientCreditsWarning(page: Page): Promise<boolean> {
+  const warning = page.locator(
+    'button.prompt-warning-button, button[aria-label*="créditos insuficientes" i], button[aria-label*="insufficient credits" i]'
+  );
+  return warning.first().isVisible().catch(() => false);
+}
+
+/**
  * Turns whatever option labels WERE visible (but didn't match) into a compact, readable
  * diagnostic appended to the "could not confirm" error. Without this, a mismatch (e.g. the
  * wanted tier's row carrying an extra price/description segment the matcher doesn't
@@ -380,6 +395,50 @@ async function dismissOpenOverlays(page: Page): Promise<void> {
     await backdrop.last().click({ force: true, position: { x: 5, y: 5 }, timeout: 2500 }).catch(() => undefined);
     await page.waitForTimeout(250);
   }
+}
+
+/**
+ * Open the composer settings popover — the SAME popover the model chip opens for
+ * selectModelViaComposer — if it isn't open already, and wait for it to render. Media mode
+ * (Image/Video) and aspect ratio live INSIDE this popover as `role="radio"` controls
+ * alongside the model-family select, verified live (2026-09-24, pt-BR account): the panel
+ * shows Imagem/Vídeo, Frames/Elementos, the aspect-ratio row, the model select and xN all
+ * together once opened. They are NOT separate tabs/buttons near the composer, which is what
+ * ensureFlowMediaMode/ensureFlowAspectRatio assumed before this was confirmed against a real
+ * session — that assumption meant neither control could ever be found.
+ *
+ * The chip itself is matched the same way selectModelViaComposer finds it (a plain button,
+ * not a menu/menuitem/radio, naming the active model family) rather than by its localized
+ * aria-label, so this stays language-neutral; `:not([role="radio"])` additionally guards
+ * against ever matching one of the ratio/mode radios themselves once the popover is open.
+ */
+async function openComposerSettingsPopover(page: Page): Promise<boolean> {
+  const anyRadio = page.getByRole("radio").first();
+  if (await anyRadio.isVisible().catch(() => false)) return true;
+  // The chip's own summary text is NOT a reliable match target: in Video mode it can read
+  // "Vídeo · 720p · 8s" (resolution/duration) instead of the model name — verified live,
+  // 2026-09-24 — so a family-text filter (used elsewhere for the chip once its popover is
+  // already open and a specific model needs confirming) misses it here. Its aria-label
+  // ("Gatilho de configurações") is stable across every content state observed and is tried
+  // first; the family-text heuristic remains as a fallback for an un-inspected locale where
+  // that label reads differently.
+  const chipByLabel = page.getByRole("button", { name: "Gatilho de configurações" });
+  const chipByText = page
+    .locator('button:not([aria-haspopup]):not([role="menuitem"]):not([role="radio"])')
+    .filter({ hasText: /Nano Banana|Veo/i });
+  const chip = (await chipByLabel.first().isVisible().catch(() => false)) ? chipByLabel : chipByText;
+  if (!(await chip.first().isVisible().catch(() => false))) return false;
+
+  // Retried, not a single click: opening this same chip right after a PRIOR open/close cycle
+  // on it (e.g. a media-mode switch immediately followed by an aspect-ratio change) was
+  // observed live to occasionally swallow the click — the popover's own close transition
+  // was still in flight. Same shape of flakiness selectModelViaComposer already retries for.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await page.waitForTimeout(400);
+    await chip.first().click().catch(() => undefined);
+    if ((await waitForVisible(page, [anyRadio], 2500)) !== null) return true;
+  }
+  return false;
 }
 
 async function waitForVisible(page: Page, candidates: Locator[], timeoutMs: number): Promise<Locator | null> {
@@ -421,15 +480,29 @@ export async function selectModelViaComposer(
   family: RegExp,
   seen: string[]
 ): Promise<"ok" | "failed" | "no-chip"> {
+  // The outer chip's OWN summary text is the fast path — matched by family text, as before,
+  // since that IS reliable for Nano Banana/image mode. It is NOT reliable for Veo/video mode:
+  // verified live (2026-09-24), the chip there can read "Vídeo · 720p · 8s" (resolution and
+  // duration) instead of the model name, so a family-text match on it fails even though a
+  // model IS active — returning "no-chip" here used to abandon the whole switch before even
+  // trying to open the popover. `chipByLabel` (its stable aria-label, "Gatilho de
+  // configurações") is the fallback used to open it in that case; the confirmation at the end
+  // falls back the same way, to the SELECT's own text rather than the chip's.
   const chipLoc = page.locator('button:not([aria-haspopup]):not([role="menuitem"])').filter({ hasText: family });
+  const chipByLabel = page.getByRole("button", { name: "Gatilho de configurações" });
   const selectLoc = page.locator('button[aria-haspopup="menu"]').filter({ hasText: family });
   const itemLoc = page.locator('[role="menuitem"]').filter({ hasText: family });
 
   await dismissOpenOverlays(page);
-  const chip = await firstVisible([chipLoc]);
-  if (!chip) return "no-chip";
+  let chip = await firstVisible([chipLoc]);
+  let chipTextIsReliable = true;
+  if (!chip) {
+    chip = await firstVisible([chipByLabel]);
+    chipTextIsReliable = false;
+    if (!chip) return "no-chip";
+  }
   const chipText = await chip.innerText().catch(() => "");
-  if (chipShowsModel(chipText, wanted)) return "ok";
+  if (chipTextIsReliable && chipShowsModel(chipText, wanted)) return "ok";
   if (chipText) seen.push(chipText);
 
   // Open the popover unless its select is already on screen (a previous attempt may have
@@ -453,38 +526,53 @@ export async function selectModelViaComposer(
   }
   if (selectText) seen.push(selectText);
 
-  if ((await select.getAttribute("aria-expanded").catch(() => null)) !== "true") {
-    await select.click().catch(() => undefined);
-  }
-  await waitForVisible(page, [itemLoc], 3000);
-  const count = Math.min(await itemLoc.count().catch(() => 0), 20);
-  let clicked = false;
-  for (let i = 0; i < count && !clicked; i++) {
-    const item = itemLoc.nth(i);
-    if (!(await item.isVisible().catch(() => false))) continue;
-    const text = await item.innerText().catch(() => "");
-    if (text) seen.push(text);
-    if (flowModelLabelMatches(wanted, text)) {
-      await item.click().catch(() => undefined);
-      clicked = true;
+  // The menuitem click was observed live to occasionally not register at all (the SAME
+  // flakiness openComposerSettingsPopover/dismissOpenOverlays already retry for elsewhere in
+  // this file — Flow's own click/animation timing, not a locator problem) — verified by re-
+  // reading the select's own text afterward and retrying the whole open-menu/click cycle
+  // when it still doesn't confirm, rather than trusting a single click.
+  let confirmedBySelect = false;
+  let everClicked = false;
+  for (let attempt = 0; attempt < 2 && !confirmedBySelect; attempt++) {
+    if ((await select.getAttribute("aria-expanded").catch(() => null)) !== "true") {
+      await select.click().catch(() => undefined);
     }
+    await waitForVisible(page, [itemLoc], 3000);
+    const count = Math.min(await itemLoc.count().catch(() => 0), 20);
+    let clicked = false;
+    for (let i = 0; i < count; i++) {
+      const item = itemLoc.nth(i);
+      if (!(await item.isVisible().catch(() => false))) continue;
+      const text = await item.innerText().catch(() => "");
+      if (text) seen.push(text);
+      if (flowModelLabelMatches(wanted, text)) {
+        await item.click().catch(() => undefined);
+        clicked = true;
+      }
+    }
+    if (!clicked) break; // the wanted tier isn't in the menu at all — retrying won't help
+    everClicked = true;
+    await page.waitForTimeout(500);
+    // The click is not proof — read something back. Prefer the SELECT's own text (still on
+    // screen right now, and reliable for both families): it names the tier directly, unlike
+    // the outer chip in video mode (see above).
+    const selectAfter = await select.innerText().catch(() => "");
+    confirmedBySelect = chipShowsModel(selectAfter, wanted);
   }
-  if (!clicked) {
+  if (!everClicked) {
     await dismissOpenOverlays(page);
     await dismissOpenOverlays(page);
     return "failed";
   }
 
-  // Close whatever is still open, then read the chip back: the click is not proof, the
-  // chip showing the wanted model is.
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(200);
   await dismissOpenOverlays(page);
   await page.waitForTimeout(300);
   const after = await firstVisible([chipLoc]);
-  if (!after) return "ok"; // chip not readable any more — the exact tier row was clicked
+  if (!after) return confirmedBySelect ? "ok" : "failed";
   const afterText = await after.innerText().catch(() => "");
   if (afterText) seen.push(afterText);
-  return chipShowsModel(afterText, wanted) ? "ok" : "failed";
+  return confirmedBySelect || chipShowsModel(afterText, wanted) ? "ok" : "failed";
 }
 
 /**
@@ -692,16 +780,40 @@ async function ensureVeoModel(page: Page): Promise<void> {
  * working for images, but the exact Image/Video switch control should be confirmed
  * against the real UI before relying on it unattended.
  */
-async function ensureFlowMediaMode(page: Page, mode: "image" | "video"): Promise<void> {
-  const label = mode === "image" ? /^(?:Image|Imagem|Imagen|Photo)$/i : /^(?:Video|Vidéo|Vídeo)$/i;
+export async function ensureFlowMediaMode(page: Page, mode: "image" | "video"): Promise<void> {
+  const label = mode === "image" ? /^(?:image|imagem|imagen|photo)/i : /^(?:video|vidéo|vídeo)/i;
   const custom = getSetting("FLOW_MEDIA_MODE_SELECTOR").trim();
+  if (custom) {
+    const el = page.locator(custom);
+    if (await el.first().isVisible().catch(() => false)) {
+      await el.first().click().catch(() => undefined);
+      return;
+    }
+  }
 
-  // Already in the right mode? Flow typically shows the active mode's name near the
-  // composer (same assumption ensureNanoBanana already relies on for the model name).
-  if (await page.getByText(label).first().isVisible().catch(() => false)) return;
+  // Image/Video is a role="radio" PAIR inside the composer settings popover — verified live,
+  // see openComposerSettingsPopover's doc comment. `label` matches from the START of the
+  // radio's own text (icon ligature + "\n" + localized word, e.g. "videocam\nVídeo") rather
+  // than the whole string, since an anchored ^...$ match against that combined text never
+  // matches either word alone.
+  if (await openComposerSettingsPopover(page)) {
+    const radio = page.getByRole("radio", { name: label });
+    if (await radio.first().isVisible().catch(() => false)) {
+      if ((await radio.first().getAttribute("aria-checked").catch(() => null)) !== "true") {
+        await radio.first().click().catch(() => undefined);
+        // Give the app a moment to commit the radio change before the popover closes — a
+        // click immediately followed by dismissOpenOverlays' Escape was observed live to
+        // race the close against the state update. See ensureFlowAspectRatio's matching note.
+        await page.waitForTimeout(400);
+      }
+      await dismissOpenOverlays(page);
+      return;
+    }
+    await dismissOpenOverlays(page);
+  }
 
+  // Legacy fallback for a layout without this popover (kept for layouts never inspected live).
   const switchControls = [
-    ...(custom ? [page.locator(custom)] : []),
     page.getByRole("tab", { name: /Image|Imagem|Video|Vidéo|Vídeo/i }),
     page.getByRole("button", { name: /Image|Imagem|Video|Vidéo|Vídeo|Mode|Modo|Model|Modelo|Options|Opções/i }),
   ];
@@ -748,24 +860,53 @@ async function ensureFlowVideoMode(page: Page): Promise<void> {
  * images against the wanted aspect after the fact via chooseBestCapturedImage). Returns
  * whether it found and used a matching control, purely for logging.
  */
-async function ensureFlowAspectRatio(page: Page, aspect: string): Promise<boolean> {
+export async function ensureFlowAspectRatio(page: Page, aspect: string): Promise<boolean> {
   const wanted = (aspect || "16:9").trim();
   if (!/^\d+:\d+$/.test(wanted)) return false;
   const custom = getSetting("FLOW_ASPECT_RATIO_SELECTOR").trim();
   const pattern = new RegExp(wanted.replace(":", "\\s*:\\s*"));
-  if (await page.getByText(pattern).first().isVisible().catch(() => false)) return true;
+  if (custom) {
+    const el = page.locator(custom);
+    if (await el.first().isVisible().catch(() => false)) {
+      await el.first().click().catch(() => undefined);
+      return true;
+    }
+  }
 
-  const controls = [
-    ...(custom ? [page.locator(custom)] : []),
-    page.getByRole("button", { name: /Aspect|Ratio|Proportion|Formato|Proporção/i }),
-  ];
+  // The ratio options are role="radio" controls INSIDE the composer settings popover —
+  // verified live, see openComposerSettingsPopover's doc comment: "16:9" and "9:16" (plus
+  // 4:3/1:1/3:4) render as sibling radios at once, so "the wanted text is visible somewhere
+  // on the page" used to be true regardless of which one was actually active, and the old
+  // early-return reported success without ever clicking — a beat asking for 9:16 could
+  // silently keep whatever ratio was already selected. Clicking an already-checked radio
+  // is harmless, so this never needs to know the prior state.
+  if (await openComposerSettingsPopover(page)) {
+    const radio = page.getByRole("radio", { name: pattern });
+    if (await radio.first().isVisible().catch(() => false)) {
+      await radio.first().click().catch(() => undefined);
+      // Same settle wait as ensureFlowMediaMode: closing the popover right after the click
+      // was observed live to occasionally race the app's own state commit.
+      await page.waitForTimeout(400);
+      await dismissOpenOverlays(page);
+      return true;
+    }
+    await dismissOpenOverlays(page);
+  }
+
+  // Legacy fallback for a layout without this popover (kept for layouts never inspected live).
+  const directOption = page.getByRole("button", { name: pattern });
+  if (await directOption.first().isVisible().catch(() => false)) {
+    await directOption.first().click().catch(() => undefined);
+    return true;
+  }
+  const controls = [page.getByRole("button", { name: /Aspect|Ratio|Proportion|Formato|Proporção/i })];
   for (const group of controls) {
     const count = Math.min(await group.count().catch(() => 0), 6);
     for (let i = count - 1; i >= 0; i--) {
       const control = group.nth(i);
       if (!(await control.isVisible().catch(() => false))) continue;
       await control.click().catch(() => undefined);
-      const option = page.getByText(pattern).last();
+      const option = page.getByRole("button", { name: pattern }).last();
       if (await option.isVisible().catch(() => false)) {
         await option.click();
         return true;
@@ -919,8 +1060,19 @@ export async function attachFlowReferenceViaAssetPicker(page: Page, referenceIma
     if (await options.first().isVisible().catch(() => false)) return true;
     const plus = await firstVisible(plusCandidates);
     if (!plus) return false;
-    await plus.click().catch(() => undefined);
-    return (await waitForVisible(page, [options], 3000)) !== null;
+    // Retried, not a single click: this exact "+" was observed live to occasionally not
+    // open the picker at all right after a beat's generation just finished (2026-09-25) —
+    // the same click-timing flakiness already retried for the model chip and the aspect-
+    // ratio/media-mode popover elsewhere in this file. A single missed click here used to
+    // fall through silently to the un-deduplicated legacy upload paths below, which re-
+    // upload the portrait under its raw file name on every attempt instead of reusing the
+    // one already-attached asset.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await page.waitForTimeout(300);
+      await plus.click().catch(() => undefined);
+      if ((await waitForVisible(page, [options], 1200)) !== null) return true;
+    }
+    return false;
   };
   const clickNamedAsset = async (): Promise<boolean> => {
     const count = Math.min(await options.count().catch(() => 0), 60);
@@ -929,8 +1081,19 @@ export async function attachFlowReferenceViaAssetPicker(page: Page, referenceIma
       if (!(await row.isVisible().catch(() => false))) continue;
       const firstLine = ((await row.innerText().catch(() => "")) || "").split("\n")[0].trim();
       if (firstLine === assetName) {
-        await row.click().catch(() => undefined);
-        return true;
+        // Retried, verified click: this row click was observed live to occasionally not
+        // register at all (the SAME Flow click-timing flakiness already retried for the "+"
+        // button above and the model/mode popovers elsewhere in this file). A single missed
+        // click here used to fall all the way through to a fresh upload — creating yet
+        // another duplicate — and the caller's own post-upload poll loop re-calls this exact
+        // function every 700ms without ever giving THIS click a second try, so the same miss
+        // could repeat for the full ~25s deadline (observed live, 2026-09-25).
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (attempt > 0) await page.waitForTimeout(300);
+          await row.click({ timeout: 3000 }).catch(() => undefined);
+          if ((await waitForVisible(page, attachedElementChips(page), 1200)) !== null) return true;
+        }
+        return true; // row was found and clicked at least once — caller re-checks the chip
       }
     }
     return false;
@@ -1446,6 +1609,12 @@ async function attemptFlowImage(
   try {
     await input.fill(prompt.slice(0, 12_000));
     const failureBaseline = await flowFailureBaseline(page);
+    if (await flowInsufficientCreditsWarning(page)) {
+      throw new FlowBrowserError(
+        "Google Flow will not submit this image: the account has insufficient credits for it (Flow shows \"Alerta de créditos insuficientes\").",
+        "credits"
+      );
+    }
     await submitPrompt(page, input);
     const deadline = Date.now() + timeoutMs;
     let nextFailureCheck = Date.now() + 4_000;
@@ -1576,6 +1745,52 @@ export function isVideoResponseCandidate(contentType: string, url: string): bool
   const type = (contentType || "").toLowerCase();
   if (type.startsWith("video/")) return true;
   return /\.(mp4|webm|mov|m4v)(?:[?#]|$)/i.test(url.split("?")[0] ?? url);
+}
+
+/**
+ * Every currently-resolved <video> src on the page, right now — a baseline taken BEFORE
+ * submitting a prompt so a later check can tell a genuinely NEW result apart from one
+ * already sitting in this (shared, reused) project's grid. Exported for tests.
+ */
+export async function currentFlowVideoSrcs(page: Page): Promise<string[]> {
+  return page
+    .locator("video")
+    .evaluateAll((els: HTMLVideoElement[]) => els.map((v) => v.currentSrc || v.src).filter(Boolean))
+    .catch(() => []);
+}
+
+/**
+ * Fetch the newest result's video DIRECTLY from its <video> element's resolved src, rather
+ * than waiting to catch an incidental network response for it. Verified live (2026-09-25):
+ * a generation that finished rendering in Flow within ~90s still sat there, fully playable,
+ * while the passive page.on("response") listener never captured a matching request at
+ * all — Flow's front end binds the <video src> into the DOM as soon as the result card
+ * renders, but the browser's own lazy media loading does not necessarily FETCH the bytes
+ * until the element is scrolled into view or played, so nothing the passive listener
+ * watches for ever fires. A direct GET on the resolved src sidesteps that: independently
+ * confirmed live to return the full clip (video/mp4, correct Content-Length) even when no
+ * "response" event for it was ever observed.
+ *
+ * `excludeSrcs` (a baseline taken before the prompt was submitted, see `currentFlowVideoSrcs`)
+ * is required so a video already sitting in this shared/reused project's grid is never
+ * mistaken for the beat's own new result — the search only considers a <video> element
+ * whose resolved src was NOT already present before this beat's generation started.
+ */
+async function fetchVideoFromResultElement(page: Page, excludeSrcs: Set<string>): Promise<Buffer | null> {
+  const els = await page.locator("video").all().catch(() => []);
+  for (const el of els) {
+    const src = await el.evaluate((v: HTMLVideoElement) => v.currentSrc || v.src).catch(() => "");
+    if (!src || excludeSrcs.has(src)) continue;
+    try {
+      const resp = await page.request.get(src, { timeout: 20_000 });
+      if (!resp.ok()) continue;
+      if (!isVideoResponseCandidate(resp.headers()["content-type"] || "", src)) continue;
+      return await resp.body();
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 /** Below this, a "video" response is almost certainly a poster frame or a tracking pixel, not a real clip. */
@@ -1779,10 +1994,21 @@ export async function generateFlowVideo(
 
     let promptSent = false;
     let downloadButtonSeen = false;
+    let newVideoElementSeen = false;
     const tmpPath = path.join(os.tmpdir(), `flow_veo_${Date.now()}_${Math.random().toString(36).slice(2)}.mp4`);
     try {
       await input.fill(prompt.slice(0, 12_000));
       const failureBaseline = await flowFailureBaseline(page);
+      // Baseline BEFORE submitting — see fetchVideoFromResultElement's doc comment. Without
+      // it, a video already sitting in this shared/reused project's grid could be mistaken
+      // for this beat's own result the instant the wait loop starts.
+      const videoSrcBaseline = new Set(await currentFlowVideoSrcs(page));
+      if (await flowInsufficientCreditsWarning(page)) {
+        throw new FlowBrowserError(
+          "Google Flow will not submit this video: the account has insufficient credits for it (Flow shows \"Alerta de créditos insuficientes\").",
+          "credits"
+        );
+      }
       await submitPrompt(page, input);
       promptSent = true; // never re-submitted below — one prompt, one generation, whatever happens next
 
@@ -1797,6 +2023,15 @@ export async function generateFlowVideo(
         if (candidates.length && Date.now() - lastCaptureAt >= QUIET_MS) break;
         if (await firstVisible([page.getByRole("button", { name: /Download video|Baixar vídeo/i })])) {
           downloadButtonSeen = true;
+          break;
+        }
+        // A NEW <video> element resolving its src is proof the result rendered — proven
+        // live to arrive well before the passive network listener ever captures anything
+        // (see fetchVideoFromResultElement). Break out immediately rather than idling
+        // until the quiet-window or the full timeout.
+        const newSrcs = await currentFlowVideoSrcs(page);
+        if (newSrcs.some((s) => !videoSrcBaseline.has(s))) {
+          newVideoElementSeen = true;
           break;
         }
         if (Date.now() >= nextFailureCheck) {
@@ -1814,16 +2049,33 @@ export async function generateFlowVideo(
         try {
           await validateFlowVideoFile(tmpPath);
           if (path.resolve(tmpPath) !== path.resolve(outPath)) fs.renameSync(tmpPath, outPath);
+          log(runId, "info", "Flow video captured via: download button", { stage: "visual" });
           return outPath;
         } catch (e) {
           try { fs.unlinkSync(tmpPath); } catch {}
-          // Fall through to network-capture below rather than failing immediately — the
-          // Download button existing is not proof the file behind it was good.
-          log(runId, "debug", `Flow video download button produced an invalid file (${(e as Error).message.slice(0, 140)}) — trying captured network response`, { stage: "visual" });
+          // Fall through rather than failing immediately — the Download button existing is
+          // not proof the file behind it was good.
+          log(runId, "debug", `Flow video download button produced an invalid file (${(e as Error).message.slice(0, 140)}) — trying the result's own <video> element`, { stage: "visual" });
         }
       }
 
-      // 2) Fall back to the newest matching network response.
+      // 2) Fetch directly from the result's own <video> element (see its doc comment) —
+      //    more reliable than waiting on an incidental network capture, and usually faster.
+      const direct = await fetchVideoFromResultElement(page, videoSrcBaseline);
+      if (direct && direct.byteLength >= MIN_FLOW_VIDEO_BYTES) {
+        try {
+          fs.writeFileSync(tmpPath, direct);
+          await validateFlowVideoFile(tmpPath);
+          fs.renameSync(tmpPath, outPath);
+          log(runId, "info", `Flow video captured via: direct fetch of the result's <video> src (${(direct.byteLength / 1e6).toFixed(1)} MB — same file the manual "Fazer o download → Tamanho original" menu saves)`, { stage: "visual" });
+          return outPath;
+        } catch (e) {
+          try { fs.unlinkSync(tmpPath); } catch {}
+          log(runId, "debug", `Flow video element fetch produced an invalid file (${(e as Error).message.slice(0, 140)}) — trying captured network response`, { stage: "visual" });
+        }
+      }
+
+      // 3) Fall back to the newest matching network response.
       const chosen = newestVideoCandidate(candidates);
       if (chosen) {
         try {
@@ -1832,6 +2084,7 @@ export async function generateFlowVideo(
             fs.writeFileSync(tmpPath, buffer);
             await validateFlowVideoFile(tmpPath);
             fs.renameSync(tmpPath, outPath);
+            log(runId, "info", "Flow video captured via: network response", { stage: "visual" });
             return outPath;
           }
         } catch {
@@ -1843,7 +2096,8 @@ export async function generateFlowVideo(
       throw new FlowBrowserError(
         `No valid Flow/Veo video was captured within ${Math.round(timeoutMs / 1000)}s ` +
           `[model="${wantedVeoModel()}", mode=video, promptSent=${promptSent}, ` +
-          `resultAppeared=${candidates.length > 0}, downloadButtonSeen=${downloadButtonSeen}]. The UI may have changed.`,
+          `resultAppeared=${candidates.length > 0}, downloadButtonSeen=${downloadButtonSeen}, ` +
+          `newVideoElementSeen=${newVideoElementSeen}]. The UI may have changed.`,
         "timeout"
       );
     } finally {
