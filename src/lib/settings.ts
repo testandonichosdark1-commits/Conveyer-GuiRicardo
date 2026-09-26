@@ -169,6 +169,8 @@ export const SETTING_KEYS = [
   "FLOW_GENERATION_TIMEOUT_SEC", // Max wait for one generated image
   "FLOW_FALLBACK_PROVIDER",    // none | kie | chain — what to do if the Flow UI fails
   "FLOW_IMAGE_MODEL",          // Model label/id expected in Flow (Nano Banana Pro)
+  "VIDS_FIRST",               // Google Vids tried BEFORE Flow: off (default) | image | both. Beats wanting the character reference always skip it.
+  "VIDS_PROJECT_URL",         // Optional docs.google.com/videos/d/… URL, opened in a new tab only if no Vids tab is already open.
   "FLOW_IMAGE_MODEL_FALLBACK", // Model to switch to when FLOW_IMAGE_MODEL hits a limit mid-run (e.g. Nano Banana Pro -> Nano Banana 2). Empty = no fallback (today's behavior).
   "FLOW_ASPECT_RATIO",         // Image aspect ratio selected/validated by the worker
   "FLOW_REGEN_ATTEMPTS",       // Flow generations per beat after visual quality scoring (default 1)
@@ -650,6 +652,8 @@ export const DEFAULTS: Record<SettingKey, string> = {
   // Empty by default — an operator opts in once they know their account's limit shape.
   // "nano-banana-2" is the suggested value, not assumed: see flow-browser.ts's
   // ensureImageModel()/generateFlowImage() doc comments for why this isn't hardcoded.
+  VIDS_FIRST: "off",
+  VIDS_PROJECT_URL: "",
   FLOW_IMAGE_MODEL_FALLBACK: "",
   FLOW_ASPECT_RATIO: "16:9",
   FLOW_REGEN_ATTEMPTS: "1",

@@ -530,6 +530,39 @@ Chrome against a structural mock (both layouts) — it proves the logic, not tha
   Flow truly blocks submission while the alert shows — one Veo beat still finished (~5 min) with the alert on
   screen, so it may also appear after a submit reserves credits.
 
+### Google Vids provider (`VIDS_FIRST`) — verified live 2026-09-26
+
+`services/vids-browser.ts` drives the Vids editor (docs.google.com/videos) in the SAME Chrome Flow uses (its own tab,
+its own queue, so it runs in parallel with Flow's). It is tried BEFORE Flow when `VIDS_FIRST` = `image` | `both`
+(default `off`); any failure or a weak score falls through to the ordinary Flow path, so enabling it only ADDS a source.
+Beats that need the character reference never use it (Vids' "Ingredientes" upload is not wired). A per-run circuit
+breaker (`vidsSpentRuns`: credits/config/login, or 3 failures in a row) stops it costing latency on every beat.
+
+- **Image**: side button "Gerar uma imagem" (Nano Banana) -> the only visible `textarea` (its placeholder ROTATES after
+  the first generation — never match it by text) -> aspect popover "Proporção" -> send `button[aria-label="Criar"]`.
+  ~15 s, 1376x768 at 16:9 (1024x1024 at the 1:1 default). Result = `<img src="…googleusercontent.com/gg-dl/…">`.
+- **Video**: "Gerar um vídeo com IA" (Omni) -> `div[role=textbox]` -> composer chevron `Abrir` (pick it BY POSITION; a toast
+  has one too) -> chip `Generation settings…` -> duration slider 3–10 s -> send `button[aria-label="Gerar"]`.
+  ~33 s, 720p H.264 + AAC. Result = `<video src="…usercontent.google.com/download?…">`.
+- **Typing must be real key events.** `fill()` leaves "Criar" DISABLED; click, select-all, Backspace, `keyboard.type`.
+- **Results are fetched straight from the element's src** (`page.request.get`, the tab's cookies) — nothing is inserted
+  into the Vids project, and no download button is needed.
+- **Never click the panel's "Remover"**: it opens a modal "Remover este clipe de vídeo?" that blocks the whole editor.
+  `dismissWelcome` cancels one if it is found (and closes the first-run welcome dialog).
+- **The failure classifier must ignore Vids' permanent banners** ("Faça upgrade para…", "Ainda não é possível usar outros
+  idiomas", "limites de geração…") — one of them ("não é possível") already produced a false positive (`STATIC_NOISE`).
+- **The account HAS a quota, and it is per KIND.** Observed live 2026-09-26: after ~8 short videos the VIDEO composer answered
+  "Você atingiu seu limite para gerar conteúdo no Vids." (classified `credits`, 30-min cooldown), while IMAGES still generated
+  (~20 s, 1376x768) — so `VIDS_FIRST=image` is not affected and `both` degrades to Flow for video once the limit hits.
+- **Reference photo (video only).** Clicking "Ingredientes" opens the native file chooser directly (`page.waitForEvent("filechooser")`
+  + `setFiles`); the FIRST time, Google shows a rights notice ("Criar conteúdo com imagens no Workspace") that the OPERATOR must
+  accept — the code never clicks "Concordo" and reports it as a `config` error. The attached image shows as `@Imagem1` with a
+  "Remover imagem" button (aria-label; also removes its prompt chip). The prompt mentions it via Vids' own chip: type `@`, wait,
+  press Enter (`prompt-chip-wrapper`). Once an ingredient exists the prompt textbox's aria-label CHANGES, so it is matched by
+  `div[role=textbox][contenteditable=true]`. `syncReference` reuses the same image (hash) and ALWAYS clears it for a beat with no
+  reference. Verified: the housekeeper's face/uniform carried into the clip (~30–40 s). The IMAGE panel has no reference input
+  (only 7 style presets), so a reference beat rendered as a still stays on Flow.
+
 ### Per-channel character words (`channels.character_terms`)
 
 Comma-separated words that decide which beats get the reference photo, edited in Channels and

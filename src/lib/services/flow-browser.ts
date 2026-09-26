@@ -21,9 +21,35 @@ import { log } from "../logger";
  */
 
 export class FlowBrowserError extends Error {
-  constructor(message: string, public readonly code: "config" | "login" | "ui" | "timeout" | "credits" | "capture" | "policy") {
+  /** `stalled` = a step BEFORE the prompt was sent never returned (see withPresubmitDeadline).
+   *  Nothing was submitted or spent, so the caller may safely render the beat another way. */
+  constructor(message: string, public readonly code: "config" | "login" | "ui" | "timeout" | "credits" | "capture" | "policy", public readonly stalled = false) {
     super(message);
     this.name = "FlowBrowserError";
+  }
+}
+
+/** Deadline for each step that runs before a video prompt is submitted. Those steps (mode
+ *  switch, ratio, duration, reference attach) had NO limit: a control that never answered
+ *  held Flow's single serialized queue for good, stalling every later beat — images included
+ *  (observed: a Veo beat sat 8+ min with an empty composer, no card, no error). */
+export const FLOW_PRESUBMIT_STEP_MS = 90_000;
+
+export async function withPresubmitDeadline<T>(step: string, work: () => Promise<T>, ms = FLOW_PRESUBMIT_STEP_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stall = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new FlowBrowserError(`Google Flow stalled at "${step}" for ${Math.round(ms / 1000)}s before the prompt was sent — nothing was submitted.`, "timeout", true)),
+      ms
+    );
+  });
+  // If the deadline wins, `work` keeps running; swallow its eventual rejection.
+  const running = work();
+  running.catch(() => undefined);
+  try {
+    return await Promise.race([running, stall]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -217,6 +243,15 @@ async function launchBrowser(): Promise<{ context: BrowserContext; page: Page }>
   return state.launching;
 }
 
+/**
+ * The shared, already-attached operator Chrome (the same CDP connection Flow drives). Sibling
+ * browser providers — Google Vids — open their own tab in THIS context instead of launching a
+ * second Chrome, so one login and one profile serve both.
+ */
+export async function flowChromeContext(): Promise<BrowserContext> {
+  return (await launchBrowser()).context;
+}
+
 function looksLikeLogin(url: string): boolean {
   return /accounts\.google\.|\/signin|ServiceLogin/i.test(url);
 }
@@ -307,17 +342,34 @@ async function promptBox(page: Page): Promise<Locator> {
   );
 }
 
-async function generateButton(page: Page): Promise<Locator | null> {
+/**
+ * The composer's submit arrow. Located by STRUCTURE first (its own class / icon / localized
+ * label), and the legacy word-pattern fallbacks are restricted to real <button> elements.
+ *
+ * Why: the old first candidate was `getByRole("button", { name: /…|Run|Make|Send|Create|…/i })`,
+ * which also matches `div[role=button]` — and every tile in the project grid has one (its
+ * footer, named after the image). Flow titles a tile from the prompt that made it, so a beat
+ * about "water droplets RUNning down glass" produced a tile whose footer matched /Run/i, and
+ * "Iniciar geração" (the real pt-BR label) matched nothing. Every later beat then clicked that
+ * tile instead of submitting: the prompt sat in the box, nothing generated, the wait ran the full
+ * 240 s and the failure cascaded ("could not switch mode", "could not find prompt box").
+ * Observed live 2026-09-25 (beat 47 -> beat 49). Exported for tests.
+ */
+export async function generateButton(page: Page): Promise<Locator | null> {
   const custom = getSetting("FLOW_GENERATE_SELECTOR").trim();
-  const actionPattern = /Generate|Gerar|Générer|Create|Criar|Créer|Submit|Send|Enviar|Make|Run/i;
+  const actionPattern = /Generate|Gerar|Générer|Create|Criar|Créer|Submit|Send|Enviar|Make|Run|Iniciar|Start/i;
   const candidates = [
     ...(custom ? [page.locator(custom)] : []),
-    page.getByRole("button", { name: actionPattern }),
-    page.locator('button[aria-label*="generate" i], [role="button"][aria-label*="generate" i]'),
-    page.locator('button[aria-label*="create" i], [role="button"][aria-label*="create" i]'),
-    page.locator('button[aria-label*="send" i], [role="button"][aria-label*="send" i]'),
-    page.locator('button[aria-label*="submit" i], [role="button"][aria-label*="submit" i]'),
-    page.locator('[data-testid*="generate" i], [data-testid*="create" i], [data-testid*="submit" i], [data-testid*="send" i]'),
+    // Structural, language-neutral: the arrow is the composer's icon button carrying "arrow_forward".
+    page.locator("button.generate-icon-button"),
+    page.locator("button").filter({ has: page.locator("mat-icon, .google-symbols", { hasText: /^\s*arrow_forward\s*$/ }) }),
+    // Legacy patterns — <button> ONLY, matched on the accessible name (never a tile's div[role=button]).
+    page.locator("button").and(page.getByRole("button", { name: actionPattern })),
+    page.locator('button[aria-label*="generate" i], [role="button"][aria-label*="generate" i]:not(.footer-left)'),
+    page.locator('button[aria-label*="create" i]'),
+    page.locator('button[aria-label*="send" i]'),
+    page.locator('button[aria-label*="submit" i]'),
+    page.locator('button[data-testid*="generate" i], button[data-testid*="create" i], button[data-testid*="submit" i], button[data-testid*="send" i]'),
     page.locator('button[title*="generate" i], button[title*="create" i], button[title*="send" i]'),
   ];
   // Flow may not render/enable its action control until after prompt text exists.
@@ -1963,24 +2015,25 @@ export async function generateFlowVideo(
 ): Promise<string> {
   return enqueue(async () => {
     if (runId) checkCancelled(runId);
-    const { page } = await launchBrowser();
-    await gotoFlow(page);
+    const D = withPresubmitDeadline;
+    const { page } = await D("open browser", () => launchBrowser());
+    await D("open Flow", () => gotoFlow(page));
     if (await pageHasLoginPrompt(page)) {
       throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
     }
     // Same reasoning as attemptFlowImage: a previous beat's failed reference-image search
     // can leave a menu/panel open in this shared page. Start clean.
-    await dismissOpenOverlays(page);
-    const input = await promptBox(page);
-    await ensureFlowVideoMode(page);
-    await ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
+    await D("close overlays", () => dismissOpenOverlays(page));
+    const input = await D("find prompt box", () => promptBox(page));
+    await D("switch to video mode", () => ensureFlowVideoMode(page));
+    await D("set aspect ratio", () => ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9"));
     const requestedDurationSec = options?.durationSec && options.durationSec > 0 ? options.durationSec : flowRequestedVideoDurationSec();
-    await ensureFlowDuration(page, requestedDurationSec);
+    await D("set duration", () => ensureFlowDuration(page, requestedDurationSec));
     // Reference handling mirrors the image path exactly (prepareComposerReference is the
     // shared seam): cleared before every beat, attached only when this beat wants it, and
     // NEVER silently skipped — a failed attach throws rather than rendering a video that
     // looks like it used the reference when it didn't.
-    await prepareComposerReference(page, input, options?.referenceImagePath ?? null);
+    await D("attach reference", () => prepareComposerReference(page, input, options?.referenceImagePath ?? null), 3 * FLOW_PRESUBMIT_STEP_MS);
 
     const timeoutMs = flowVideoTimeoutMs();
     const candidates: FlowVideoCandidate[] = [];

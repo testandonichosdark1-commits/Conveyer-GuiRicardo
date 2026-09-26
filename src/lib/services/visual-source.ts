@@ -24,6 +24,7 @@ import { generateMagnificImageUrl, generateMagnificVideoUrl, downloadMagnific, m
 import { generateHiggsfieldImageUrl, generateHiggsfieldVideoUrl, downloadHiggsfield, higgsfieldConfigured } from "./higgsfield";
 import { generateRunwareImage, downloadRunware } from "./runware";
 import { FlowBrowserError, generateFlowImage, generateFlowVideo } from "./flow-browser";
+import { generateVidsImage, generateVidsVideo } from "./vids-browser";
 import { storyblocksSearch, reserveDownload as sbReserveDownload, resolveStoryblocksFile } from "./storyblocks";
 import { recordStoryblocksDownload, recordGoogleCseQuery, recordGemini, recordKieImage, recordKieVeo, recordLabs69, recordLabs69Image, recordMagnificImage, recordMagnificVideo, recordHiggsfieldImage, recordHiggsfieldVideo, recordRunwareImage } from "./cost-ledger";
 import { callGemini } from "./gemini-models";
@@ -59,6 +60,10 @@ const FLOW_FAILURES_BEFORE_SPENT = 3;
 /** Videos cost more than stills (Veo ~10 credits): running short for video must not take the
  *  still-image path down with it, so it is tracked apart from `flowSpentRuns`. */
 const flowVideoSpentRuns = new Set<string>();
+/** Vids (tried first when VIDS_FIRST is on): per-run circuit breaker so a dead Vids never adds latency to every beat. */
+const vidsSpentRuns = new Set<string>();
+const vidsConsecutiveFailures = new Map<string, number>();
+const VIDS_FAILURES_BEFORE_SPENT = 3;
 
 function noteFlowFailure(runId: string, e: unknown, kind: "image" | "video" = "image"): void {
   if (!(e instanceof FlowBrowserError) || e.code === "policy") return;
@@ -3659,6 +3664,49 @@ async function acquireAi(
       flowMediaNow = "image";
     }
 
+    // Google Vids FIRST (VIDS_FIRST = image | both): fast, separate quota, its own tab and queue. Any failure — or a
+    // weak score — falls straight through to the normal Flow path below, so turning it on can only ADD a source.
+    // A reference beat goes to Vids only as a VIDEO (Ingredientes); as a still it stays on Flow.
+    const vidsMode = (getSetting("VIDS_FIRST") || "off").trim().toLowerCase();
+    // Vids' VIDEO composer takes the reference photo ("Ingredientes"); its IMAGE panel has no reference input, so a
+    // reference beat rendered as a still stays on Flow.
+    const vidsWanted = !vidsSpentRuns.has(runId) && (
+      (flowMediaNow === "video" && vidsMode === "both") ||
+      (flowMediaNow === "image" && !characterReferencePath && (vidsMode === "both" || vidsMode === "image"))
+    );
+    if (vidsWanted) {
+      const vidsAspect = getSetting("FLOW_ASPECT_RATIO") || aspect;
+      const vidsTmp = path.join(os.tmpdir(), `vids_${runId.slice(0, 8)}_${beat.index}.jpg`);
+      try {
+        if (flowMediaNow === "video") {
+          log(runId, "info", `Beat ${beat.index}: Google Vids/Omni video generation started`, { stage: "visual" });
+          await generateVidsVideo(runId, buildPrompt(""), outPath, vidsAspect, Math.ceil(beatDurSec), characterReferencePath || null);
+          vidsConsecutiveFailures.delete(runId);
+          log(runId, "info", `Beat ${beat.index}: AI video via Google Vids/Omni`, { stage: "visual" });
+          return { path: outPath, kind: "ai", provider: "vids:omni" };
+        }
+        log(runId, "info", `Beat ${beat.index}: Google Vids/Nano Banana generation started`, { stage: "visual" });
+        const shot = await generateVidsImage(runId, buildPrompt(VARIANTS[0]), vidsTmp, vidsAspect);
+        const vScore = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, vidsTmp);
+        vidsConsecutiveFailures.delete(runId);
+        if (vScore >= threshold) {
+          kenBurns(vidsTmp, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+          try { fs.unlinkSync(vidsTmp); } catch {}
+          log(runId, "info", `Beat ${beat.index}: AI still via Google Vids/Nano Banana (${shot.width}x${shot.height}) + Ken Burns — match ${vScore}%`, { stage: "visual" });
+          return { path: outPath, kind: "ai", provider: "vids:nano-banana" };
+        }
+        try { fs.unlinkSync(vidsTmp); } catch {}
+        log(runId, "info", `Beat ${beat.index}: Vids image scored ${vScore}% (<${threshold}) — trying Flow instead`, { stage: "visual" });
+      } catch (e) {
+        try { fs.unlinkSync(vidsTmp); } catch {}
+        const code = e instanceof FlowBrowserError ? e.code : undefined;
+        const n = (vidsConsecutiveFailures.get(runId) ?? 0) + 1;
+        vidsConsecutiveFailures.set(runId, n);
+        if (code === "credits" || code === "config" || code === "login" || n >= VIDS_FAILURES_BEFORE_SPENT) vidsSpentRuns.add(runId);
+        log(runId, "warn", `Beat ${beat.index}: Google Vids failed (${(e as Error).message.slice(0, 180)}) — ${vidsSpentRuns.has(runId) ? "Vids skipped for the rest of this run; " : ""}using Flow`, { stage: "visual" });
+      }
+    }
+
     if (flowMediaNow === "video") {
       // No score/regenerate loop here (mirrors the kie.ai Veo branch below): a video is
       // generated once, not re-scored by the still-image vision gate, and re-submitting
@@ -3702,8 +3750,10 @@ async function acquireAi(
         log(runId, "warn", `Beat ${beat.index}: Google Flow/Veo video failed (${(e as Error).message.slice(0, 200)})`, { stage: "visual" });
       }
 
-      if (flowVideoError instanceof FlowBrowserError && flowVideoError.code === "credits" && canDegradeToImage) {
-        log(runId, "warn", `Beat ${beat.index}: Flow is out of Veo credits — rendering this beat as a Flow image instead`, { stage: "visual" });
+      if (flowVideoError instanceof FlowBrowserError && (flowVideoError.code === "credits" || flowVideoError.stalled) && canDegradeToImage) {
+        log(runId, "warn", flowVideoError.stalled
+          ? `Beat ${beat.index}: Flow video setup stalled before submit — rendering this beat as a Flow image instead`
+          : `Beat ${beat.index}: Flow is out of Veo credits — rendering this beat as a Flow image instead`, { stage: "visual" });
         flowMediaNow = "image";
       } else {
       if (!flowFallbackToKie) {
