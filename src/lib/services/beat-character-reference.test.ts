@@ -20,6 +20,10 @@ function beat(text: string, aiPrompt = "", visualQuery = "") {
   return { aiPrompt, visualQuery, text };
 }
 
+function beatWithOverlay(overlay: { type: string; title: string } | undefined, aiPrompt = "", visualQuery = "", text = "") {
+  return { aiPrompt, visualQuery, text, overlay: overlay as never };
+}
+
 describe("beatWantsCharacterReference — explicit character terms", () => {
   const terms = [
     "woman", "housekeeper", "maid", "room attendant", "professional cleaner",
@@ -105,5 +109,39 @@ describe("per-channel character words", () => {
     expect(characterTermsRegex("dr. who")!.test("Dr. Who arrives")).toBe(true);
     expect(characterTermsRegex("he")!.test("the")).toBe(false);
     expect(characterTermsRegex("  ")).toBeNull();
+  });
+});
+
+describe("beatWantsCharacterReference — the planner's own 'person' overlay", () => {
+  beforeEach(() => { settings.terms = "finn stone, finn, diy guy, handyman, homeowner"; });
+
+  it("catches the exact real-run gap: a person-carded beat whose PROSE never names him", () => {
+    // Measured live: this beat rendered "A friendly middle-aged man in a canvas work
+    // shirt smiling directly at the camera in a well-organized home workshop" as its
+    // visual description — no configured term anywhere in it — while the planner had
+    // ALREADY, in its own separate overlay field, said whose beat this was.
+    expect(beatWantsCharacterReference(beatWithOverlay(
+      { type: "person", title: "Finn Stone" },
+      "A friendly middle-aged man in a canvas work shirt smiling directly at the camera in a well-organized home workshop"
+    ))).toBe(true);
+  });
+
+  it("ignores a person overlay for someone ELSE — the channel's own words still decide", () => {
+    expect(beatWantsCharacterReference(beatWithOverlay(
+      { type: "person", title: "Dr. Jane Smith" },
+      "A woman in a lab coat explaining a chart"
+    ))).toBe(false);
+  });
+
+  it("does not fire on a non-person overlay even if the title happens to share a word", () => {
+    expect(beatWantsCharacterReference(beatWithOverlay(
+      { type: "fact", title: "Finn's tip #3" },
+      "A close-up of a spray bottle on a shelf"
+    ))).toBe(false);
+  });
+
+  it("a beat with no overlay at all still falls through to the prose/text checks", () => {
+    expect(beatWantsCharacterReference(beatWithOverlay(undefined, "Finn wiring a fuse to a battery"))).toBe(true);
+    expect(beatWantsCharacterReference(beatWithOverlay(undefined, "A close-up of a battery terminal"))).toBe(false);
   });
 });

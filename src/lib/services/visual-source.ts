@@ -3312,7 +3312,7 @@ export function keepPositiveClauses(clauses: string): string {
  * "when an adult female is depicted..." on every beat; reading that would force the
  * portrait into object-only scenes.
  */
-export function beatWantsCharacterReference(beat: Pick<Beat, "aiPrompt" | "visualQuery" | "text">): boolean {
+export function beatWantsCharacterReference(beat: Pick<Beat, "aiPrompt" | "visualQuery" | "text" | "overlay">): boolean {
   // Plural forms are covered on purpose: with a trailing \b and only the singular spelled
   // out, "Hotel housekeepers are trained…" silently failed to match "housekeeper" (no word
   // boundary between the r and the s), so the most natural way to name the subject was the
@@ -3325,6 +3325,16 @@ export function beatWantsCharacterReference(beat: Pick<Beat, "aiPrompt" | "visua
   const customTerms = characterTermsRegex(getSetting("AI_CHARACTER_TERMS"));
   const explicitCharacter = customTerms ?? defaultExplicitCharacter;
   const defaultEmbodiedFirstPerson = /\bI\s+(?:saw|noticed|looked|stepped|walked|entered|checked|cleaned|wiped|found|reached|picked|opened|closed|touched|examined|watched|worked|held|removed|sprayed)\b/i;
+
+  // A "person" overlay (Stage 1) is the planner NAMING a specific individual for this
+  // beat's on-screen card — a structured signal at least as authoritative as its prose
+  // visual description, and one the prose often omits: measured live, a beat overlaid
+  // "Finn Stone" still got only "a friendly middle-aged man" as its visual description
+  // (no name, no configured role word), so the text-only check below never fired even
+  // though the planner had already, elsewhere, said exactly whose beat this was. Checked
+  // first and independently of visualScene — a person-carded beat with generic prose is
+  // exactly the gap this closes.
+  if (beat.overlay?.type === "person" && explicitCharacter.test(beat.overlay.title || "")) return true;
 
   // The planner's OWN visual description (aiPrompt/visualQuery) is the authoritative
   // signal for whether THIS BEAT'S VISUAL shows the character — check it on its own first.

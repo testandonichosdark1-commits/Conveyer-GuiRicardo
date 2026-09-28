@@ -8,6 +8,7 @@ import { chromium, type BrowserContext, type Locator, type Page, type Response }
 import { getSetting } from "../settings";
 import { DATA_DIR } from "../run-paths";
 import { checkCancelled } from "../cancellation";
+import { pLimit } from "../plimit";
 import { resolveFfprobe } from "../ffmpeg-bin";
 import { log } from "../logger";
 
@@ -75,6 +76,10 @@ interface FlowBrowserState {
   queue: Promise<void>;
   /** model -> epoch ms until which Flow said its usage limit is hit (survives hot reload). */
   limitedModels?: Map<string, number>;
+  /** Generations (image + video, success or failure — the tab ages either way) since the
+   *  last reload, preventive or reactive. Global, not per-run: the tab itself outlives any
+   *  one run. See `maybeRecycleFlowTab`. */
+  generationsSinceReload?: number;
 }
 
 declare global {
@@ -90,7 +95,42 @@ const state: FlowBrowserState = globalThis.__facelessFlowBrowserState ?? {
   limitedModels: new Map<string, number>(),
 };
 state.limitedModels ??= new Map<string, number>();
+state.generationsSinceReload ??= 0;
 globalThis.__facelessFlowBrowserState = state;
+
+/**
+ * Preventive tab recycling — a MIDDLE GROUND between "never reload" (how a 174-beat run
+ * measured three different UI-detection errors within 33 seconds after ~1h40 of continuous
+ * use of the same tab) and reloading before every single generation (which would cost real
+ * seconds on every beat for a problem that, so far, only shows up after sustained use).
+ *
+ * Every `FLOW_TAB_RECYCLE_EVERY` generations (image or video, counted whether they succeed
+ * or fail — the tab accumulates whatever caused that cluster either way), reload the Flow
+ * tab BEFORE starting the next one, on the theory that whatever degrades over a long
+ * session (a growing project grid, DOM/memory cruft — see CLAUDE.md) is cheaper to clear on
+ * a schedule than to keep discovering via failures. This is deliberately separate from the
+ * REACTIVE reload in `attemptFlowImage` (`isPresubmitUiGlitch`): that one fires only after a
+ * failure and only retries pre-submit steps; this one fires on a counter, before anything
+ * has gone wrong, so it can prevent the failure rather than merely recover from it.
+ *
+ * `FLOW_TAB_RECYCLE_EVERY` default 20, blank/0/negative = disabled. Global counter (not
+ * per-run) because the tab itself is global — a run boundary says nothing about tab age.
+ */
+function recycleEveryN(): number {
+  const n = Number(getSetting("FLOW_TAB_RECYCLE_EVERY") || "20");
+  return Number.isFinite(n) ? Math.round(n) : 20;
+}
+
+export async function maybeRecycleFlowTab(page: Page, runId: string): Promise<void> {
+  const every = recycleEveryN();
+  if (every <= 0) return;
+  state.generationsSinceReload = (state.generationsSinceReload ?? 0) + 1;
+  if (state.generationsSinceReload < every) return;
+  state.generationsSinceReload = 0;
+  log(runId, "info", `Google Flow: recycling the tab after ${every} generations (preventive reload)`, { stage: "visual" });
+  await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 }).catch(() => undefined);
+  await page.waitForTimeout(1500);
+}
 
 // Generalized from the image-only literal so image and video can each own their own
 // bounds — video legitimately runs minutes longer than a still (Veo render + Flow's own
@@ -1609,6 +1649,22 @@ async function detectFlowFailure(page: Page, media: "image" | "video" = "image",
 /** Generate one full-size image through the Google Flow web UI and save it as PNG. */
 /** One image-generation attempt with a SPECIFIC model — no fallback logic in here, that
  *  lives in generateFlowImage() which calls this once or twice. */
+/**
+ * A composer-setup failure worth a free reload-and-retry, versus one that must not be
+ * retried automatically. ONLY "ui" qualifies — a mode-switch/prompt-box/reference-attach
+ * failure that happens strictly BEFORE a prompt is submitted, so nothing has been spent.
+ * Every other code is excluded ON PURPOSE, not by omission:
+ *   - "timeout" ("no image/video captured") fires AFTER submit — a real generation may
+ *     already have consumed the account's usage allowance even though we failed to
+ *     capture it, so retrying would risk a silent double-spend.
+ *   - "credits" / "policy" are real account states a reload cannot change.
+ *   - "login" / "config" need the operator, not a reload.
+ * Exported so the boundary is pinned by test rather than re-derived from the call site.
+ */
+export function isPresubmitUiGlitch(code: FlowBrowserError["code"] | undefined): boolean {
+  return code === "ui";
+}
+
 async function attemptFlowImage(
   runId: string,
   prompt: string,
@@ -1623,6 +1679,7 @@ async function attemptFlowImage(
   if (await pageHasLoginPrompt(page)) {
     throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
   }
+  await maybeRecycleFlowTab(page, runId);
   // A previous attempt in this SAME page (a failed reference-image search tries several
   // trigger buttons; the fallback-model retry in generateFlowImage reuses this same tab)
   // can leave a menu/panel open. Start every attempt from a clean composer — observed live:
@@ -1630,14 +1687,38 @@ async function attemptFlowImage(
   // fallback-model retry failed to confirm "nano banana 2" right after a failed reference
   // search, which is consistent with (not yet proven to be) something that search opened
   // still sitting in front of the model picker on the retry.
-  await dismissOpenOverlays(page);
-  const input = await promptBox(page);
-  await ensureFlowImageMode(page, model);
-  await ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
-  // Remove any composer attachment left by a previous beat. Then attach the
-  // portrait only for a beat explicitly routed as a character scene. This keeps
-  // object/detail shots from inheriting the housekeeper by accident.
-  await prepareComposerReference(page, input, options?.referenceImagePath ?? null);
+  const setupComposer = async (): Promise<Locator> => {
+    await dismissOpenOverlays(page);
+    const box = await promptBox(page);
+    await ensureFlowImageMode(page, model);
+    await ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
+    // Remove any composer attachment left by a previous beat. Then attach the
+    // portrait only for a beat explicitly routed as a character scene. This keeps
+    // object/detail shots from inheriting the housekeeper by accident.
+    await prepareComposerReference(page, box, options?.referenceImagePath ?? null);
+    return box;
+  };
+  let input: Locator;
+  try {
+    input = await setupComposer();
+  } catch (e) {
+    // A "ui" failure here (mode switch, prompt box lookup, reference attach) happens
+    // strictly BEFORE any prompt is submitted, so nothing has been spent — unlike the
+    // "no image captured" timeout below, which fires AFTER submit and must NOT be
+    // blindly retried (a real generation may already have consumed the account's quota
+    // even if we failed to capture it). One full tab reload clears whatever made the
+    // composer briefly undetectable (a stuck overlay, a stale toast, DOM/memory cruft
+    // from a long-lived tab) and gets one free retry before falling through to the
+    // existing model/provider fallback chain. Observed live: three different "could not
+    // find X" errors within 33 seconds after ~1h40 of continuous use of the same tab
+    // (beats 149/151/152 of a 174-beat run) — this is aimed squarely at that pattern.
+    const code = e instanceof FlowBrowserError ? e.code : undefined;
+    if (!isPresubmitUiGlitch(code)) throw e;
+    log(runId, "warn", `Google Flow: composer setup failed (${(e as Error).message.slice(0, 140)}) — reloading the tab and retrying once`, { stage: "visual" });
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 }).catch(() => undefined);
+    await page.waitForTimeout(1500);
+    input = await setupComposer();
+  }
   const timeoutMs = flowImageTimeoutMs();
   const candidates: CapturedImage[] = [];
   const tasks = new Set<Promise<void>>();
@@ -1698,6 +1779,278 @@ async function attemptFlowImage(
   }
 }
 
+/**
+ * ── Concurrent image generation (FLOW_IMAGE_CONCURRENCY > 1) ──────────────────────────────
+ *
+ * Default 1 = attemptFlowImage() above, unchanged, byte-identical to before this existed:
+ * every generation is one atomic submit-then-wait cycle inside enqueue(), so only one
+ * generation is ever rendering at a time. That is also why our Flow path was measured at
+ * ~3.6x slower than a third-party Flow automation on the same 108 prompts (28 min vs ~90):
+ * that automation submits several prompts before waiting for any of them to finish —
+ * "os ENVIOS são serializados (…) as ESPERAS rodam concorrentes (…) Várias gerações em
+ * voo, zero mistura" (its own source, read while vetting it for safety — see CLAUDE.md).
+ *
+ * VERSION 2, after v1 (identify-by-`data-media-id`-while-holding-the-lock) was DISPROVEN
+ * live: a real 7-beat run at concurrency 2 shifted beat 1's and beat 2's images by one
+ * position. Root cause, also confirmed live: `data-media-id` does not exist on a fresh
+ * placeholder tile — it only resolves once the image is essentially done (tens of
+ * seconds), so an 8s in-lock grace window almost never found it, and the fallback signal
+ * (a shared `page.on("response")` listener) cannot tell several concurrent generations'
+ * responses apart. See CLAUDE.md for the full incident.
+ *
+ * The fix is NOT a longer grace window (that just re-serializes everything on our side
+ * again). It is a different correlation signal, found by inspecting the live DOM: Flow
+ * assigns each result tile an `aria-label` that is a short caption of ITS OWN content
+ * (confirmed live: a prompt for "a blue teacup on a dark wooden table" produced a tile
+ * labelled "Blue teacup on wooden table") — and, like the media id, it too only resolves
+ * once the tile is rendered. But unlike the media id, it does not need to be identified
+ * EARLY, because it is not opaque: once several tiles finish in any order, EACH beat can
+ * independently recognize its OWN result by matching the tile's caption against the
+ * PROMPT it submitted, rather than needing to have grabbed a reference the instant its
+ * placeholder appeared. That is the actual fix:
+ *
+ *   - COMPOSE + SUBMIT stays fully serialized through the SAME enqueue() lock video uses,
+ *     exactly as before — one at a time, and it no longer waits for anything after the
+ *     click. The lock is held only as long as composing + clicking actually takes.
+ *   - The WAIT for a submitted generation to render runs OUTSIDE that lock, bounded by
+ *     imageWaitLimit(), so several generations render on Flow's own backend at once — the
+ *     entire speed win, unchanged from v1's reasoning.
+ *   - Correlation: once a NEW, not-yet-claimed tile resolves (has both `data-media-id` and
+ *     a non-empty `aria-label`), score its caption against the ORIGINAL PROMPT this beat
+ *     submitted (captionMatchScore — what fraction of the caption's meaningful words
+ *     appear in the prompt). Only a tile clearing MIN_CAPTION_MATCH is ever accepted.
+ *     Claiming a tile (`claimFlowTile`) is a synchronous test-and-set against a shared,
+ *     module-global `claimedMediaIds` set — safe under concurrency because Set.has/add
+ *     never yields between the check and the write, so two concurrent waiters can never
+ *     both claim the same tile even if both see it as a candidate on the same poll.
+ *   - No content match clearing the bar within the timeout is a real failure for this
+ *     generation (`timeout`), same contract as v1 and the serial path — never guessed at,
+ *     never silently accepts a poor match.
+ */
+
+/** How many Nano Banana generations may be RENDERING at once. Submission itself stays
+ *  serialized regardless — see the section comment above. Default 1 keeps every existing
+ *  install byte-identical (generateFlowImage routes straight to attemptFlowImage()). */
+export function flowImageConcurrency(): number {
+  const n = Number(getSetting("FLOW_IMAGE_CONCURRENCY") || "1");
+  return Number.isFinite(n) && n > 0 ? Math.min(8, Math.max(1, Math.round(n))) : 1;
+}
+
+/** A single shared limiter for the wait phase, recreated only when the concurrency SETTING
+ *  changes — pLimit's internal active/queue counters must persist across calls to actually
+ *  bound anything, so a fresh pLimit() per call would not limit concurrency at all. */
+let _imageWaitLimiter: { n: number; limit: <T>(fn: () => Promise<T>) => Promise<T> } | null = null;
+export function imageWaitLimit<T>(fn: () => Promise<T>): Promise<T> {
+  const n = flowImageConcurrency();
+  if (!_imageWaitLimiter || _imageWaitLimiter.n !== n) _imageWaitLimiter = { n, limit: pLimit(n) };
+  return _imageWaitLimiter.limit(fn);
+}
+
+/** Every FINISHED image tile in the DOM right now: its media id, caption and src. A tile
+ *  still rendering has no `data-media-id` yet and is invisible to this query — that is
+ *  fine, the caller is polling, not taking a single snapshot. Exported for tests. */
+export async function currentFlowImageTiles(page: Page): Promise<{ mediaId: string; caption: string; src: string }[]> {
+  return page
+    .locator("flow-grid-tile-container")
+    .evaluateAll((els: Element[]) =>
+      els.map((el) => {
+        const img = el.querySelector("img[data-media-id]") as HTMLImageElement | null;
+        if (!img) return null;
+        const mediaId = img.getAttribute("data-media-id") || "";
+        const src = img.currentSrc || img.src || "";
+        const caption = el.getAttribute("aria-label") || "";
+        return mediaId && src ? { mediaId, caption, src } : null;
+      }).filter((x): x is { mediaId: string; caption: string; src: string } => x !== null)
+    )
+    .catch(() => []);
+}
+
+const CAPTION_STOPWORDS = new Set(["a", "an", "the", "of", "on", "in", "at", "with", "and", "or", "to", "for", "is",
+  "are", "was", "were", "this", "that", "into", "onto", "near", "over", "under"]);
+
+function significantWords(text: string): string[] {
+  return (text.toLowerCase().match(/[a-z0-9]+/g) || []).filter((w) => w.length > 2 && !CAPTION_STOPWORDS.has(w));
+}
+
+/**
+ * What fraction of the TILE CAPTION's own meaningful words also appear in the PROMPT this
+ * beat submitted — recall of the (short) caption against the (long, rich) prompt, not the
+ * reverse. 0 when the caption is empty (never a false "perfect match" on nothing). Exported
+ * for tests; the real DOM fact behind this (Flow's aria-label is a content-derived caption,
+ * not a generic label) is verified live — see the section comment above and CLAUDE.md.
+ */
+export function captionMatchScore(caption: string, prompt: string): number {
+  const capWords = significantWords(caption);
+  if (!capWords.length) return 0;
+  const promptWords = new Set(significantWords(prompt));
+  const hits = capWords.filter((w) => promptWords.has(w)).length;
+  return hits / capWords.length;
+}
+
+/** Below this, a caption is not a confident enough match to bet a beat's content on —
+ *  matches the OTHER beat's prompt just as poorly as pure chance would predict. */
+const MIN_CAPTION_MATCH = 0.6;
+
+/** Shared across every concurrent generation on this tab: a tile, once claimed by one
+ *  beat, can never be reconsidered by another — even one with a WORSE-but-still-passing
+ *  score for it. Global (not per-run) because the tab itself is global; ids are unique
+ *  UUIDs so unbounded growth across a long session is not a practical concern. */
+const claimedMediaIds = new Set<string>();
+
+/** Synchronous test-and-set — Set.has/add never yields, so two concurrent callers can
+ *  never both observe "unclaimed" for the same id. Exported for tests. */
+export function claimFlowTile(mediaId: string): boolean {
+  if (claimedMediaIds.has(mediaId)) return false;
+  claimedMediaIds.add(mediaId);
+  return true;
+}
+
+/** Poll until a tile whose caption confidently matches `prompt` appears and can be
+ *  claimed, or the deadline passes. Never returns a claimed-by-someone-else or
+ *  below-threshold tile — those are simply not candidates. */
+async function findAndClaimMatchingTile(
+  page: Page,
+  prompt: string,
+  deadline: number,
+  runId: string
+): Promise<{ mediaId: string; src: string } | null> {
+  while (Date.now() < deadline) {
+    if (runId) checkCancelled(runId);
+    if (await pageHasLoginPrompt(page)) throw new FlowBrowserError("Google session expired during generation.", "login");
+    const tiles = await currentFlowImageTiles(page);
+    const scored = tiles
+      .filter((t) => !claimedMediaIds.has(t.mediaId))
+      .map((t) => ({ ...t, score: captionMatchScore(t.caption, prompt) }))
+      .filter((t) => t.score >= MIN_CAPTION_MATCH)
+      .sort((a, b) => b.score - a.score);
+    for (const candidate of scored) {
+      if (claimFlowTile(candidate.mediaId)) return candidate;
+      // Lost a race to another concurrent waiter on THIS specific tile (vanishingly rare —
+      // both would need the exact same best score on the exact same poll) — the next
+      // best-scored candidate this same poll, if any, is still fair game.
+    }
+    await page.waitForTimeout(1_000);
+  }
+  return null;
+}
+
+/** Fetch an already-claimed tile's bytes directly from its src — the same direct-fetch
+ *  technique proven for video (fetchVideoFromResultElement): through the tab's own cookie
+ *  jar, no reliance on catching an incidental network response for it. */
+async function fetchFlowImageSrc(page: Page, src: string): Promise<Buffer | null> {
+  try {
+    const resp = await page.request.get(src, { timeout: 20_000 });
+    if (!resp.ok()) return null;
+    if (!(resp.headers()["content-type"] || "").startsWith("image/")) return null;
+    return await resp.body();
+  } catch {
+    return null;
+  }
+}
+
+interface SubmittedFlowImage {
+  page: Page;
+  failureBaseline: FlowFailureBaseline;
+}
+
+/**
+ * Concurrent counterpart to attemptFlowImage — used only when FLOW_IMAGE_CONCURRENCY > 1.
+ * See the section comment above for the design; this function is just the submit half
+ * (fully serialized, and now NOT waiting on anything after the click) plus the wait half
+ * (concurrent, bounded by imageWaitLimit(), correlated by caption match).
+ */
+async function attemptFlowImageConcurrent(
+  runId: string,
+  prompt: string,
+  outPath: string,
+  aspect: string,
+  options: { referenceImagePath?: string } | undefined,
+  model: string
+): Promise<string> {
+  const submitted: SubmittedFlowImage = await enqueue(async () => {
+    if (runId) checkCancelled(runId);
+    const { page } = await launchBrowser();
+    await gotoFlow(page);
+    if (await pageHasLoginPrompt(page)) {
+      throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
+    }
+    await maybeRecycleFlowTab(page, runId);
+    const setupComposer = async (): Promise<Locator> => {
+      await dismissOpenOverlays(page);
+      const box = await promptBox(page);
+      await ensureFlowImageMode(page, model);
+      await ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
+      await prepareComposerReference(page, box, options?.referenceImagePath ?? null);
+      return box;
+    };
+    let input: Locator;
+    try {
+      input = await setupComposer();
+    } catch (e) {
+      const code = e instanceof FlowBrowserError ? e.code : undefined;
+      if (!isPresubmitUiGlitch(code)) throw e;
+      log(runId, "warn", `Google Flow: composer setup failed (${(e as Error).message.slice(0, 140)}) — reloading the tab and retrying once`, { stage: "visual" });
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 }).catch(() => undefined);
+      await page.waitForTimeout(1500);
+      input = await setupComposer();
+    }
+
+    await input.fill(prompt.slice(0, 12_000));
+    const failureBaseline = await flowFailureBaseline(page);
+    if (await flowInsufficientCreditsWarning(page)) {
+      throw new FlowBrowserError(
+        "Google Flow will not submit this image: the account has insufficient credits for it (Flow shows \"Alerta de créditos insuficientes\").",
+        "credits"
+      );
+    }
+    await submitPrompt(page, input);
+    // Nothing to wait for here anymore (see the section comment for why v1's in-lock wait
+    // was wrong) — release the lock immediately so the next beat can submit.
+    return { page, failureBaseline };
+  });
+
+  return imageWaitLimit(async () => {
+    const { page, failureBaseline } = submitted;
+    const timeoutMs = flowImageTimeoutMs();
+    const deadline = Date.now() + timeoutMs;
+    let nextFailureCheck = Date.now() + 4_000;
+    const claimed = await findAndClaimMatchingTile(page, prompt, deadline, runId);
+    // A failure check even while polling for the match — a credits/policy card is
+    // account-wide, so it can still legitimately end THIS beat's wait even though it
+    // wasn't found via the caption match loop's own timing.
+    if (!claimed && Date.now() < deadline) {
+      const failure = await detectFlowFailure(page, "image", failureBaseline);
+      if (failure) throw failure;
+    }
+    if (!claimed) {
+      throw new FlowBrowserError(
+        `No Flow tile confidently matched this beat's prompt within ${Math.round(timeoutMs / 1000)}s (concurrent path). The UI may have changed, or the caption never resolved.`,
+        "timeout"
+      );
+    }
+    while (Date.now() < deadline) {
+      if (runId) checkCancelled(runId);
+      if (await pageHasLoginPrompt(page)) throw new FlowBrowserError("Google session expired during generation.", "login");
+      const bytes = await fetchFlowImageSrc(page, claimed.src);
+      if (bytes && bytes.length > 20_000) {
+        fs.mkdirSync(path.dirname(outPath), { recursive: true });
+        await sharp(bytes).png().toFile(outPath);
+        return outPath;
+      }
+      if (Date.now() >= nextFailureCheck) {
+        const failure = await detectFlowFailure(page, "image", failureBaseline);
+        if (failure) throw failure;
+        nextFailureCheck = Date.now() + 4_000;
+      }
+      await page.waitForTimeout(700);
+    }
+    throw new FlowBrowserError(
+      `Claimed a matching Flow tile but its image never became fetchable within ${Math.round(timeoutMs / 1000)}s.`,
+      "timeout"
+    );
+  });
+}
+
 /** A failure this specific rather than "the model tier is unavailable/limited" — trying a
  *  different model would not help, so the fallback tier is never attempted for these. */
 export function isModelIndependentFailure(code: FlowBrowserError["code"] | undefined): boolean {
@@ -1726,6 +2079,16 @@ export interface FlowImageResult {
  * fallback needlessly on a genuine full outage is a few extra seconds, not a paid retry —
  * Flow spends the operator's own Google account, not a per-call bill.
  */
+/**
+ * Entry point — unchanged signature. Routes to the serial path (attemptFlowImage, the
+ * ENTIRE model-fallback dance as one atomic enqueue()'d unit — exactly as before this
+ * file's concurrent path existed) unless the operator has raised FLOW_IMAGE_CONCURRENCY
+ * above 1, in which case a SEPARATE function handles it. These cannot share one function
+ * body: attemptFlowImageConcurrent does its OWN enqueue() internally for just the submit
+ * phase, and nesting that inside an outer enqueue() (as the serial path's structure does)
+ * would deadlock — the outer lock never releases until the inner one does, and the inner
+ * one waits for the outer.
+ */
 export async function generateFlowImage(
   runId: string,
   prompt: string,
@@ -1733,6 +2096,7 @@ export async function generateFlowImage(
   aspect = "16:9",
   options?: { referenceImagePath?: string }
 ): Promise<FlowImageResult> {
+  if (flowImageConcurrency() > 1) return generateFlowImageConcurrent(runId, prompt, outPath, aspect, options);
   return enqueue(async () => {
     const primaryModel = (getSetting("FLOW_IMAGE_MODEL") || "nano-banana-pro").replace(/[-_]+/g, " ").trim();
     const fallbackModel = getSetting("FLOW_IMAGE_MODEL_FALLBACK").replace(/[-_]+/g, " ").trim();
@@ -1783,6 +2147,71 @@ export async function generateFlowImage(
       }
     }
   });
+}
+
+/**
+ * Same model-fallback dance as generateFlowImage's serial path, same limitedModels
+ * bookkeeping (a Map read/write with no `await` in between is atomic regardless of how
+ * many calls interleave — no lock needed for that part), but calling
+ * attemptFlowImageConcurrent instead of attemptFlowImage, and — this is the whole point —
+ * NOT wrapped in an outer enqueue(). Several beats' calls to this function run this body
+ * concurrently; each one's actual submit is still serialized, inside
+ * attemptFlowImageConcurrent itself.
+ */
+async function generateFlowImageConcurrent(
+  runId: string,
+  prompt: string,
+  outPath: string,
+  aspect: string,
+  options?: { referenceImagePath?: string }
+): Promise<FlowImageResult> {
+  const primaryModel = (getSetting("FLOW_IMAGE_MODEL") || "nano-banana-pro").replace(/[-_]+/g, " ").trim();
+  const fallbackModel = getSetting("FLOW_IMAGE_MODEL_FALLBACK").replace(/[-_]+/g, " ").trim();
+
+  const LIMIT_COOLDOWN_MS = 30 * 60_000;
+  const limited = state.limitedModels ?? (state.limitedModels = new Map<string, number>());
+  const isLimited = (m: string) => (limited.get(m) ?? 0) > Date.now();
+  const markLimited = (m: string, err: unknown) => {
+    if (err instanceof FlowBrowserError && err.code === "credits") limited.set(m, Date.now() + LIMIT_COOLDOWN_MS);
+  };
+
+  if (isLimited(primaryModel) && (!fallbackModel || isLimited(fallbackModel))) {
+    throw new FlowBrowserError("Google Flow usage limit was reached a moment ago on every configured model — not retrying yet.", "credits");
+  }
+
+  if (fallbackModel && isLimited(primaryModel) && !isLimited(fallbackModel)) {
+    log(runId, "info", `Google Flow: "${primaryModel}" is at its usage limit — using "${fallbackModel}" directly`, { stage: "visual" });
+    try {
+      const p = await attemptFlowImageConcurrent(runId, prompt, outPath, aspect, options, fallbackModel);
+      return { path: p, model: fallbackModel };
+    } catch (e) {
+      markLimited(fallbackModel, e);
+      throw e;
+    }
+  }
+
+  try {
+    const p = await attemptFlowImageConcurrent(runId, prompt, outPath, aspect, options, primaryModel);
+    return { path: p, model: primaryModel };
+  } catch (e) {
+    const err = e as Error;
+    markLimited(primaryModel, err);
+    const code = err instanceof FlowBrowserError ? err.code : undefined;
+    if (!fallbackModel || isModelIndependentFailure(code)) throw err;
+    log(
+      runId,
+      "warn",
+      `Google Flow: "${primaryModel}" failed (${err.message.slice(0, 160)}) — trying fallback model "${fallbackModel}"`,
+      { stage: "visual" }
+    );
+    try {
+      const p = await attemptFlowImageConcurrent(runId, prompt, outPath, aspect, options, fallbackModel);
+      return { path: p, model: fallbackModel };
+    } catch (e2) {
+      markLimited(fallbackModel, e2);
+      throw e2;
+    }
+  }
 }
 
 // ── Veo video ────────────────────────────────────────────────────────────────
@@ -2021,6 +2450,7 @@ export async function generateFlowVideo(
     if (await pageHasLoginPrompt(page)) {
       throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
     }
+    await maybeRecycleFlowTab(page, runId);
     // Same reasoning as attemptFlowImage: a previous beat's failed reference-image search
     // can leave a menu/panel open in this shared page. Start clean.
     await D("close overlays", () => dismissOpenOverlays(page));

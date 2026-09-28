@@ -1,11 +1,13 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import { getSetting } from "../settings";
 import { resolveFfmpeg, resolveFfprobe, STRIP_TOOLCHAIN_TAGS } from "../ffmpeg-bin";
 import { log } from "../logger";
 import { masterLoudness } from "./audio-loudness";
 import { buildOverlayPlan } from "./overlay-renderer";
+import { pLimit } from "../plimit";
 import type { Beat } from "./studio-plan";
 
 /**
@@ -53,6 +55,38 @@ function runFfmpeg(args: string[]): void {
   if (r.status !== 0) {
     throw new Error(`ffmpeg failed (rc=${r.status}): ${(r.stderr?.toString() ?? "").slice(-400)}`);
   }
+}
+
+/**
+ * Same contract as `runFfmpeg`, but non-blocking: `spawn` instead of `spawnSync` so
+ * several beats' encodes can run as concurrent OS processes while Node's event loop
+ * stays free. This is what makes `renderBeat`/`renderFiller` safe to run under `pLimit`
+ * below — spawnSync would serialize everything on the event loop regardless of how many
+ * "concurrent" promises call it.
+ */
+function runFfmpegAsync(args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(ffmpegBin(), args, { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr?.on("data", (d) => { stderr += d.toString(); if (stderr.length > 8000) stderr = stderr.slice(-8000); });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg failed (rc=${code}): ${stderr.slice(-400)}`));
+    });
+  });
+}
+
+/** How many beat clips to encode at once in the final assembly pass. Reuses the SAME
+ *  `ASSEMBLE_CONCURRENCY` setting the legacy pipeline's `video-assemble.ts` already
+ *  exposes on Settings ("How many FFmpeg clip renders happen in parallel") — one knob,
+ *  same meaning, for both assemblers, instead of a second concurrency setting that would
+ *  only confuse which one governs the studio pipeline. Purely CPU-bound (libx264), unlike
+ *  the AI-generation concurrency knobs: this pass used to be a plain `for` loop, one
+ *  ffmpeg process at a time, which measured at ~27 minutes of wall time for 174 beats on
+ *  a 10-core machine that spent the whole pass mostly idle. */
+function assembleConcurrency(): number {
+  return Math.max(1, Math.min(os.cpus().length, Number(getSetting("ASSEMBLE_CONCURRENCY") || "4") || 4));
 }
 
 /** On-disk size in bytes, or -1 if the file is missing/unreadable. */
@@ -355,13 +389,13 @@ export function contentCrop(clipPath: string, runId?: string): string | null {
  * looping visuals just keep flowing; `-frames:v` cuts everything to the exact
  * count. The narration is muxed once over the final concat — never per beat.
  */
-function renderBeat(
+async function renderBeat(
   beat: RenderBeat,
   outPath: string,
   dim: { w: number; h: number; fps: number },
   fade?: { inSec: number; outSec: number },
   runId?: string
-): void {
+): Promise<void> {
   const { w, h, fps } = dim;
   const frames = beatFrames(beat, fps);
 
@@ -413,7 +447,7 @@ function renderBeat(
   if (beat.avatarClipPath && (beat.layout === "avatar" || !beat.visualPath)) {
     // Already the frame's shape → cover-crop (identical to the split path), no blur, no bars.
     if (nearFrameAspect) {
-      runFfmpeg([
+      await runFfmpegAsync([
         ...avSeek, "-i", beat.avatarClipPath,
         "-filter_complex", `[0:v]${avPre}${fit},${avDelay}${pad}${fadeFx}[v]`,
         "-map", "[v]", "-frames:v", String(frames),
@@ -421,7 +455,7 @@ function renderBeat(
       ]);
       return;
     }
-    runFfmpeg([
+    await runFfmpegAsync([
       ...avSeek, "-i", beat.avatarClipPath,
       "-filter_complex",
       `[0:v]${avPre}split=2[bgs][fgs];` +
@@ -437,7 +471,7 @@ function renderBeat(
   // Split: avatar left half + visual right half (visual loops; avatar pads).
   if (beat.layout === "split" && beat.avatarClipPath && beat.visualPath) {
     const halfW = Math.round(w / 2);
-    runFfmpeg([
+    await runFfmpegAsync([
       ...avSeek, "-i", beat.avatarClipPath,
       "-stream_loop", "-1", "-i", beat.visualPath,
       "-filter_complex",
@@ -452,7 +486,7 @@ function renderBeat(
 
   // Full-screen B-roll (loops if shorter than the beat).
   if (beat.visualPath) {
-    runFfmpeg([
+    await runFfmpegAsync([
       "-stream_loop", "-1", "-i", beat.visualPath,
       "-vf", fit + fadeFx, "-map", "0:v:0", "-frames:v", String(frames),
       ...encodeV(fps), outPath,
@@ -464,9 +498,9 @@ function renderBeat(
 }
 
 /** Neutral filler of exactly the beat's frames — keeps the timeline aligned when a beat fails to render. */
-function renderFiller(beat: RenderBeat, outPath: string, dim: { w: number; h: number; fps: number }): void {
+async function renderFiller(beat: RenderBeat, outPath: string, dim: { w: number; h: number; fps: number }): Promise<void> {
   const { w, h, fps } = dim;
-  runFfmpeg([
+  await runFfmpegAsync([
     "-f", "lavfi", "-i", `color=c=0x101418:s=${w}x${h}:r=${fps}`,
     "-frames:v", String(beatFrames(beat, fps)),
     ...encodeV(fps), outPath,
@@ -500,49 +534,68 @@ export async function assembleStudioVideo(
   const transitionSec = transitionsOn ? Math.max(0, Number(getSetting("SCENE_TRANSITION_MS") || "300")) / 1000 : 0;
   if (transitionsOn) log(runId, "info", `Scene transitions ON — dip-to-black ${Math.round(transitionSec * 1000)}ms`, { stage: "assemble" });
 
+  // Each beat's own ffmpeg encode is fully independent (own input, own output file),
+  // so this pass runs `assembleConcurrency()` of them at once instead of one at a time
+  // — the loop used to be a plain sequential `for`, which left a multi-core machine
+  // mostly idle for the entire assembly pass (measured: ~27 minutes for 174 beats on
+  // 10 cores). `pLimit` bounds it; results are written into a fixed-position array so
+  // concat order stays exactly beat order no matter which one finishes first.
+  const limitAssemble = pLimit(assembleConcurrency());
+  const rendered: (string | undefined)[] = new Array(beats.length);
+  const isFiller: boolean[] = new Array(beats.length).fill(false);
+  await Promise.allSettled(
+    beats.map((beat, i) =>
+      limitAssemble(async () => {
+        const fade = {
+          inSec: transitionSec > 0 && i > 0 ? transitionSec : 0,
+          outSec: transitionSec > 0 && i < beats.length - 1 ? transitionSec : 0,
+        };
+        const clip = path.join(beatsDir, `beat_${String(i).padStart(4, "0")}.mp4`);
+        try {
+          await renderBeat(beat, clip, dim, fade, runId);
+          // A source that decodes just enough to pass retrieval (freeze probe ok) can
+          // still exhaust/error mid-encode and yield a SHORT clip — which would slide
+          // every later beat off the narration. Verify the exact frame count; if it's
+          // materially short (>~100ms), drop to an exact-length filler so sync holds.
+          const want = beatFrames(beat, dim.fps);
+          const got = probeFrameCount(clip);
+          if (got !== null && got < want - Math.ceil(dim.fps * 0.1)) {
+            throw new Error(`short render: ${got}/${want} frames`);
+          }
+          rendered[i] = clip;
+        } catch (e) {
+          // A skipped beat would shift every later beat off the narration — render an
+          // exact-length neutral filler instead so the timeline stays aligned. This is
+          // a SILENT BLACK substitution, so log it LOUDLY + attributably: which asset
+          // failed and its on-disk size (0/tiny ⇒ a truncated or error-body download).
+          const src = beat.visualPath ?? beat.avatarClipPath;
+          const size = fileSize(src);
+          log(
+            runId,
+            "error",
+            `Beat ${beat.index} (${beat.layout}) render FAILED → black filler: ${(e as Error).message.slice(0, 150)} ` +
+              `[src=${src ?? "none"} size=${size < 0 ? "?" : size + "B"}]`,
+            { stage: "assemble" }
+          );
+          try {
+            await renderFiller(beat, clip, dim);
+            rendered[i] = clip;
+            isFiller[i] = true;
+          } catch {
+            log(runId, "error", `Beat ${beat.index} filler failed too — skipped (timing may shift)`, { stage: "assemble" });
+          }
+        }
+      })
+    )
+  );
+  // Beat order, not completion order — the concat below depends on it.
   const clipPaths: string[] = [];
-  const fillerBeats: number[] = []; // beats that fell back to a black filler — surfaced at run level below
+  const fillerBeats: number[] = [];
   for (let i = 0; i < beats.length; i++) {
-    const beat = beats[i];
-    const fade = {
-      inSec: transitionSec > 0 && i > 0 ? transitionSec : 0,
-      outSec: transitionSec > 0 && i < beats.length - 1 ? transitionSec : 0,
-    };
-    const clip = path.join(beatsDir, `beat_${String(clipPaths.length).padStart(4, "0")}.mp4`);
-    try {
-      renderBeat(beat, clip, dim, fade, runId);
-      // A source that decodes just enough to pass retrieval (freeze probe ok) can
-      // still exhaust/error mid-encode and yield a SHORT clip — which would slide
-      // every later beat off the narration. Verify the exact frame count; if it's
-      // materially short (>~100ms), drop to an exact-length filler so sync holds.
-      const want = beatFrames(beat, dim.fps);
-      const got = probeFrameCount(clip);
-      if (got !== null && got < want - Math.ceil(dim.fps * 0.1)) {
-        throw new Error(`short render: ${got}/${want} frames`);
-      }
-      clipPaths.push(clip);
-    } catch (e) {
-      // A skipped beat would shift every later beat off the narration — render an
-      // exact-length neutral filler instead so the timeline stays aligned. This is
-      // a SILENT BLACK substitution, so log it LOUDLY + attributably: which asset
-      // failed and its on-disk size (0/tiny ⇒ a truncated or error-body download).
-      const src = beat.visualPath ?? beat.avatarClipPath;
-      const size = fileSize(src);
-      log(
-        runId,
-        "error",
-        `Beat ${beat.index} (${beat.layout}) render FAILED → black filler: ${(e as Error).message.slice(0, 150)} ` +
-          `[src=${src ?? "none"} size=${size < 0 ? "?" : size + "B"}]`,
-        { stage: "assemble" }
-      );
-      try {
-        renderFiller(beat, clip, dim);
-        clipPaths.push(clip);
-        fillerBeats.push(beat.index);
-      } catch {
-        log(runId, "error", `Beat ${beat.index} filler failed too — skipped (timing may shift)`, { stage: "assemble" });
-      }
-    }
+    const clip = rendered[i];
+    if (!clip) continue;
+    clipPaths.push(clip);
+    if (isFiller[i]) fillerBeats.push(beats[i].index);
   }
   if (clipPaths.length === 0) throw new Error("No beats rendered — cannot assemble");
   if (fillerBeats.length > 0) {

@@ -185,6 +185,8 @@ export const SETTING_KEYS = [
   "FLOW_MEDIA_MODE_SELECTOR",  // Optional CSS selector override for Flow's Image/Video mode switch
   "FLOW_ASPECT_RATIO_SELECTOR", // Optional CSS selector override for Flow's aspect-ratio control
   "FLOW_DURATION_SELECTOR",    // Optional CSS selector override for Flow's duration control
+  "FLOW_TAB_RECYCLE_EVERY",    // Reload the Flow tab preventively every N generations (image+video, default 20). 0/blank = disabled. Mitigates the long-lived-tab UI degradation seen after ~1h40 of continuous use (see CLAUDE.md).
+  "FLOW_IMAGE_CONCURRENCY",    // How many Nano Banana generations may render at once (submission itself always stays serialized). Default 1 = old serial behavior, byte-identical. NOT YET VALIDATED against a live Flow session — see CLAUDE.md before raising this.
   "KIE_API_KEY",               // kie.ai API key (nano-banana images, Veo video)
   "KIE_IMAGE_MODEL",           // kie.ai image model id (nano-banana)
   "KIE_VIDEO_MODEL",           // kie.ai video model id (Veo)
@@ -671,6 +673,8 @@ export const DEFAULTS: Record<SettingKey, string> = {
   FLOW_MEDIA_MODE_SELECTOR: "",
   FLOW_ASPECT_RATIO_SELECTOR: "",
   FLOW_DURATION_SELECTOR: "",
+  FLOW_TAB_RECYCLE_EVERY: "20",
+  FLOW_IMAGE_CONCURRENCY: "1",
   KIE_API_KEY: "",
   KIE_IMAGE_MODEL: defaultAiModel("kie", "image"), // = "google/nano-banana"
   KIE_VIDEO_MODEL: defaultAiModel("kie", "video"), // = "veo3_fast"

@@ -530,6 +530,168 @@ Chrome against a structural mock (both layouts) — it proves the logic, not tha
   Flow truly blocks submission while the alert shows — one Veo beat still finished (~5 min) with the alert on
   screen, so it may also appear after a submit reserves credits.
 
+### Concurrent image generation (`FLOW_IMAGE_CONCURRENCY`) — BROKEN, confirmed live, reverted to 1
+
+**2026-09-27, later the same day: a real 7-beat run at concurrency 2 produced a confirmed
+misattribution.** Beat 0's own image (hand pointing at a PVC pipe) was correct; beat 1's
+prompt asked for a close-up of water dripping onto dirt but rendered as a near-duplicate of
+beat 0's scene; beat 2's prompt asked for heat waves over a driveway but rendered beat 1's
+water-dripping close-up. A one-position shift, confined to the three beats submitted in the
+same concurrent batch (0/1/2) — beat 3, submitted once a concurrency slot freed up, was
+correct again. **This is the exact failure mode the design below was meant to prevent, and
+it happened on the first real run. `FLOW_IMAGE_CONCURRENCY` has been reverted to `1` and
+must NOT be raised again until this is actually fixed** — the DB value alone stopping it
+(rather than removing the code) is deliberate, so the mechanism stays available to fix and
+re-test without another round of wiring it back in.
+
+**Root cause, also confirmed live the same day**: the design below assumed
+`img[data-media-id]` is assigned as soon as a placeholder tile appears, seconds after
+submit. It is not — a DevTools check on the SAME account showed the id/src only resolve to
+a real fetchable image once the generation is well along (real generations here ran
+~40–50s end to end), nowhere near the 8-second grace window `waitForNewFlowImageSrc` was
+given while still holding the submit lock. In this run, 5 of 7 beats never found their tile
+in time and fell through to the response-listener fallback — and it is that fallback,
+running concurrently across several in-flight generations sharing the SAME
+`page.on("response")` stream, that cannot actually tell whose image is whose. The
+CLAUDE.md text below describing this as "best-effort… a known, documented trade-off" was
+correct that it was a trade-off; it was wrong that the trade-off was rare — with the real
+8s window, it is the common case, not the exception.
+
+**Fixed the same day — see "Concurrent image generation v2" below.** Identification cannot
+happen inside a short, lock-holding window if the id genuinely takes tens of seconds to
+resolve; the fix was to stop needing early identification at all, by correlating on tile
+CONTENT (a caption Flow derives from the result) once it resolves, whenever that is,
+instead of tile IDENTITY captured the instant a placeholder appears. `FLOW_IMAGE_CONCURRENCY`
+stays at `1` in the DB regardless — this incident is the reason to re-verify on a small run
+before raising it again, not a reason the code can't be trusted at all.
+
+The section below is kept as a record of the incident and of what v1 got right (the DOM
+facts about `img[data-media-id]`, direct-fetch-by-src, the submit-lock/wait-concurrency
+split) — only its "identify while holding the lock" scheduling assumption was wrong, and v2
+keeps everything else.
+
+### Concurrent image generation v2 (`FLOW_IMAGE_CONCURRENCY`, 2026-09-27) — caption-match correlation
+
+Still defaults to `1` (the fully-serial `attemptFlowImage`, byte-identical to before any of
+this existed) until raised deliberately. v1 (above) is disproven and MUST NOT be revived
+as written; this is the replacement design, and it fixes the root cause rather than
+patching the symptom.
+
+**Why v1 failed, in one sentence**: it needed to identify a submission's own tile within an
+8-second in-lock window, but `data-media-id` does not exist until the generation is
+essentially done (tens of seconds) — so it almost never found anything, fell back to a
+signal (`page.on("response")`) that cannot be attributed to one of several concurrent
+generations, and that is exactly what produced the confirmed off-by-one image shift.
+
+**v2's insight, found by inspecting the live DOM while debugging v1's failure**: Flow
+assigns each finished tile (`<flow-grid-tile-container aria-label="…">`) a short caption of
+its OWN content — confirmed live, twice, on our real account:
+- a prompt for *"a bright blue teacup on top of a dark wooden table"* produced a tile
+  captioned **"Blue teacup on wooden table"**;
+- with 19 unrelated tiles already in the grid (water, industrial, housekeeper, dinosaur
+  content from earlier tests), a prompt for *"a red vintage bicycle leaning against a brick
+  wall"*, submitted 1.5s after a second concurrent prompt, produced a tile captioned
+  **"Red vintage bicycle leaning agai…"**, matched with score 0.8 against **only** its own
+  prompt — never confused with any of the 19 others.
+
+Because the caption is not opaque, correlation no longer needs to happen EARLY. Each beat
+can recognize its own result whenever it happens to resolve, by matching content, not by
+having grabbed a reference the instant a placeholder appeared:
+
+- **Submission stays fully serialized**, through the SAME `enqueue()` lock video uses — one
+  beat's composer setup + prompt + click at a time. The lock is now held for LESS time than
+  v1 (nothing is awaited after the click; v1 additionally waited up to 8s in-lock for an id
+  that usually never came), so v2 is *shorter*-locked than v1, not longer.
+- **The WAIT is concurrent**, bounded by `imageWaitLimit()`, unchanged from v1 — this is
+  still the entire speed win, and nothing about the correlation fix touches it.
+- **`currentFlowImageTiles(page)`** returns every tile that has BOTH a `data-media-id` and a
+  resolved src — a tile mid-render is invisible to it, by construction, never a false empty
+  match. **`captionMatchScore(caption, prompt)`** is recall of the caption's meaningful words
+  (stopwords stripped) against the submitted prompt — asymmetric on purpose: the caption is
+  short and the prompt is long and rich, so scoring "how much of the caption is IN the
+  prompt" is the well-posed direction; the reverse would fail on true positives (a 5-word
+  caption can't contain much of a 30-word prompt). **`MIN_CAPTION_MATCH = 0.6`** — pinned by
+  a regression test built from the confirmed misattribution: the WRONG beat's caption scores
+  well under this bar against the RIGHT beat's prompt.
+- **`claimFlowTile(mediaId)`** is a synchronous Set test-and-set — `Set.has`/`Set.add` never
+  yield, so two concurrent waiters checking the same tile on the same poll can never both
+  claim it; whichever call sees `false` first tries the next-best-scored candidate instead
+  of giving up. `claimedMediaIds` is module-global (the tab outlives any one run), so a tile
+  claimed by one beat is permanently off the table for every later beat too.
+- **No match clearing the bar within the timeout is a real failure** (`timeout`, same
+  contract as everywhere else in this file) — never guessed at, never silently accepted
+  below-threshold. There is no response-listener fallback in v2 at all: v1's fallback was
+  itself the unsafe-under-concurrency mechanism that actually caused the incident, so it was
+  removed rather than kept as a second-tier "better than nothing" — a clean failure beats a
+  second path back into the same bug.
+- Covered by `flow-image-concurrency.test.ts`: concurrency parsing/clamping,
+  `currentFlowImageTiles`'s empty-tile exclusion (via a fake DOM element that runs the REAL
+  evaluateAll callback, not a mock that bypasses it), `captionMatchScore` on the two
+  confirmed live pairs above (including the actual misattribution as a MUST-score-low
+  regression case), `claimFlowTile`'s test-and-set, and `imageWaitLimit`'s bound.
+- **What live testing did NOT fully exercise**: two-image-truly-concurrent claiming under
+  contention (the bicycle test's second prompt — a fluffy cat in a box — never resolved in
+  ~2.5 minutes in the ad hoc validation script, most likely because that quick script didn't
+  replicate our own credits/model-confirmation handling before submitting, not a flaw in the
+  matching logic itself). The matching algorithm's correctness against real, rich captions
+  and a crowded grid (20 candidates) IS confirmed; a real multi-beat run is still the next
+  checkpoint before trusting this unattended on a large batch.
+
+**Before raising this above 1 on a large real run**: try `FLOW_IMAGE_CONCURRENCY=2` on a
+small run (10–15 beats) first and check every resulting image against its own beat's prompt
+— cheap to eyeball in full, and exactly how v1's bug was actually caught.
+
+### Self-healing for "random-looking" Flow UI failures (2026-09-27)
+
+Diagnosed against a real 174-beat run: three DIFFERENT UI-detection errors fired within 33
+seconds of each other (beats 149/151/152 — "no full-size image captured", "could not switch
+to Image mode", "could not find the prompt box"), all after ~1h40 of continuous automated use
+of the SAME long-lived Chrome tab. The exact Google-side trigger (a stuck overlay, a stale
+toast, accumulated DOM/memory cruft in the SPA's own project grid) is not provable without a
+live repro — but the shared, plausible cause is the tab itself degrading over a long
+uninterrupted session, not three independent selector bugs.
+
+- **`isPresubmitUiGlitch(code)` draws the ONE line that matters: pre-submit vs. post-submit.**
+  Only `"ui"` — a mode-switch/prompt-box-lookup/reference-attach failure — ever gets an
+  automatic reload-and-retry, because nothing has been submitted yet at that point: a reload
+  is free. `"timeout"` ("no image/video captured") is EXCLUDED on purpose even though it can
+  look just as random — it fires AFTER `submitPrompt`, where a real generation may already
+  have consumed the account's usage allowance even though we failed to capture the result;
+  retrying that blindly would risk a silent double-spend. `"credits"`/`"policy"` are real
+  account states a reload cannot change; `"login"`/`"config"` need the operator. Pinned by
+  `flow-ui-glitch-retry.test.ts` so this boundary can't quietly widen to "any failure."
+- **`attemptFlowImage`'s composer setup (dismiss overlays → prompt box → mode/model →
+  aspect ratio → reference attach) is now wrapped**: on a qualifying failure, `page.reload()`
+  + a settle wait + one retry of the exact same setup, BEFORE falling through to the existing
+  model-fallback (`FLOW_IMAGE_MODEL_FALLBACK`) / provider-fallback (`FLOW_FALLBACK_PROVIDER`)
+  chain. Only the image path got this — the video path's equivalent pre-submit steps already
+  have a different, arguably safer mitigation (see below): they degrade the beat to a Flow
+  IMAGE instead of retrying an expensive Veo generation.
+- **Video's presubmit steps (`FLOW_PRESUBMIT_STEP_MS`, 90s deadline per step in
+  `generateFlowVideo`) are a SEPARATE, earlier fix for the same family of symptom** — a step
+  that never returns at all (observed: a beat sat 9m43s with zero log output before a
+  manual cancel) rather than one that returns a clean "ui" error. A stalled step throws
+  `FlowBrowserError(..., "timeout", stalled: true)`; `visual-source.ts` treats `stalled` the
+  same as a credits failure and renders that beat as a Flow image instead of hanging the
+  whole serialized Flow queue for everyone behind it.
+- **`FLOW_TAB_RECYCLE_EVERY` (default 20) — the preventive half, added same day.** Rather
+  than only reacting after a failure, `maybeRecycleFlowTab` counts every generation (image
+  or video, success or failure — the tab ages either way) in a module-global counter and
+  forces one reload before the Nth, resetting to 0. Called at the start of both
+  `attemptFlowImage` and `generateFlowVideo`, right after the login check. This is the
+  middle ground between never reloading (what produced the 149/151/152 cluster) and
+  reloading before every single beat (which would cost real seconds on every generation for
+  a problem that, so far, only showed up after sustained use). `0`/blank disables it; a
+  blank setting still falls back to 20, not to "disabled" — pinned by
+  `flow-tab-recycle.test.ts` (the module reads `globalThis.__facelessFlowBrowserState` only
+  ONCE at import time, so the test resets the counter with `vi.resetModules()` + a fresh
+  dynamic import, not by mutating the global after the module is already loaded).
+- **What this does NOT explain**: why the tab degrades in the first place. The counter is a
+  schedule, not a diagnosis — if the cluster still recurs at a materially different beat
+  count than ~20, that's a signal the real trigger is something else (e.g. elapsed TIME
+  rather than generation COUNT), and the fix should move from a count-based to a
+  time-based schedule instead.
+
 ### Google Vids provider (`VIDS_FIRST`) — verified live 2026-09-26
 
 `services/vids-browser.ts` drives the Vids editor (docs.google.com/videos) in the SAME Chrome Flow uses (its own tab,
@@ -571,6 +733,23 @@ list AND the cleaning-verb first-person rule; a channel with its own words uses 
 tolerant, whole-word, regex-escaped: `characterTermsRegex`). Matched against the planner's visual
 description first, narration only when there is none. Prefer role/name/pronoun words; avoid bare
 `man`/`person`, which pull the portrait into bystander beats.
+
+**A second, structured signal is checked FIRST and independently: the beat's own `overlay` field,
+when `overlay.type === "person"`.** Found live on a second channel (Finn, "The DIY Guy",
+`character_terms = "finn stone, finn, diy guy, handyman, homeowner"`): a beat the planner had ALREADY
+tagged `overlay: {type:"person", title:"Finn Stone"}` for its on-screen name card still rendered
+"A friendly middle-aged man in a canvas work shirt smiling directly at the camera in a well-organized
+home workshop" as its VISUAL description — no configured term anywhere in that prose, so the
+text-only check never fired and the beat generated without the reference despite the planner having
+already, in a different field, said exactly whose beat it was. `beatWantsCharacterReference` now
+tests `overlay.title` against the same term regex before falling through to the prose checks — a
+structured planner field is authoritative here for the same reason `entityProtected` prefers
+planner fields over pattern-matching prose elsewhere in this file: prose is Gemini's free paraphrase
+and can legitimately omit a name the planner captured cleanly somewhere else. Pinned by
+`beat-character-reference.test.ts` using the real measured pair (title "Finn Stone" + that exact
+generic prose) as the regression case, plus: a `person` overlay for someone ELSE doesn't fire (the
+channel's words still decide who), and a non-`person` overlay type never fires even if its title
+happens to share a word.
 
 ### Reference attach confirmation
 
@@ -1150,6 +1329,53 @@ the API with `Fetch.enable`/`fulfillRequest` rather than writing fixtures into t
 user's DB. When asserting on `innerText`, pick a string unique to the block you're
 testing — `innerText` includes `<option>` labels, so probing for text that also
 appears in a `<select>` matches in every state.
+
+## Studio run wall-time — what a "16-minute video took 2 hours" actually breaks down to
+
+Diagnosed 2026-09-27 against a real 174-beat run (`d5d1a47b`, 1025s/~17min output, 2h13m
+wall clock). Three independent causes, not one:
+
+1. **`VIDS_PROJECT_URL` was blank, so Vids never contributed.** `services/vids-browser.ts`
+   failed at beat 2 ("Open a Google Vids project…") and was marked spent for the rest of
+   the run — every AI beat after that went through Flow's ONE serialized queue alone. With
+   `mode=mix, real=30%` that's ~122 of 174 beats through a single tab at ~20–40s each ≈ the
+   dominant share of the run. **Fix (operator action, not code): open a real Vids project
+   once in the Flow Chrome window and set `VIDS_PROJECT_URL` to it.** With `VIDS_FIRST=both`
+   this turns one serialized AI lane into two parallel ones.
+2. **kie.ai ran out of credit mid-run (`402: Credits insufficient`), and it is the ONLY
+   fallback for character-reference beats.** `FLOW_FALLBACK_PROVIDER=chain` was already
+   configured and DID work exactly as designed for the two ordinary stills in this batch
+   (beat 151 recovered via Cloudflare/FLUX.2, beat 152 via Pollinations) — but 6 of the 8
+   beats that hit this were the housekeeper (`character reference active`), and per design
+   (see "Failure handling…" above) a character-reference beat skips the cheap chain
+   entirely and goes straight to kie.ai's Nano Banana Edit. With kie.ai empty, those 6 beats
+   (149,154,155,158,171,172) had no fallback left and fell to neighbour reuse. **Fix
+   (operator action): keep kie.ai funded** — the chain setting is already doing its job for
+   everything it's allowed to touch.
+3. **The final assembly pass (`assembleStudioVideo` in `studio-assemble.ts`) rendered its
+   174 per-beat clips in a plain sequential `for` loop** — one `spawnSync` ffmpeg process at
+   a time, on a 10-core machine. Measured: ~27 minutes for this run's compositing step alone,
+   almost entirely idle CPU. **Fixed in code (2026-09-27):** the loop is now a `pLimit`-bounded
+   concurrent pass (`runFfmpegAsync` via `spawn`, not `spawnSync`, so the event loop stays free
+   while several ffmpeg processes run at once). Reuses the **existing** `ASSEMBLE_CONCURRENCY`
+   setting (already on Settings, previously only read by the legacy `video-assemble.ts`
+   pipeline) rather than adding a second concurrency knob — one setting now governs both
+   assemblers. Order is preserved by construction: each beat's clip is written into a
+   FIXED array slot by its own index, and the concat list is rebuilt by iterating that
+   array 0..N afterward — never by push-order, which would scramble under concurrent
+   completion. Pinned by `studio-assemble-parallel.test.ts` (real ffmpeg, a deliberately
+   broken beat mixed in to confirm the filler fallback still fires positionally correctly).
+4. **The presubmit stall on Flow's video path** (a step before the Veo prompt is even sent —
+   mode switch, ratio, duration, reference attach — hanging with no error and no timeout)
+   cost this specific run one full cancel/resume cycle (~10 min of dead time + operator
+   attention). Already fixed separately (`FLOW_PRESUBMIT_STEP_MS` = 90s deadline per step,
+   `flow-browser.ts`) — a stall now degrades the beat to a Flow image instead of hanging the
+   whole Flow queue.
+
+None of these four fixes are additive shortcuts on each other — (1) and (2) are operator
+config, (3) and (4) are code, and all four were independently necessary to explain the 2h13m:
+even with the assembly pass at full speed, a single dead Flow lane (1) plus a mid-run kie.ai
+outage (2) would still have made this run slow and partially degraded.
 
 ## Cost Monitoring — how /costs stays truthful
 
