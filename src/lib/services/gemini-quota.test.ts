@@ -27,6 +27,17 @@ const PREPAYMENT_429 =
   'Gemini 429: {"error":{"code":429,"message":"Your prepayment credits are depleted. Learn more ' +
   'at https://ai.google.dev/gemini-api/docs/billing"}}';
 
+/**
+ * A THIRD real exhaustion wording, confirmed live: a project-level monthly spending cap the
+ * operator configured in Google Cloud. Contains neither "quota" nor "RESOURCE_EXHAUSTED" nor
+ * "prepayment" — this is the exact shape that went undetected on a real run (204 Gemini calls,
+ * all 429, none recognized), degrading the planner to keyword-only queries and silently turning
+ * off Vision QC for the rest of the run.
+ */
+const SPENDING_CAP_429 =
+  'Gemini 429: {\n  "error": {\n    "code": 429,\n    "message": "Your project has exceeded its ' +
+  'monthly spending cap. Please g';
+
 beforeEach(() => {
   logged.length = 0;
   __resetGeminiQuotaNotice();
@@ -61,6 +72,10 @@ describe("isGeminiQuotaError", () => {
     // 200-byte body slice when the message is this long, so "prepayment credit" is matched on
     // its own precisely so a truncated body still classifies correctly.
     expect(isGeminiQuotaError(PREPAYMENT_429)).toBe(true);
+  });
+
+  it("recognises a monthly spending cap exceeded, the third live wording that slipped past undetected", () => {
+    expect(isGeminiQuotaError(SPENDING_CAP_429)).toBe(true);
   });
 });
 
@@ -130,6 +145,11 @@ describe("noteGeminiQuota — pausing instead of finishing degraded", () => {
 
   it("pauses on the real-world prepayment-credit wording too", () => {
     noteGeminiQuota("run-a", PREPAYMENT_429);
+    expect(isCancelled("run-a")).toBe(true);
+  });
+
+  it("pauses on the real-world monthly-spending-cap wording too", () => {
+    noteGeminiQuota("run-a", SPENDING_CAP_429);
     expect(isCancelled("run-a")).toBe(true);
   });
 });

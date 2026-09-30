@@ -2493,6 +2493,12 @@ async function rerankByTitle(
     const text = j.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
     arr = JSON.parse(text.match(/\[[\s\S]*\]/)?.[0] ?? text) as { i: number; relevance: number; cleanliness: number }[];
   } catch (e) {
+    // Reaches here on every beat once the key is exhausted; the notice fires only the first
+    // time (see the other two noteGeminiQuota call sites in this file). Title-rerank is its
+    // own Gemini call site and can be the FIRST one a beat hits, so it needs the same check —
+    // without it, a run could fail-open here silently for a while before scoring/vision (the
+    // other call sites) happened to run and catch the quota wall.
+    noteGeminiQuota(runId, (e as Error).message, "visual");
     log(runId, "debug", `Beat ${beat.index}: title-rerank failed (${(e as Error).message.slice(0, 80)}) — keeping original order`, { stage: "visual" });
     return null; // fail-open — caller keeps the original order and skips the bail (today's behavior)
   }

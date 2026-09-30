@@ -258,10 +258,18 @@ export function classifyGeminiError(message: string): "transient" | "permanent" 
  * the quota wall went completely unreported for the rest of that run. "prepayment" is matched
  * on its own, independent of the RESOURCE_EXHAUSTED/quota wording, precisely so a truncated
  * body still classifies correctly.
+ *
+ * A THIRD wall, worded differently again: a project-level "monthly spending cap" the operator
+ * configured in Google Cloud — "Your project has exceeded its monthly spending cap." Confirmed
+ * live: this message contains neither "quota" nor "RESOURCE_EXHAUSTED" nor "prepayment", so it
+ * sailed straight past this check unmatched — the run kept going for 200+ more Gemini calls, all
+ * 429, silently degraded (keyword planner, no Vision QC, lexical scoring) exactly as this
+ * function exists to prevent. Same operator consequence as the other two (nothing clears until
+ * next month or a manual cap raise), so it gets the same pause.
  */
 export function isGeminiQuotaError(message: string): boolean {
   if (!/\bGemini 429\b/.test(message)) return false;
-  return /RESOURCE_EXHAUSTED|quota exceeded|exceeded your current quota|prepayment credit/i.test(message);
+  return /RESOURCE_EXHAUSTED|quota exceeded|exceeded your current quota|prepayment credit|spending cap/i.test(message);
 }
 
 /** Minimal shape of a Gemini `generateContent` response — only the fields our callers read. */
