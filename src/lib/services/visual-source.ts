@@ -7,7 +7,7 @@ import { getSetting } from "../settings";
 import { pLimit } from "../plimit";
 import { resolveFfmpeg } from "../ffmpeg-bin";
 import { log } from "../logger";
-import { checkCancelled } from "../cancellation";
+import { checkCancelled, CancelledError } from "../cancellation";
 import { kenBurns } from "./ken-burns";
 import { animateScene } from "./img2vid";
 import { labs69Image } from "./image-gen";
@@ -3769,7 +3769,17 @@ async function acquireAi(
       if (!flowFallbackToKie) {
         // Fail closed, and preserve the media kind: a video-routed beat must never
         // quietly become a Flow IMAGE just because paid fallback is off.
-        if (flowVideoError instanceof FlowBrowserError) throw flowVideoError;
+        if (flowVideoError instanceof FlowBrowserError) {
+          // Out of credits with nowhere to fall back to: pause the run (resumable) instead of
+          // letting this propagate to the pipeline's top-level catch, which would mark it
+          // 'error' — unresumable — and strand every beat already rendered. Same mechanism as
+          // noteGeminiQuota/tts.ts's credit-wall handling: throw CancelledError only once the
+          // pause actually took, so the top-level catch preserves the cancelled/resumable state.
+          if (flowVideoError.code === "credits" && noteCreditExhausted(runId, "google flow", "Google Flow credits exhausted — usage limit reached on every configured model", "visual")) {
+            throw new CancelledError(flowVideoError.message);
+          }
+          throw flowVideoError;
+        }
         throw new FlowBrowserError(`Beat ${beat.index}: Google Flow produced no video and paid fallback is disabled.`, "capture");
       }
       log(runId, "warn", `Beat ${beat.index}: Flow video unavailable — using the configured kie.ai Veo fallback`, { stage: "visual" });
@@ -3841,7 +3851,17 @@ async function acquireAi(
       if (!flowFallbackToKie) {
         // Fail closed: "Nano Banana through Flow only" must never drift into Grok,
         // Cloudflare, Pollinations, Meta, Magnific, or another paid model.
-        if (flowError instanceof FlowBrowserError) throw flowError;
+        if (flowError instanceof FlowBrowserError) {
+          // Same reasoning as the video branch above: out of credits + no fallback must pause
+          // the run, not crash it. Without this, "usage limit reached on every model" (Flow's
+          // own 30-min cooldown, see LIMIT_COOLDOWN_MS in flow-browser.ts) propagated straight
+          // to the pipeline's top-level catch and set status='error' — unresumable — discarding
+          // every beat already rendered, even though Flow recovers on its own after the cooldown.
+          if (flowError.code === "credits" && noteCreditExhausted(runId, "google flow", "Google Flow credits exhausted — usage limit reached on every configured model", "visual")) {
+            throw new CancelledError(flowError.message);
+          }
+          throw flowError;
+        }
         throw new FlowBrowserError(`Beat ${beat.index}: Google Flow produced no image and paid fallback is disabled.`, "capture");
       }
       log(runId, "warn", `Beat ${beat.index}: Flow unavailable — using the configured kie.ai Nano Banana fallback`, { stage: "visual" });

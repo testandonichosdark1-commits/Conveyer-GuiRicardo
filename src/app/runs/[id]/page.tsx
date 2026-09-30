@@ -146,9 +146,20 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
   // visual/avatar-stage line means work has started on it — a beat generates many such
   // lines while it's being worked on (searches, scoring, retries), so "seen at least
   // once" lags only slightly behind "fully done", close enough for a rough ETA.
-  const { totalBeats, touchedBeats } = useMemo(() => {
+  // `lastStartMs` anchors the RATE calculation below to the most recent "Pipeline
+  // started"/"Resuming studio run" line, not the run's original created_at. A
+  // cancel-then-resume cycle (the operator stopping and restarting the same run)
+  // leaves the run genuinely idle in between — created_at predates that idle gap, so
+  // an ETA built on elapsed-since-created_at counts dead time as processing time and
+  // wildly overshoots. Observed live: a run idle for ~46 minutes between cancel and
+  // resume reported "~6h22m remaining" off a true per-beat rate of well under a
+  // minute. touchedBeats/totalBeats (the progress FRACTION and the "N/M" display)
+  // stay exactly as before — only the time-based ETA changes.
+  const { totalBeats, touchedBeats, lastStartMs } = useMemo(() => {
     const planned = new Set<number>();
     const touched = new Set<number>();
+    let maxIndexSeen = -1;
+    let lastStart: number | null = null;
     for (const l of logs) {
       const m = /^Beat (\d+): planner /.exec(l.message);
       if (m) planned.add(Number(m[1]));
@@ -156,9 +167,40 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
         const t = /^Beat (\d+)/.exec(l.message);
         if (t) touched.add(Number(t[1]));
       }
+      // Fallback total: the highest beat index mentioned ANYWHERE (planner, visual,
+      // avatar) + 1. `planned.size` alone undercounts on a run that was cancelled
+      // mid-planning and resumed: resume replays the on-disk beats.json AS-IS without
+      // re-emitting a "planner" line per beat, so beats planned before the cancel but
+      // never logged again are invisible to the planner-line count even though they're
+      // really in the plan and really get worked on — observed live, 267 real beats,
+      // only 246 ever got a "planner" line, UI stuck reporting "246/246" forever.
+      // Take the max of both — never let the more robust signal LOWER the total.
+      const anyIdx = /^Beat (\d+)/.exec(l.message);
+      if (anyIdx) maxIndexSeen = Math.max(maxIndexSeen, Number(anyIdx[1]));
+      if (/^(Pipeline started|Resuming studio run)/.test(l.message)) {
+        lastStart = new Date(l.ts.endsWith("Z") ? l.ts : l.ts + "Z").getTime();
+      }
     }
-    return { totalBeats: planned.size, touchedBeats: touched };
+    const totalBeats = Math.max(planned.size, maxIndexSeen + 1);
+    return { totalBeats, touchedBeats: touched, lastStartMs: lastStart };
   }, [logs]);
+
+  // Beats first touched AT OR AFTER lastStartMs — the numerator for the current-segment
+  // rate. A beat touched before the last resume (already done, just being re-logged as
+  // the plan replays) must not count as progress made in THIS segment, or the rate would
+  // still be flattered by carried-over work.
+  const touchedSinceStart = useMemo(() => {
+    if (lastStartMs === null) return touchedBeats.size;
+    const touched = new Set<number>();
+    for (const l of logs) {
+      if (l.stage !== "visual" && l.stage !== "avatar_video") continue;
+      const t = /^Beat (\d+)/.exec(l.message);
+      if (!t) continue;
+      const lts = new Date(l.ts.endsWith("Z") ? l.ts : l.ts + "Z").getTime();
+      if (lts >= lastStartMs) touched.add(Number(t[1]));
+    }
+    return touched.size;
+  }, [logs, lastStartMs]);
 
   // Auto-scroll to the newest line ONLY when the user is already at the bottom,
   // so a live tail keeps following (like a fresh generation) but scrolling up to
@@ -476,10 +518,22 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
         ).getTime();
         const elapsedMs = Math.max(0, nowMs - startedAtMs);
         const fraction = totalBeats > 0 ? touchedBeats.size / totalBeats : 0;
-        // Below ~2% progress the elapsed/fraction extrapolation swings wildly (e.g. one
-        // beat out of 200 could imply anywhere from 3 minutes to 3 hours) — show
-        // "Estimating…" instead of a number nobody should trust yet.
-        const etaMs = fraction > 0.02 && fraction < 1 ? elapsedMs / fraction - elapsedMs : null;
+        // The RATE behind the estimate is anchored to the current run segment
+        // (lastStartMs — the latest "Pipeline started"/"Resuming studio run" line), not
+        // to elapsedMs (which runs from created_at and so includes any idle time the run
+        // spent cancelled between a stop and a later resume). "Elapsed" above still shows
+        // the full created_at-based duration — that's a true fact about the run's age —
+        // but estimating off it silently counts dead time as processing time. See
+        // lastStartMs's own comment for the live incident that motivated this.
+        const segmentElapsedMs = Math.max(0, nowMs - (lastStartMs ?? startedAtMs));
+        const beatsRemaining = Math.max(0, totalBeats - touchedBeats.size);
+        // Below a couple of samples in THIS segment the rate swings wildly (one beat
+        // could imply anywhere from seconds to hours) — show "Estimating…" instead of a
+        // number nobody should trust yet, same reasoning as the old 2%-of-total floor.
+        const etaMs =
+          touchedSinceStart >= 2 && fraction < 1
+            ? (segmentElapsedMs / touchedSinceStart) * beatsRemaining
+            : null;
         return (
           <div
             className="card"

@@ -5,7 +5,7 @@ import path from "node:path";
 import type { Page } from "playwright";
 import { getSetting } from "../settings";
 import { checkCancelled } from "../cancellation";
-import { FlowBrowserError, flowChromeContext, validateFlowVideoFile } from "./flow-browser";
+import { FlowBrowserError, flowChromeContext, pageIsAlive, validateFlowVideoFile } from "./flow-browser";
 
 /**
  * Google Vids as an AI b-roll provider (Nano Banana stills + Omni video), driven through the
@@ -81,10 +81,15 @@ export function classifyVidsFailure(panelText: string): { code: "credits" | "pol
 }
 
 async function vidsPage(): Promise<Page> {
-  if (state.page && !state.page.isClosed()) return state.page;
+  // pageIsAlive (not just isClosed()) — a crashed-but-not-closed tab leaves isClosed() false
+  // while every navigation/locator on it fails forever (its main frame is detached). Same
+  // defect, same fix as flow-browser.ts's launchBrowser(): confirmed live (2026-09-29) that
+  // Vids failed alongside Flow with "waiting for locator('textarea')" timeouts during the
+  // exact window Flow's page was stuck on a dead frame reference.
+  if (pageIsAlive(state.page)) return state.page!;
   const context = await flowChromeContext();
   const isVids = (u: string) => /docs\.google\.com\/videos\/d\//.test(u);
-  let page = context.pages().find((p) => isVids(p.url())) ?? null;
+  let page = context.pages().find((p) => isVids(p.url()) && pageIsAlive(p)) ?? null;
   if (!page) {
     const url = getSetting("VIDS_PROJECT_URL").trim();
     if (!url) {

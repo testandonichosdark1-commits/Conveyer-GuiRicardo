@@ -240,9 +240,32 @@ function projectUrl(): string {
   return parsed.toString();
 }
 
+/** `page.isClosed()` stays false for a page whose tab CRASHED without being closed — the
+ *  page object survives, but its main frame is detached and every navigation on it fails
+ *  forever with "Frame has been detached". Confirmed live (2026-09-29): a run hit this
+ *  exact shape and looped 250+ consecutive identical goto failures over ~57 minutes,
+ *  degrading 125 of 340 beats to neighbour-reuse, because launchBrowser()'s reuse check
+ *  only looked at isClosed() and kept handing out the same dead reference. */
+export function pageIsAlive(page: Page | null): boolean {
+  if (!page || page.isClosed()) return false;
+  try {
+    return !page.mainFrame().isDetached();
+  } catch {
+    return false;
+  }
+}
+
+/** Matches the failure shape a crashed-but-not-closed tab produces on every subsequent
+ *  operation, so the caller can discard the dead page reference and re-acquire a fresh one
+ *  instead of retrying the same broken page forever. */
+function isDeadPageError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /Frame has been detached|Target (page, context or browser )?has been closed|Target closed|Session closed/i.test(msg);
+}
+
 async function launchBrowser(): Promise<{ context: BrowserContext; page: Page }> {
-  if (state.context?.browser()?.isConnected() && state.page && !state.page.isClosed()) {
-    return { context: state.context, page: state.page };
+  if (state.context?.browser()?.isConnected() && pageIsAlive(state.page)) {
+    return { context: state.context, page: state.page! };
   }
   if (state.launching) return state.launching;
 
@@ -261,7 +284,9 @@ async function launchBrowser(): Promise<{ context: BrowserContext; page: Page }>
       const browser = await chromium.connectOverCDP(endpoint, { noDefaults: true });
       const context = browser.contexts()[0];
       if (!context) throw new Error("Chrome exposed no browser context");
-      const pages = context.pages();
+      // Exclude a crashed-but-not-closed page from candidacy — reselecting it here would
+      // just hand the same dead reference straight back out.
+      const pages = context.pages().filter(pageIsAlive);
       const page = pages.find((p) => /labs\.google/.test(p.url())) ?? pages[0] ?? await context.newPage();
       state.context = context;
       state.page = page;
@@ -309,11 +334,35 @@ async function gotoFlow(page: Page): Promise<void> {
   await page.waitForTimeout(1200);
 }
 
+/**
+ * launchBrowser() + gotoFlow(), with one recovery pass if the page died underneath us
+ * between calls (or pageIsAlive's check above raced a crash that happens mid-navigation).
+ * Every generation call site used `launchBrowser()` then `gotoFlow(page)` directly, so a
+ * goto that failed with "Frame has been detached" propagated straight out as an
+ * unclassified error and the SAME dead `state.page` reference was handed out again next
+ * time (pageIsAlive above prevents that going forward, but a fresh crash can still happen
+ * between the liveness check and the goto itself) — that gap is exactly what produced 250+
+ * consecutive identical failures over ~57 minutes on a live run. On that one failure shape,
+ * the dead reference is discarded and a fresh page is acquired once before giving up.
+ */
+async function openFlowPage(): Promise<Page> {
+  const { page } = await launchBrowser();
+  try {
+    await gotoFlow(page);
+    return page;
+  } catch (e) {
+    if (!isDeadPageError(e)) throw e;
+    state.page = null;
+    const { page: fresh } = await launchBrowser();
+    await gotoFlow(fresh);
+    return fresh;
+  }
+}
+
 /** Opens the persistent Flow browser without spending credits. Used by Settings for first login. */
 export async function openFlowSession(): Promise<FlowSessionStatus> {
   return enqueue(async () => {
-    const { page } = await launchBrowser();
-    await gotoFlow(page);
+    const page = await openFlowPage();
     const loggedIn = !(await pageHasLoginPrompt(page));
     return {
       ready: loggedIn,
@@ -487,6 +536,46 @@ async function dismissOpenOverlays(page: Page): Promise<void> {
     await backdrop.last().click({ force: true, position: { x: 5, y: 5 }, timeout: 2500 }).catch(() => undefined);
     await page.waitForTimeout(250);
   }
+  await dismissFlowImageEditor(page);
+}
+
+/**
+ * Close Flow's full-screen crop/edit view (opened by clicking a result thumbnail — its own
+ * "Cortar"/"Cortar" and "Cancelar" buttons, no CDK overlay/backdrop, so Escape and
+ * dismissOpenOverlays' backdrop click do not reliably reach it) if it happens to be open.
+ * `tryDownloadFromUi`'s "click the largest image to select it" step can land on this editor
+ * instead of a plain selection, depending on which part of the thumbnail the click hits —
+ * observed live: a beat left this editor open, and the NEXT beat's `promptBox()` then timed
+ * out ("Could not find the Flow prompt box"), reloaded, and lost most of a minute for a
+ * single beat. Called both right after that risky click (so THIS beat never even attempts
+ * the download while the editor covers the composer) and from `dismissOpenOverlays` itself
+ * (so a beat that somehow leaves it open never poisons the one behind it, the same "recover
+ * during the next beat's setup" safety net this file uses everywhere else).
+ * Best-effort: a false negative just means the editor stays open and the caller's own
+ * timeout/reload path (already in place for exactly this failure) takes over, same as before
+ * this existed — never throws.
+ */
+async function dismissFlowImageEditor(page: Page): Promise<void> {
+  // aria-labels verified live against a real stuck session (2026-09-29, pt-BR account):
+  // "Aplicar corte" (apply), "Cancelar corte" (cancel), "Edição concluída" (done) — NOT the
+  // bare "Cortar"/"Cancelar" this matched before, anchored with ^...$. Playwright's `name`
+  // matches the ACCESSIBLE name, which is the aria-label when one is set, so that anchored
+  // regex could never match either button and this function was a silent no-op since it was
+  // written — confirmed live: the crop editor was still sitting open, un-closed, well after
+  // this "fix" had shipped. (Their visible text is even less usable as a target: a
+  // Material-icon ligature is glued to the label with no space — "closeCancelar",
+  // "arrow_forwardCortar" — the same trap documented elsewhere in this file for the model
+  // chip's "🍌 Nano Banana 2" text.) Matching on "corte" (present in both crop buttons, and
+  // absent everywhere else in the composer) is what actually detects this screen.
+  const cropIndicator = page.getByRole("button", { name: /corte|crop/i });
+  if (!(await cropIndicator.first().isVisible().catch(() => false))) return;
+  const cancelButton = page.getByRole("button", { name: /cancelar|cancel/i });
+  if (await cancelButton.first().isVisible().catch(() => false)) {
+    await cancelButton.first().click({ timeout: 2500 }).catch(() => undefined);
+  } else {
+    await page.keyboard.press("Escape").catch(() => undefined);
+  }
+  await page.waitForTimeout(250);
 }
 
 /**
@@ -525,9 +614,22 @@ async function openComposerSettingsPopover(page: Page): Promise<boolean> {
   // on it (e.g. a media-mode switch immediately followed by an aspect-ratio change) was
   // observed live to occasionally swallow the click — the popover's own close transition
   // was still in flight. Same shape of flakiness selectModelViaComposer already retries for.
+  //
+  // force: true is load-bearing, confirmed against a live stuck session (2026-09-29): a
+  // plain `.click()` on this exact button silently did nothing — no popover, no thrown
+  // error, `.catch(() => undefined)` swallowed whatever Playwright's actionability wait
+  // failed on — while `.click({ force: true })` on the SAME button, SAME page, opened the
+  // popover immediately. The chip's ripple/transition styling is consistent with
+  // Playwright's "stable bounding box across two frames" actionability check never
+  // resolving on a Material button; force skips that check and dispatches straight to the
+  // element's center, which is safe here because visibility is already confirmed above.
+  // Without this, every beat that reached this popover failed closed with "Could not
+  // switch Google Flow to Image mode" even though the mode toggle was right there and
+  // already on the wanted value — burning a reload + fallback-model attempt (minutes) per
+  // beat for nothing.
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) await page.waitForTimeout(400);
-    await chip.first().click().catch(() => undefined);
+    await chip.first().click({ force: true }).catch(() => undefined);
     if ((await waitForVisible(page, [anyRadio], 2500)) !== null) return true;
   }
   return false;
@@ -601,8 +703,11 @@ export async function selectModelViaComposer(
   // left it open).
   let select = await firstVisible([selectLoc]);
   if (!select) {
+    // force: true for the same reason as openComposerSettingsPopover's identical click on
+    // this same chip (see its doc comment) — confirmed live that a plain click on this
+    // button silently does nothing while force opens the popover immediately.
     for (let attempt = 0; attempt < 3 && !select; attempt++) {
-      await chip.click({ timeout: 4000 }).catch(() => undefined);
+      await chip.click({ timeout: 4000, force: true }).catch(() => undefined);
       select = await waitForVisible(page, [selectLoc], 2500);
       if (!select) await dismissOpenOverlays(page);
     }
@@ -1559,7 +1664,12 @@ async function tryDownloadFromUi(page: Page, outPath: string, referenceImagePath
       bestIndex = i;
     }
   }
+  // Clicking a result thumbnail can land on Flow's full-screen crop/edit view instead of a
+  // plain selection (observed live) — close it immediately so this fallback's own download
+  // search below sees the normal result view, and so this beat never leaves it open for the
+  // next one to trip over.
   if (bestIndex >= 0) await largeImages.nth(bestIndex).click().catch(() => undefined);
+  await dismissFlowImageEditor(page);
 
   const downloadButton = await firstVisible([
     page.getByRole("button", { name: /Download|Baixar|Télécharger/i }),
@@ -1674,8 +1784,7 @@ async function attemptFlowImage(
   model: string
 ): Promise<string> {
   if (runId) checkCancelled(runId);
-  const { page } = await launchBrowser();
-  await gotoFlow(page);
+  const page = await openFlowPage();
   if (await pageHasLoginPrompt(page)) {
     throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
   }
@@ -1969,8 +2078,7 @@ async function attemptFlowImageConcurrent(
 ): Promise<string> {
   const submitted: SubmittedFlowImage = await enqueue(async () => {
     if (runId) checkCancelled(runId);
-    const { page } = await launchBrowser();
-    await gotoFlow(page);
+    const page = await openFlowPage();
     if (await pageHasLoginPrompt(page)) {
       throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
     }
@@ -2445,8 +2553,7 @@ export async function generateFlowVideo(
   return enqueue(async () => {
     if (runId) checkCancelled(runId);
     const D = withPresubmitDeadline;
-    const { page } = await D("open browser", () => launchBrowser());
-    await D("open Flow", () => gotoFlow(page));
+    const page = await D("open Flow", () => openFlowPage());
     if (await pageHasLoginPrompt(page)) {
       throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
     }
