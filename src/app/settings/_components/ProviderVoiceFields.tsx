@@ -23,6 +23,17 @@ export function ProviderVoiceFields({ provider, val, set }: { provider: string; 
   // TTS_VOICE_PROVIDER, and the voice-id field's copy follows the chosen engine (text only —
   // it stays the same TTS_VOICE_ID key, with no added validation).
   const is69labs = provider === "69labs";
+  // ai33's voice is channel-only now (channels.voice_id), the same scoping already
+  // applied to its API key/Cloudflare/character-reference/ai_style fields — see
+  // CLAUDE.md's Channels section. The provider itself was ALREADY removed from the
+  // VOICEOVER_PROVIDER dropdown for this reason, but that only hides the dropdown
+  // OPTION: an install whose VOICEOVER_PROVIDER value was saved as "ai33" before that
+  // change still renders this component with provider==="ai33" today, because the field
+  // below reads off the CURRENT saved value, not the dropdown's option list. Hiding the
+  // voice_id picker here (while leaving the API key, which genuinely is account-wide)
+  // is what actually stops the confusion the dropdown removal was meant to prevent — an
+  // operator editing a global field that a channel's own voice_id silently overrides.
+  const isAi33 = provider === "ai33";
   // AI84 fronts two engines; the model picks one, and that decides which voices exist.
   const isAi84 = provider === "ai84";
   const ai84Engine = ai84Backend(val("AI84_MODEL"));
@@ -51,11 +62,20 @@ export function ProviderVoiceFields({ provider, val, set }: { provider: string; 
       ) : (
         <>
           <SettingsField label={`${meta.label} — API key`} settingKey={meta.apiKey} val={val} set={set} />
-          {is69labs && <Labs69VoiceEngine val={val} set={set} />}
+          {isAi33 && (
+            <div className="faint" style={{ fontSize: 12 }}>
+              {tr(
+                "La voix ai33 se configure uniquement par chaîne, dans Chaînes → « ai33.pro — voice_id ». Ouvrez une chaîne pour définir sa voix.",
+                "ai33's voice is set per channel only, under Channels → “ai33.pro — voice_id”. Open a channel to set its voice."
+              )}
+            </div>
+          )}
+          {!isAi33 && is69labs && <Labs69VoiceEngine val={val} set={set} />}
           {/* Any provider that can list its voices gets the picker — the operator never has
               to go hunting for an id. 69labs is excluded because its id's expected FORM
-              depends on the engine chosen just above, which its own block explains. */}
-          {meta.voicesEndpoint && !is69labs ? (
+              depends on the engine chosen just above, which its own block explains. ai33 is
+              excluded entirely (see isAi33's own comment) — its voice_id field is channel-only. */}
+          {!isAi33 && meta.voicesEndpoint && !is69labs ? (
             <div>
               {/* This pair is the GLOBAL voice and the model it is read with, so the picker
                   below still lists one engine at a time — matching them on one page is what
@@ -126,10 +146,10 @@ export function ProviderVoiceFields({ provider, val, set }: { provider: string; 
               )}
               <div className="faint" style={{ fontSize: 12, marginTop: 5 }}>{voiceCopy.hint}</div>
             </div>
-          ) : (
+          ) : !isAi33 ? (
             <SettingsField label={`${meta.label} — voice_id`} settingKey={meta.voiceIdKey} val={val} set={set} />
-          )}
-          {meta.extraKeys?.map((ek) => <SettingsField key={ek.key} label={ek.label} settingKey={ek.key} val={val} set={set} />)}
+          ) : null}
+          {!isAi33 && meta.extraKeys?.map((ek) => <SettingsField key={ek.key} label={ek.label} settingKey={ek.key} val={val} set={set} />)}
         </>
       )}
     </>
