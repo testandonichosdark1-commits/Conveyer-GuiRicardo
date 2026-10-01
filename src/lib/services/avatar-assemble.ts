@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { resolveFfmpeg } from "../ffmpeg-bin";
+import { resolveFfmpeg, isTransientSpawnFailure } from "../ffmpeg-bin";
 import { log } from "../logger";
 import type { AvatarBeat } from "./avatar-plan";
 
@@ -33,11 +33,23 @@ function ffmpegBin(): string {
   return resolveFfmpeg();
 }
 
+// Retried on a transient OS-level spawn failure — see isTransientSpawnFailure's doc
+// comment (ffmpeg-bin.ts) for the live incident this guards against. Same fix as the
+// studio pipeline's runFfmpeg; this legacy avatar-pipeline path shares the exact same
+// spawnSync-based ffmpeg call shape and is just as exposed to it.
 function runFfmpeg(args: string[]): void {
-  const r = spawnSync(ffmpegBin(), args, { stdio: "pipe" });
-  if (r.status !== 0) {
-    throw new Error(`ffmpeg failed (rc=${r.status}): ${(r.stderr?.toString() ?? "").slice(-400)}`);
+  const attempts = 3;
+  let lastStatus: number | null = null;
+  let lastStderr = "";
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const r = spawnSync(ffmpegBin(), args, { stdio: "pipe" });
+    if (r.status === 0) return;
+    lastStatus = r.status;
+    lastStderr = r.stderr?.toString() ?? "";
+    if (!isTransientSpawnFailure(r.status) || attempt === attempts) break;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500 * attempt);
   }
+  throw new Error(`ffmpeg failed (rc=${lastStatus}): ${lastStderr.slice(-400)}`);
 }
 
 const ENCODE = [

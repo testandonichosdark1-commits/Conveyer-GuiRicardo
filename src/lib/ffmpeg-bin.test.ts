@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const spawnSyncMock = vi.fn();
 vi.mock("node:child_process", () => ({ spawnSync: (...args: unknown[]) => spawnSyncMock(...args) }));
 
-const { assertFfmpegAvailable } = await import("./ffmpeg-bin");
+const { assertFfmpegAvailable, isTransientSpawnFailure } = await import("./ffmpeg-bin");
 
 beforeEach(() => {
   spawnSyncMock.mockReset();
@@ -20,6 +20,31 @@ async function flushRetries() {
     await vi.runAllTimersAsync();
   }
 }
+
+describe("isTransientSpawnFailure", () => {
+  it("treats a Node spawn ENOENT (status null) as transient", () => {
+    expect(isTransientSpawnFailure(null)).toBe(true);
+  });
+
+  it("treats the live-observed Windows NTSTATUS exit code as transient", () => {
+    // 3221225794 = 0xC0000142 (STATUS_DLL_INIT_FAILED) — confirmed live: ffmpeg's OWN
+    // preflight passed, then the real decode call failed with exactly this code while
+    // `ffmpeg -version` succeeded instantly in two separate shells seconds later.
+    expect(isTransientSpawnFailure(3221225794)).toBe(true);
+  });
+
+  it("does NOT retry a real small ffmpeg exit code", () => {
+    // ffmpeg itself choosing to exit 1 (bad input, missing codec, etc.) is a REAL failure
+    // — retrying it would just waste time reproducing the same real problem.
+    expect(isTransientSpawnFailure(1)).toBe(false);
+    expect(isTransientSpawnFailure(255)).toBe(false);
+  });
+
+  it("treats the status 0 case as out of scope (callers check this separately)", () => {
+    // Not actually a failure path at all — included for documentation of the boundary.
+    expect(isTransientSpawnFailure(0)).toBe(false);
+  });
+});
 
 describe("assertFfmpegAvailable", () => {
   it("resolves immediately when the first attempt succeeds — no retry spent", async () => {

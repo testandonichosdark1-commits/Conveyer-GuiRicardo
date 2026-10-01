@@ -22,6 +22,35 @@ const isWin = process.platform === "win32";
 const FFMPEG_EXE = isWin ? "ffmpeg.exe" : "ffmpeg";
 const FFPROBE_EXE = isWin ? "ffprobe.exe" : "ffprobe";
 
+/**
+ * An NTSTATUS value (Windows) leaking out as a process exit code — always >= 0xC0000000
+ * when treated as an unsigned 32-bit int (the sign bit plus the top "severity" bits are
+ * set for every *_ERROR status). A real ffmpeg failure (bad input, unsupported codec,
+ * missing file) exits with a small code ffmpeg itself chose, normally 0-255; it is Node's
+ * `spawnSync`/`spawn` reporting a status it read from the OS, not something ffmpeg
+ * returned, that lands all the way out here as a 10-digit number. 3221225794
+ * (0xC0000142, STATUS_DLL_INIT_FAILED) is the one observed live, on a system under
+ * process-creation pressure — `ffmpeg -version` succeeded instantly seconds later in two
+ * separate shells, so the binary itself was never broken.
+ */
+const WINDOWS_NTSTATUS_FLOOR = 0xc0000000;
+
+/**
+ * Should a failed ffmpeg/ffprobe spawn be retried? True for "the OS never actually ran
+ * ffmpeg's own code" (spawn ENOENT → status null, or a Windows NTSTATUS-shaped status) —
+ * worth a retry, the binary and its input were never the problem. False for a real,
+ * small, ffmpeg-chosen exit code: that's ffmpeg genuinely rejecting its input, and
+ * retrying it would just reproduce the same real failure.
+ *
+ * Shared by every ffmpeg call site in the pipeline (studio-assemble's decodeToWav/concat,
+ * ken-burns, avatar-assemble) — confirmed live that the SAME transient OS failure can hit
+ * any of them independently (each is its own spawn at its own instant), so each needs this
+ * same check rather than only the preflight (`assertFfmpegAvailable`) having it.
+ */
+export function isTransientSpawnFailure(status: number | null): boolean {
+  return status === null || status >= WINDOWS_NTSTATUS_FLOOR;
+}
+
 /** Bin folders probed (in order) when FFMPEG_PATH is unset. */
 function candidateDirs(): string[] {
   const cwd = process.cwd();

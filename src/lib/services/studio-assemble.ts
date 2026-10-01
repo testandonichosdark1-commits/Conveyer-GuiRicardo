@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync, spawn } from "node:child_process";
 import { getSetting } from "../settings";
-import { resolveFfmpeg, resolveFfprobe, STRIP_TOOLCHAIN_TAGS } from "../ffmpeg-bin";
+import { resolveFfmpeg, resolveFfprobe, STRIP_TOOLCHAIN_TAGS, isTransientSpawnFailure } from "../ffmpeg-bin";
 import { log } from "../logger";
 import { masterLoudness } from "./audio-loudness";
 import { buildOverlayPlan } from "./overlay-renderer";
@@ -50,11 +50,35 @@ function ffmpegBin(): string {
   return resolveFfmpeg();
 }
 
+/**
+ * Retried up to 3x on a transient OS-level spawn failure before giving up. Confirmed live:
+ * assertFfmpegAvailable()'s own preflight check (`ffmpeg -version`, also retried) can PASS
+ * and then THIS call — decoding the actual voiceover, moments later — still fails with the
+ * exact same OS error (Windows 0xC0000142 / rc=3221225794, process-creation pressure),
+ * because it's a separate spawn at a separate instant. The preflight alone was not enough;
+ * every real ffmpeg spawn in the pipeline needs the same resilience. A genuine ffmpeg
+ * failure (bad input, a real small exit code, real stderr) is NOT retried — only "the OS
+ * wouldn't even run the process" is, so a real encoding problem still surfaces immediately
+ * instead of being retried pointlessly.
+ *
+ * The retry delay is a synchronous `Atomics.wait` (blocks this thread without busy-spinning
+ * CPU) rather than an async setTimeout: every caller here is itself synchronous (spawnSync
+ * already blocks the event loop for the ffmpeg run itself), so there is no async context to
+ * `await` into without a much larger refactor across every call site.
+ */
 function runFfmpeg(args: string[]): void {
-  const r = spawnSync(ffmpegBin(), args, { stdio: "pipe" });
-  if (r.status !== 0) {
-    throw new Error(`ffmpeg failed (rc=${r.status}): ${(r.stderr?.toString() ?? "").slice(-400)}`);
+  const attempts = 3;
+  let lastStatus: number | null = null;
+  let lastStderr = "";
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const r = spawnSync(ffmpegBin(), args, { stdio: "pipe" });
+    if (r.status === 0) return;
+    lastStatus = r.status;
+    lastStderr = r.stderr?.toString() ?? "";
+    if (!isTransientSpawnFailure(r.status) || attempt === attempts) break;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500 * attempt);
   }
+  throw new Error(`ffmpeg failed (rc=${lastStatus}): ${lastStderr.slice(-400)}`);
 }
 
 /**
@@ -63,18 +87,28 @@ function runFfmpeg(args: string[]): void {
  * stays free. This is what makes `renderBeat`/`renderFiller` safe to run under `pLimit`
  * below — spawnSync would serialize everything on the event loop regardless of how many
  * "concurrent" promises call it.
+ *
+ * Same transient-failure retry as `runFfmpeg` (see its comment for the live incident),
+ * using a real `await`ed delay rather than a blocking one — this function is already
+ * async and runs concurrently with other beats, so there is no reason to freeze the event
+ * loop here the way the synchronous caller has to.
  */
-function runFfmpegAsync(args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(ffmpegBin(), args, { stdio: ["ignore", "ignore", "pipe"] });
-    let stderr = "";
-    child.stderr?.on("data", (d) => { stderr += d.toString(); if (stderr.length > 8000) stderr = stderr.slice(-8000); });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg failed (rc=${code}): ${stderr.slice(-400)}`));
-    });
-  });
+async function runFfmpegAsync(args: string[]): Promise<void> {
+  const attempts = 3;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const result = await new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+      const child = spawn(ffmpegBin(), args, { stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      child.stderr?.on("data", (d) => { stderr += d.toString(); if (stderr.length > 8000) stderr = stderr.slice(-8000); });
+      child.on("error", reject); // spawn itself never launched (e.g. ENOENT) — treat like code null below
+      child.on("close", (code) => resolve({ code, stderr }));
+    }).catch((e: Error) => ({ code: null, stderr: e.message }));
+    if (result.code === 0) return;
+    if (!isTransientSpawnFailure(result.code) || attempt === attempts) {
+      throw new Error(`ffmpeg failed (rc=${result.code}): ${result.stderr.slice(-400)}`);
+    }
+    await new Promise((r) => setTimeout(r, 500 * attempt));
+  }
 }
 
 /** How many beat clips to encode at once in the final assembly pass. Reuses the SAME
@@ -543,6 +577,16 @@ export async function assembleStudioVideo(
   const limitAssemble = pLimit(assembleConcurrency());
   const rendered: (string | undefined)[] = new Array(beats.length);
   const isFiller: boolean[] = new Array(beats.length).fill(false);
+  // Completion counter for the UI's assembly-progress panel. This pass previously logged
+  // NOTHING on the success path — every "Beat N ..." line during assembly was an error —
+  // so the run-detail page had no signal at all for "how far through compositing are we",
+  // and sat on "Estimating…" for the entire pass (which, at concurrency 1, can run many
+  // minutes with zero visible progress). Incremented on EITHER a real render or a filler
+  // substitution — both mean this beat's slot is now spoken for and won't be worked on
+  // again, which is what "done" means for a progress count here.
+  let assembledCount = 0;
+  const assembleLog = (idx: number) =>
+    log(runId, "debug", `Beat ${idx}: assembled (${++assembledCount}/${beats.length})`, { stage: "assemble" });
   await Promise.allSettled(
     beats.map((beat, i) =>
       limitAssemble(async () => {
@@ -563,6 +607,7 @@ export async function assembleStudioVideo(
             throw new Error(`short render: ${got}/${want} frames`);
           }
           rendered[i] = clip;
+          assembleLog(beat.index);
         } catch (e) {
           // A skipped beat would shift every later beat off the narration — render an
           // exact-length neutral filler instead so the timeline stays aligned. This is
@@ -584,6 +629,11 @@ export async function assembleStudioVideo(
           } catch {
             log(runId, "error", `Beat ${beat.index} filler failed too — skipped (timing may shift)`, { stage: "assemble" });
           }
+          // Counted either way (real filler or the beat being skipped outright): this
+          // beat's slot is settled and the pass will never touch it again, which is what
+          // the progress count means here — a skipped beat must not leave the counter
+          // permanently short of `beats.length`.
+          assembleLog(beat.index);
         }
       })
     )

@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { getSetting } from "../settings";
-import { resolveFfmpeg } from "../ffmpeg-bin";
+import { resolveFfmpeg, isTransientSpawnFailure } from "../ffmpeg-bin";
 
 /**
  * Ken Burns — turn a STILL image into an N-second motion clip with a slow,
@@ -84,30 +84,41 @@ export function kenBurns(
   const frames = Math.max(1, Math.round(dur * fps));
   const filter = kenBurnsFilter(w, h, frames, fps, zoomOut);
 
-  const r = spawnSync(
-    ffmpegBin(),
-    [
-      "-loop", "1",
-      "-framerate", String(fps),
-      "-i", imagePath,
-      "-t", dur.toFixed(3),
-      "-filter_complex", filter,
-      "-c:v", "libx264",
-      // This clip is an INTERMEDIATE: studio-assemble re-encodes it into the beat, so its
-      // artifacts get baked in and then compressed a second time. Spending bits here is
-      // what stops fine texture dissolving over two generations; the file is transient.
-      "-preset", "medium",
-      "-crf", "16",
-      "-pix_fmt", "yuv420p",
-      "-r", String(fps),
-      "-t", dur.toFixed(3),
-      "-an",
-      "-movflags", "+faststart",
-      "-y", outPath,
-    ],
-    { stdio: "pipe" }
-  );
-  if (r.status !== 0) {
-    throw new Error(`Ken Burns ffmpeg failed (rc=${r.status}): ${(r.stderr?.toString() ?? "").slice(-400)}`);
+  const args = [
+    "-loop", "1",
+    "-framerate", String(fps),
+    "-i", imagePath,
+    "-t", dur.toFixed(3),
+    "-filter_complex", filter,
+    "-c:v", "libx264",
+    // This clip is an INTERMEDIATE: studio-assemble re-encodes it into the beat, so its
+    // artifacts get baked in and then compressed a second time. Spending bits here is
+    // what stops fine texture dissolving over two generations; the file is transient.
+    "-preset", "medium",
+    "-crf", "16",
+    "-pix_fmt", "yuv420p",
+    "-r", String(fps),
+    "-t", dur.toFixed(3),
+    "-an",
+    "-movflags", "+faststart",
+    "-y", outPath,
+  ];
+
+  // Retried on a transient OS-level spawn failure (see isTransientSpawnFailure's doc
+  // comment) — confirmed live that this exact call failed with Windows' 0xC0000142 while
+  // ffmpeg itself was never broken. Ken Burns runs once per AI still, far more often than
+  // any other ffmpeg call site in the pipeline, so it is the single biggest source of
+  // beats degrading to neighbour-reuse over this failure mode.
+  const attempts = 3;
+  let lastStatus: number | null = null;
+  let lastStderr = "";
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const r = spawnSync(ffmpegBin(), args, { stdio: "pipe" });
+    if (r.status === 0) return;
+    lastStatus = r.status;
+    lastStderr = r.stderr?.toString() ?? "";
+    if (!isTransientSpawnFailure(r.status) || attempt === attempts) break;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500 * attempt);
   }
+  throw new Error(`Ken Burns ffmpeg failed (rc=${lastStatus}): ${lastStderr.slice(-400)}`);
 }
