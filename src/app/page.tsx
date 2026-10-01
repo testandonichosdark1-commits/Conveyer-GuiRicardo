@@ -71,7 +71,16 @@ export default function CreerVideoPage() {
   const [visualMode, setVisualMode] = useState<VisualMode>("mix");
   const [realPercent, setRealPercent] = useState(50);
   const [secondsPerVisual, setSecondsPerVisual] = useState(4.5);
-  const [avatarPercent, setAvatarPercent] = useState(15);
+  // Starts at 0, not a nonzero default — this is what actually gates avatar/HeyGen spend.
+  // /api/studio resolves a channel's default avatar as a FALLBACK whenever avatarId isn't
+  // explicitly sent (`body.avatarId ?? channel?.avatar_id`), independent of anything on
+  // this page, so leaving the Avatar dropdown empty is not enough on its own to guarantee
+  // no avatar beats: with a nonzero avatarPercent, a resolved channel-default avatar would
+  // still be used. 0% is what makes "I didn't ask for avatar" true regardless of that
+  // server-side fallback — the operator has to deliberately raise this slider (which
+  // requires picking an avatar first; see the dropdown's disabled state below) before any
+  // beat is routed to it.
+  const [avatarPercent, setAvatarPercent] = useState(0);
   const [sceneTransitions, setSceneTransitions] = useState(false);
   // Informational Overlays (Stage 1) — per-run, default OFF. Same shape as sceneTransitions.
   const [overlays, setOverlays] = useState(false);
@@ -142,8 +151,12 @@ export default function CreerVideoPage() {
       .then((rows: AvatarLite[] | null) => {
         if (!Array.isArray(rows)) return; // transient error → keep what we have
         setAvatars(rows);
-        const firstReady = rows.find((a) => a.status === "ready");
-        if (firstReady && !draftChoseAvatar.current) setAvatarId(firstReady.id);
+        // Deliberately NO auto-selection of "the first ready avatar" — avatar/HeyGen is a
+        // billable, opt-in choice (and, combined with avatarPercent's own default below,
+        // silently turns on real spend the moment this page loads). An operator reported
+        // exactly that: a video went out with HeyGen avatar beats they never asked for,
+        // because an avatar got auto-picked here. The dropdown still shows every ready
+        // avatar; the operator just has to actually choose one.
       })
       .catch(() => {});
     fetch("/api/channels")
@@ -184,7 +197,18 @@ export default function CreerVideoPage() {
     setVisualMode(ch.visual_mode);
     // Channel no longer overrides seconds-per-visual — the on-screen control (seeded
     // from the global setting) is the single source of truth.
-    if (ch.avatar_id) setAvatarId(ch.avatar_id);
+    //
+    // Deliberately does NOT auto-apply ch.avatar_id anymore. Avatar/HeyGen is a billable,
+    // opt-in choice — picking a channel must never silently turn it on. Observed live: an
+    // operator picked the Finn channel (which has a default avatar configured) to set its
+    // voice/visual style, and the video came back running HeyGen avatar beats they never
+    // asked for, because selecting the channel alone flipped the Avatar dropdown on for
+    // them. /api/studio still resolves `channel?.avatar_id` as a fallback when avatarId
+    // isn't sent, so an avatarId can still end up set server-side from the channel — but
+    // avatarPercent now starts at 0 (see its declaration above) and 0% routes zero beats
+    // to avatar regardless of whether an avatarId got resolved, so that fallback can no
+    // longer produce an avatar beat on its own. The operator has to deliberately raise the
+    // slider — which requires picking an avatar on screen first — before any beat uses it.
   }
 
   const preparing = avatars.filter((a) => a.status === "pending" || a.status === "training");
