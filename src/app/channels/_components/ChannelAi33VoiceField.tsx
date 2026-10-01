@@ -40,6 +40,12 @@ export function ChannelAi33VoiceField({
           onRetry={retry}
           where="channel"
           providerLabel="ai33.pro"
+          // The operator setting a channel's voice almost always already has the id in
+          // hand (ai33.pro's own dashboard, or a value copied from another channel) —
+          // show the text field directly instead of making that the one extra click
+          // behind "Paste an ID instead". "Choose from the list" is still right there for
+          // browsing the catalogue instead.
+          defaultManual
         />
       ) : (
         <input className="input" value={voiceId} onChange={(e) => onChange(e.target.value)}

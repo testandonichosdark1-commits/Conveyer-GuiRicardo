@@ -53,6 +53,7 @@ export function VoiceSelect({
   onRetry,
   where = "video",
   providerLabel,
+  defaultManual = false,
 }: {
   voices: VoiceOption[];
   value: string | null;
@@ -65,11 +66,19 @@ export function VoiceSelect({
   where?: "video" | "channel";
   /** The provider's display name ("AI84"), so a failure can name who refused. */
   providerLabel?: string;
+  /**
+   * Start in the typed-id field instead of the dropdown. An operator who already has the
+   * id in hand (copied from ai33.pro, or from another channel) had to notice and click
+   * "Paste an ID instead" first — not a dead end (the button is right there), but an
+   * extra, easy-to-miss step for what is, for a channel, the more common path than
+   * browsing the catalogue. The dropdown is still one click away ("Choose from the list").
+   */
+  defaultManual?: boolean;
 }) {
   const tr = useT();
   // Typing is a mode the operator can switch INTO at will, not only a fallback we drop them
   // in. Local state, because it is a view preference and nothing outside cares about it.
-  const [manual, setManual] = useState(false);
+  const [manual, setManual] = useState(defaultManual);
   const forVideo = where === "video";
   const fallbackLabel = forVideo
     ? tr("Voix de la chaîne / des réglages", "Channel's voice / the one in Settings")
