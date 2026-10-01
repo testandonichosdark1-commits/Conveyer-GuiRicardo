@@ -391,8 +391,10 @@ export async function runStudioPipeline(
 
     // Preflight: ffmpeg must be usable BEFORE we spend on voiceover / HeyGen. Fails
     // fast with an actionable message instead of a cryptic mid-run "rc=null" crash
-    // after credits are already burned. (No-op cost: a single `ffmpeg -version`.)
-    assertFfmpegAvailable();
+    // after credits are already burned. Retries internally (see assertFfmpegAvailable's
+    // own comment) before giving up, so a momentary OS hiccup doesn't crash a run that
+    // would have been fine a second later.
+    await assertFfmpegAvailable();
 
     // 1. Voiceover (+ word timings). THE ONLY POINT THE TWO MODES DIFFER: either we
     // synthesize the script, or we ingest the operator's recording. Both return the same

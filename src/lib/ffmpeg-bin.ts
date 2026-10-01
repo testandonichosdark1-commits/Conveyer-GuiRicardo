@@ -123,15 +123,36 @@ export function ffmpegNotFoundMessage(): string {
  * (voiceover, HeyGen). Throws {@link ffmpegNotFoundMessage} on failure so a run
  * without a usable ffmpeg fails FAST and CLEARLY, instead of burning credits and
  * then crashing at the first render with a cryptic "rc=null".
+ *
+ * Retried 3x with a short backoff before giving up. A single spawnSync attempt was
+ * observed live to fail transiently (OS-level process-creation pressure, confirmed by
+ * `ffmpeg -version` succeeding instantly seconds later in two separate shells) — the
+ * pipeline crashed a run before the voiceover was even synthesized over a hiccup that
+ * had already cleared by the time the operator saw the error. A genuinely missing/broken
+ * ffmpeg still fails after 3 attempts with the same actionable message; this only
+ * absorbs a one-off OS blip, it does not mask a real misconfiguration.
+ *
+ * async + a real setTimeout-based delay, deliberately — this runs inside the Node
+ * server process that also serves every other concurrent run's HTTP requests. A
+ * synchronous busy-wait here would freeze the ENTIRE event loop (every run, every page
+ * load) for up to ~2.4s per call; `await`ing a timer costs nothing else running on the
+ * server and only delays this one preflight.
  */
-export function assertFfmpegAvailable(): void {
+export async function assertFfmpegAvailable(): Promise<void> {
   const bin = resolveFfmpeg();
-  let ok = false;
-  try {
-    const r = spawnSync(bin, ["-version"], { stdio: "pipe", timeout: 10_000 });
-    ok = r.status === 0; // null (spawn ENOENT) or non-zero → not usable
-  } catch {
-    ok = false;
+  const attempts = 3;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let ok = false;
+    try {
+      const r = spawnSync(bin, ["-version"], { stdio: "pipe", timeout: 10_000 });
+      ok = r.status === 0; // null (spawn ENOENT) or non-zero → not usable
+    } catch {
+      ok = false;
+    }
+    if (ok) return;
+    if (attempt < attempts) {
+      await new Promise((resolve) => setTimeout(resolve, 800 * attempt));
+    }
   }
-  if (!ok) throw new Error(ffmpegNotFoundMessage());
+  throw new Error(ffmpegNotFoundMessage());
 }
