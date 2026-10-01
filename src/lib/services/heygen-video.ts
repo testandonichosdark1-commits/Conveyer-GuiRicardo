@@ -224,7 +224,12 @@ export async function generateAvatarClip(
   const url = await pollVideo(runId, videoId);
   log(runId, "info", `HeyGen render complete — downloading MP4`, { stage: "avatar_video" });
   await download(runId, url, outPath);
-  log(runId, "success", `Avatar video saved`, { stage: "avatar_video", data: { videoId } });
+  // opts.title carries "beat N" (see studio-pipeline.ts's call site) — included here so
+  // the run-detail page's beat-completion count (see assembleProgress's sibling in
+  // page.tsx) can recognize an avatar beat finishing, not just visual beats. Before this,
+  // a successful avatar clip left no "Beat N: ..." line at all, so the panel undercounted
+  // runs with avatarPercent > 0.
+  log(runId, "success", `Avatar video saved${opts.title ? ` (${opts.title})` : ""}`, { stage: "avatar_video", data: { videoId } });
   return outPath;
 }
 
@@ -255,7 +260,9 @@ async function generateAvatarClipV3(
   const url = await pollVideoV3(runId, videoId);
   log(runId, "info", `HeyGen Avatar V render complete — downloading MP4`, { stage: "avatar_video" });
   await download(runId, url, outPath);
-  log(runId, "success", `Avatar V video saved`, { stage: "avatar_video", data: { videoId } });
+  // See the v2 path's identical comment just above generateAvatarClip's own "Avatar video
+  // saved" line — same reasoning, same opts.title ("beat N") source.
+  log(runId, "success", `Avatar V video saved${opts.title ? ` (${opts.title})` : ""}`, { stage: "avatar_video", data: { videoId } });
   return outPath;
 }
 

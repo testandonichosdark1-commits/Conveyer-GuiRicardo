@@ -10,6 +10,28 @@ interface LogEntry {
   message: string;
   data?: unknown;
 }
+
+// Terminal per-beat outcomes only — NOT "this beat was merely mentioned". The previous
+// progress count treated ANY visual/avatar_video line starting with "Beat N" as "touched",
+// which includes every intermediate search/score/retry line a beat generates while it's
+// STILL being worked on — so a beat appearing once, early, made the counter look finished
+// for it immediately. Observed live: a 260-beat run sat at "260/260" in the panel while the
+// logs clearly showed Flow still actively generating images for beats that had failed and
+// were being regenerated. This only counts a beat once it reaches one of its real end
+// states: a successful visual/avatar render, or a failure the pipeline has already resolved
+// (neighbour reuse / b-roll substitution) — never a beat that's still mid-attempt.
+const BEAT_VISUAL_DONE_RE = /^Beat (\d+): (?:real|AI) .+ via /;
+const BEAT_AVATAR_SAVED_RE = /Avatar V? video saved \(beat (\d+)\)/i;
+const BEAT_RESOLVED_FAILURE_RE = /^Beat (\d+) (?:visual|avatar) failed .*(?:will reuse a neighbour|using b-roll for it)/;
+function beatDoneIndex(l: LogEntry): number | null {
+  if (l.stage !== "visual" && l.stage !== "avatar_video") return null;
+  const m =
+    BEAT_VISUAL_DONE_RE.exec(l.message) ||
+    BEAT_AVATAR_SAVED_RE.exec(l.message) ||
+    BEAT_RESOLVED_FAILURE_RE.exec(l.message);
+  return m ? Number(m[1]) : null;
+}
+
 interface Run {
   id: string;
   title: string | null;
@@ -142,19 +164,15 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
 
   // Progress estimate derived from the log stream itself — no backend change needed.
   // `planner` lines are emitted exactly once per beat during planning, so the count of
-  // distinct beat indices there is the total. A beat index appearing in ANY later
-  // visual/avatar-stage line means work has started on it — a beat generates many such
-  // lines while it's being worked on (searches, scoring, retries), so "seen at least
-  // once" lags only slightly behind "fully done", close enough for a rough ETA.
+  // distinct beat indices there is the total.
+  //
   // `lastStartMs` anchors the RATE calculation below to the most recent "Pipeline
   // started"/"Resuming studio run" line, not the run's original created_at. A
   // cancel-then-resume cycle (the operator stopping and restarting the same run)
   // leaves the run genuinely idle in between — created_at predates that idle gap, so
   // an ETA built on elapsed-since-created_at counts dead time as processing time and
   // wildly overshoots. Observed live: a run idle for ~46 minutes between cancel and
-  // resume reported "~6h22m remaining" off a true per-beat rate of well under a
-  // minute. touchedBeats/totalBeats (the progress FRACTION and the "N/M" display)
-  // stay exactly as before — only the time-based ETA changes.
+  // resume reported "~6h22m remaining" off a true per-beat rate of well under a minute.
   const { totalBeats, touchedBeats, lastStartMs } = useMemo(() => {
     const planned = new Set<number>();
     const touched = new Set<number>();
@@ -163,9 +181,9 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
     for (const l of logs) {
       const m = /^Beat (\d+): planner /.exec(l.message);
       if (m) planned.add(Number(m[1]));
-      else if (l.stage === "visual" || l.stage === "avatar_video") {
-        const t = /^Beat (\d+)/.exec(l.message);
-        if (t) touched.add(Number(t[1]));
+      else {
+        const done = beatDoneIndex(l);
+        if (done !== null) touched.add(done);
       }
       // Fallback total: the highest beat index mentioned ANYWHERE (planner, visual,
       // avatar) + 1. `planned.size` alone undercounts on a run that was cancelled
@@ -185,19 +203,18 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
     return { totalBeats, touchedBeats: touched, lastStartMs: lastStart };
   }, [logs]);
 
-  // Beats first touched AT OR AFTER lastStartMs — the numerator for the current-segment
-  // rate. A beat touched before the last resume (already done, just being re-logged as
-  // the plan replays) must not count as progress made in THIS segment, or the rate would
-  // still be flattered by carried-over work.
+  // Beats first DONE (not merely touched — see beatDoneIndex) AT OR AFTER lastStartMs —
+  // the numerator for the current-segment rate. A beat done before the last resume
+  // (already finished, just carried over) must not count as progress made in THIS
+  // segment, or the rate would still be flattered by carried-over work.
   const touchedSinceStart = useMemo(() => {
     if (lastStartMs === null) return touchedBeats.size;
     const touched = new Set<number>();
     for (const l of logs) {
-      if (l.stage !== "visual" && l.stage !== "avatar_video") continue;
-      const t = /^Beat (\d+)/.exec(l.message);
-      if (!t) continue;
+      const idx = beatDoneIndex(l);
+      if (idx === null) continue;
       const lts = new Date(l.ts.endsWith("Z") ? l.ts : l.ts + "Z").getTime();
-      if (lts >= lastStartMs) touched.add(Number(t[1]));
+      if (lts >= lastStartMs) touched.add(idx);
     }
     return touched.size;
   }, [logs, lastStartMs]);
