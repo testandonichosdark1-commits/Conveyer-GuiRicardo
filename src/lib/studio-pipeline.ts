@@ -16,7 +16,7 @@ import { voiceoverFromFile } from "./services/voiceover-file";
 import { planBeats, type Beat, type VideoStructure } from "./services/studio-plan";
 import { acquireVisual, createTopicPool } from "./services/visual-source";
 import { writeCredits, readCredits, creditFrom, type CreditEntry } from "./services/credits";
-import { generateAvatarClip, type AvatarHandle } from "./services/heygen-video";
+import { generateAvatarClip, decodeAvatarRenderer, type AvatarHandle } from "./services/avatar-renderer";
 import { checkAvatarVSupport } from "./services/heygen-avatar";
 import { assembleStudioVideo, sliceAudio, decodeToWav, type RenderBeat } from "./services/studio-assemble";
 import { recordHeygenEngine } from "./services/cost-ledger";
@@ -84,7 +84,7 @@ const setStructure = db.prepare("UPDATE runs SET structure_json = ? WHERE id = ?
 const setDuration = db.prepare("UPDATE runs SET duration_sec = ? WHERE id = ?");
 const getConfigStmt = db.prepare("SELECT config_json FROM runs WHERE id = ?");
 const getAvatarSnapStmt = db.prepare(
-  "SELECT avatar_db_id, avatar_engine, avatar_heygen_id, avatar_image_key, avatar_use_iv, avatar_motion_prompt, avatar_api_engine FROM runs WHERE id = ?"
+  "SELECT avatar_db_id, avatar_engine, avatar_heygen_id, avatar_image_key, avatar_use_iv, avatar_motion_prompt, avatar_api_engine, avatar_renderer FROM runs WHERE id = ?"
 );
 const getVoiceSnapStmt = db.prepare("SELECT preset_voice_id, voice_speed, voice_model FROM runs WHERE id = ?");
 const getTitleStmt = db.prepare("SELECT title FROM runs WHERE id = ?");
@@ -244,7 +244,12 @@ export function decodeEngine(raw: string | null): AvatarHandle["engine"] {
   throw new Error(`Unknown avatar engine "${raw}" on this run — refusing to guess how to render it.`);
 }
 
-function readAvatar(runId: string): (AvatarHandle & { dbId: number }) | null {
+/**
+ * The run's avatar snapshot, decoded. Both the fresh path and Resume read the avatar
+ * ONLY through here, so a resumed run renders with the renderer/engine it was created
+ * with. Exported for tests.
+ */
+export function readAvatar(runId: string): (AvatarHandle & { dbId: number }) | null {
   const row = getAvatarSnapStmt.get(runId) as
     | {
         avatar_db_id: number | null;
@@ -254,10 +259,15 @@ function readAvatar(runId: string): (AvatarHandle & { dbId: number }) | null {
         avatar_use_iv: string | null;
         avatar_motion_prompt: string | null;
         avatar_api_engine: string | null;
+        avatar_renderer: string | null;
       }
     | undefined;
+  // HEYGEN-SPECIFIC: "has an avatar" is decided by the HeyGen id. A renderer without one
+  // will need this test (and the handle fields below) to switch on the renderer.
   if (!row?.avatar_db_id || !row.avatar_heygen_id) return null;
   return {
+    // NULL (every run created before the column existed) decodes to "heygen".
+    renderer: decodeAvatarRenderer(row.avatar_renderer),
     dbId: row.avatar_db_id,
     engine: decodeEngine(row.avatar_engine),
     heygenId: row.avatar_heygen_id,

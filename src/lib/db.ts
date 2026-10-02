@@ -290,6 +290,12 @@ tryAddColumn("runs", "avatar_motion_prompt TEXT");
 // finds nothing and degrades to v2. That is the same silent substitution, only later
 // and harder to see. NULL is correct for every existing row: none of them is Avatar V.
 tryAddColumn("runs", "avatar_api_engine TEXT");
+// Which SERVICE renders this run's avatar clips ('heygen' today; see
+// services/avatar-renderer.ts). Snapshotted for the same reason as avatar_api_engine: a
+// Resume must replay the renderer the run was created with, whatever the configuration
+// says later. NULL = 'heygen' — every row predating this column was rendered by HeyGen,
+// so no backfill is needed (or done).
+tryAddColumn("runs", "avatar_renderer TEXT");
 
 // Set (datetime) when the operator deletes a job from the Jobs page. Soft
 // delete: the run row + run_costs are KEPT so the Costs page stays byte-for-byte

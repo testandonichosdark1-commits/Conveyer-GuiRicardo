@@ -1,4 +1,5 @@
 import db from "./db";
+import { DEFAULT_AVATAR_RENDERER } from "./services/avatar-renderer";
 
 /**
  * Avatar library — the recurring, "memorized" presenters.
@@ -164,6 +165,36 @@ export function updateAvatar(
 
 export function deleteAvatar(id: number): void {
   deleteStmt.run(id);
+}
+
+const setRunAvatarSnapshotStmt = db.prepare(
+  "UPDATE runs SET avatar_db_id = ?, avatar_engine = ?, avatar_heygen_id = ?, avatar_image_key = ?, avatar_use_iv = ?, avatar_motion_prompt = ?, avatar_api_engine = ?, avatar_renderer = ? WHERE id = ?"
+);
+
+/**
+ * Snapshot the resolved avatar onto a new run (`runs.avatar_*`), so the pipeline — and
+ * any later Resume — renders what the run was CREATED with, even if the library row is
+ * edited or deleted afterwards. Called once, by /api/studio, right after the run row is
+ * inserted.
+ */
+export function snapshotRunAvatar(runId: string, avatar: Avatar): void {
+  setRunAvatarSnapshotStmt.run(
+    avatar.id,
+    avatar.engine,
+    avatar.heygen_id,
+    avatar.image_key,
+    avatar.use_avatar_iv,
+    avatar.motion_prompt,
+    // Snapshotted, not read live at render time: (engine='talking_photo',
+    // use_iv=NULL) is identical for Avatar V and Legacy, so this is the ONLY thing
+    // that tells a resumed run which engine it was created with. Reading it live
+    // would render on whatever the avatar row says NOW — or on v2 if the row is gone.
+    avatar.api_engine,
+    // The service that renders the clips. Only HeyGen exists; recorded explicitly so a
+    // run never depends on what NULL — or a future default — happens to mean.
+    DEFAULT_AVATAR_RENDERER,
+    runId
+  );
 }
 
 // isRenderableAvatar() lived here: a Stage-1 guard that made an Avatar V avatar

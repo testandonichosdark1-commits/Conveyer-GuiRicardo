@@ -421,6 +421,9 @@ async function renderBeat(
   // then shave 4px off every edge: HeyGen renders the talking photo with a
   // 1–2px near-white fringe (photo on a white canvas) that cropdetect can't
   // catch (it only detects dark bars) and that reads as "white borders".
+  // HEYGEN-SPECIFIC (see services/avatar-renderer.ts): the pillarbox crop and the 4px
+  // fringe shave below assume HeyGen's output. Every avatar clip is HeyGen today, so they
+  // apply unconditionally; a second renderer must make them conditional on the renderer.
   const avCrop = beat.avatarClipPath ? contentCrop(beat.avatarClipPath, runId) : null;
   const avPre = (avCrop ? `crop=${avCrop},` : "") + "crop=iw-8:ih-8:4:4,";
 

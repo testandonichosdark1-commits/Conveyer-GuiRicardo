@@ -6,7 +6,7 @@ import { runStudioPipeline } from "@/lib/studio-pipeline";
 import { failRun } from "@/lib/run-lifecycle";
 import { sanitizeFolderName, pickAvailableFolderName } from "@/lib/run-paths";
 import { getPromptPreset } from "@/lib/prompts";
-import { getAvatar } from "@/lib/avatars";
+import { getAvatar, snapshotRunAvatar } from "@/lib/avatars";
 import { verifyHeygenAvatar, checkAvatarVSupport } from "@/lib/services/heygen-avatar";
 import { getChannel } from "@/lib/channels";
 import { getSetting } from "@/lib/settings";
@@ -33,9 +33,6 @@ const setVoiceSnapshot = db.prepare("UPDATE runs SET preset_voice_id = ? WHERE i
 const setSpeedSnapshot = db.prepare("UPDATE runs SET voice_speed = ? WHERE id = ?");
 // TTS model this run was created with (NULL → the provider reads its global setting).
 const setModelSnapshot = db.prepare("UPDATE runs SET voice_model = ? WHERE id = ?");
-const setAvatarSnapshot = db.prepare(
-  "UPDATE runs SET avatar_db_id = ?, avatar_engine = ?, avatar_heygen_id = ?, avatar_image_key = ?, avatar_use_iv = ?, avatar_motion_prompt = ?, avatar_api_engine = ? WHERE id = ?"
-);
 
 interface Body {
   script?: string;
@@ -310,20 +307,8 @@ export async function POST(req: Request) {
   }
 
   if (avatar) {
-    setAvatarSnapshot.run(
-      avatar.id,
-      avatar.engine,
-      avatar.heygen_id,
-      avatar.image_key,
-      avatar.use_avatar_iv,
-      avatar.motion_prompt,
-      // Snapshotted, not read live at render time: (engine='talking_photo',
-      // use_iv=NULL) is identical for Avatar V and Legacy, so this is the ONLY thing
-      // that tells a resumed run which engine it was created with. Reading it live
-      // would render on whatever the avatar row says NOW — or on v2 if the row is gone.
-      avatar.api_engine,
-      id
-    );
+    // Engine, api_engine and renderer are all snapshotted here — see snapshotRunAvatar.
+    snapshotRunAvatar(id, avatar);
   }
 
   // The narration voice for this run — chosen on the create page, else the channel's
