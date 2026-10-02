@@ -6,7 +6,8 @@ import { log } from "./logger";
 import { getSetting, setChannelSettingOverrides, clearChannelSettingOverrides } from "./settings";
 import { getChannel, channelSettingOverrides } from "./channels";
 import { resolveFfmpeg, resolveFfprobe, assertFfmpegAvailable } from "./ffmpeg-bin";
-import { getRunDir } from "./run-paths";
+import { getRunDir, scenePlanV1Path } from "./run-paths";
+import { writeScenePlanV1 } from "./services/scene-schema";
 import { pLimit } from "./plimit";
 import { checkCancelled, clearCancelled, CancelledError } from "./cancellation";
 import { APP_VERSION } from "./version";
@@ -474,6 +475,14 @@ export async function runStudioPipeline(
     }
     beats[beats.length - 1].endMs = Math.max(beats[beats.length - 1].startMs + 200, durMs);
     fs.writeFileSync(path.join(runDir, "beats.json"), JSON.stringify(beats, null, 2), "utf-8");
+    // Observational Scene Plan v1 — a validated projection of beats.json that nothing reads
+    // yet (see services/scene-schema.ts). Fail-open: a failure only logs, never fails or
+    // degrades the run.
+    try {
+      writeScenePlanV1(scenePlanV1Path(runId), beats, { runId, totalDurationMs: durMs });
+    } catch (e) {
+      log(runId, "warn", `scene-plan.v1.json not written (observational only — run unaffected): ${(e instanceof Error ? e.message : String(e)).slice(0, 200)}`, { stage: "pipeline" });
+    }
     const tPlan = Date.now();
 
     // 3. Fetch visuals + generate avatar clips per beat (concurrency-limited).

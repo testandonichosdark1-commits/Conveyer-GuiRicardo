@@ -13,3 +13,6 @@ Thumbs.db
 .vscode/
 .idea/
 .claude/
+
+# Accidental macOS Finder alias (points at /Applications/DICloak.app/Contents) — not part of the project
+/Contents - cópia

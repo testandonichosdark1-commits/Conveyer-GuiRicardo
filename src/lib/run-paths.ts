@@ -2,6 +2,7 @@ import path from "node:path";
 import fs from "node:fs";
 import db from "./db";
 import { DATA_DIR } from "./data-dir";
+import { SCENE_PLAN_V1_FILENAME } from "./services/scene-schema";
 
 export { DATA_DIR };
 
@@ -26,6 +27,11 @@ const getFolderStmt = db.prepare("SELECT folder_name FROM runs WHERE id = ?");
 export function getRunDir(runId: string): string {
   const row = getFolderStmt.get(runId) as { folder_name: string | null } | undefined;
   return path.join(getRunsRoot(), row?.folder_name || runId);
+}
+
+/** The observational Scene Plan v1 of a studio run (see services/scene-schema.ts). */
+export function scenePlanV1Path(runId: string): string {
+  return path.join(getRunDir(runId), SCENE_PLAN_V1_FILENAME);
 }
 
 /**
