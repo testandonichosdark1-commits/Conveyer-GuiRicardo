@@ -702,6 +702,36 @@ export const ALL_GROUPS: Group[] = [
         desc: "Max simultaneous Runware requests across ALL runs. Runware enforces no hard limit but recommends 2–4: over-driving it saturates their queues and degrades into timeouts rather than clean rate-limit errors.",
         examples: "3 = default  ·  range 1–15",
       },
+      {
+        key: "COMFYUI_URL",
+        label: "Local GPU — ComfyUI URL",
+        desc: "Base URL of a local ComfyUI instance (AI_PROVIDER=local, video backend — LTX-Video). Runs on the operator's own GPU, no cloud key. Empty means video beats fail until ComfyUI is running and this is set.",
+        examples: "http://127.0.0.1:8188 = default",
+      },
+      {
+        key: "COMFYUI_TIMEOUT_SEC",
+        label: "Local GPU — ComfyUI timeout (sec)",
+        desc: "Deadline for one ComfyUI workflow run (queue + generate). Local GPU generation is slow compared to a cloud API — keep this generous.",
+        examples: "600 = default",
+      },
+      {
+        key: "CHATGPT_URL",
+        label: "Local GPU — ChatGPT page",
+        desc: "ChatGPT page opened by the browser worker (AI_PROVIDER=local, image backend). Driven through the operator's own logged-in Chrome tab, no API key.",
+        examples: "https://chatgpt.com/ = default",
+      },
+      {
+        key: "CHATGPT_IMAGE_TIMEOUT_SEC",
+        label: "Local GPU — ChatGPT image timeout (sec)",
+        desc: "Deadline for one ChatGPT image generation through the browser.",
+        examples: "180 = default",
+      },
+      {
+        key: "AVATAR_ENGINE_DEFAULT",
+        label: "Default avatar engine (new avatars)",
+        desc: "Which engine the \"create avatar\" form offers by default — talking_photo (HeyGen, cloud) or local_infinitetalk (free, runs on the operator's own GPU). Only affects the form's default selection; existing avatars are unaffected.",
+        examples: "talking_photo = default  ·  local_infinitetalk",
+      },
     ],
   },
   {

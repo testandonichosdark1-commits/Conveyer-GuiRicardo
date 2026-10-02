@@ -162,6 +162,7 @@ export const SETTING_KEYS = [
   "AI_PROVIDER",               // flow_browser | kie | 69labs | ... — engine for AI b-roll
   "FLOW_PROJECT_URL",          // Exact Google Flow project URL opened by the browser worker
   "FLOW_BROWSER_PROFILE_DIR",  // Persistent Chrome profile. Empty = DATA_DIR/flow-browser-profile
+  "FLOW_BROWSER_HIDDEN",       // 1 (default) = launch the Chrome window off-screen so it never steals focus; 0 = on-screen (useful for first sign-in). Real window, never headless — Google/OpenAI both fingerprint headless Chrome.
   "FLOW_BROWSER_CHANNEL",      // Playwright browser channel. Default chrome (uses installed Google Chrome)
   "FLOW_BROWSER_EXECUTABLE",   // Optional absolute browser executable path (advanced)
   "FLOW_BROWSER_HEADLESS",     // 0 = visible (recommended), 1 = headless
@@ -235,6 +236,19 @@ export const SETTING_KEYS = [
   "HIGGSFIELD_RESOLUTION",     // requested output resolution, e.g. 1080p (passed through when the model accepts it)
   "HIGGSFIELD_RETRIES",        // retries on TRANSIENT Higgsfield failures (429/5xx/timeout/network) before failing over. Permanent 4xx fail fast. Default 3 (clamped 0–8).
   "HIGGSFIELD_CONCURRENCY",    // max CONCURRENT Higgsfield requests PROCESS-WIDE (across all runs). Default 2 (clamped 1–15).
+  // Local GPU — AI_PROVIDER=local. Image via the operator's own logged-in ChatGPT
+  // browser (no paid API, same CDP connection flow_browser already maintains); video
+  // via LTX-Video running on a local ComfyUI instance (COMFYUI_URL). Both free, both
+  // bounded by the operator's own GPU — no API key setting for either.
+  "COMFYUI_URL",               // local ComfyUI HTTP base, e.g. http://127.0.0.1:8188
+  "COMFYUI_TIMEOUT_SEC",       // deadline for one ComfyUI workflow run (queue + generate), default 600 (10 min — local GPU generation is slow)
+  "LOCAL_IMAGE_MODEL",         // chatgpt-browser (only option today — see providers.ts)
+  "LOCAL_VIDEO_MODEL",         // ltxv-2b-distilled (only ComfyUI LTX tier that fits an 8GB GPU — see providers.ts)
+  "CHATGPT_URL",               // ChatGPT page opened by the browser worker, default https://chatgpt.com/
+  "CHATGPT_IMAGE_TIMEOUT_SEC", // deadline for one ChatGPT image generation, default 180
+  "CHATGPT_PROMPT_SELECTOR",   // advanced escape hatch — custom CSS selector for ChatGPT's prompt box, tried before the built-in candidates
+  "CHATGPT_CONVO_RECYCLE_EVERY", // generations per ChatGPT conversation before starting a fresh one (bounds DOM growth, not needed for correctness). Default 25, 0/blank disables.
+  "AVATAR_ENGINE_DEFAULT",     // talking_photo | local_infinitetalk — default engine offered on the "create avatar" form
   "SMART_ASSIGN",              // 0 (positional spread) | 1 (content-aware real/AI assignment by queryType+aiMedia)
   "TOPIC_POOL",                // 0 (off — one provider search per beat) | 1 (Topic Pool Retrieval: beats sharing a topicKey reuse ONE gathered candidate pool per attempt, cutting provider searches; per-beat vision scoring + usedIds allocation unchanged). Default 0.
   "PLAN_QUERY_TRIM",           // WI-13: 1 = strip non-depictable abstract/economic tails (e.g. "scaling energy output") from the footage query so search isn't pulled off-topic. 0 = off. Default 1.
@@ -644,6 +658,7 @@ export const DEFAULTS: Record<SettingKey, string> = {
   AI_PROVIDER: "kie",
   FLOW_PROJECT_URL: "https://labs.google/fx/tools/flow",
   FLOW_BROWSER_PROFILE_DIR: "",
+  FLOW_BROWSER_HIDDEN: "1",
   FLOW_BROWSER_CHANNEL: "chrome",
   FLOW_BROWSER_EXECUTABLE: "",
   FLOW_BROWSER_HEADLESS: "0",
@@ -718,6 +733,15 @@ export const DEFAULTS: Record<SettingKey, string> = {
   HIGGSFIELD_RESOLUTION: "1080p",
   HIGGSFIELD_RETRIES: "3",
   HIGGSFIELD_CONCURRENCY: "2",
+  COMFYUI_URL: "http://127.0.0.1:8188",
+  COMFYUI_TIMEOUT_SEC: "600",
+  LOCAL_IMAGE_MODEL: defaultAiModel("local", "image"), // = "chatgpt-browser"
+  LOCAL_VIDEO_MODEL: defaultAiModel("local", "video"), // = "ltxv-2b-distilled"
+  CHATGPT_URL: "https://chatgpt.com/",
+  CHATGPT_IMAGE_TIMEOUT_SEC: "180",
+  CHATGPT_PROMPT_SELECTOR: "",
+  CHATGPT_CONVO_RECYCLE_EVERY: "25",
+  AVATAR_ENGINE_DEFAULT: "talking_photo",
   SMART_ASSIGN: "0",
   // On by default: beats sharing a topicKey reuse ONE provider gather per broaden
   // attempt, cutting Pexels/stock search volume (the main cause of 429 rate limits).

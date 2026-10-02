@@ -205,15 +205,30 @@ async function cdpReady(endpoint: string): Promise<boolean> {
  * attaches afterwards over localhost CDP, avoiding the automation launch flag that
  * triggers "This browser or app may not be secure" on Google Accounts.
  */
+/** 1 (default) = launch the window off-screen so it never steals focus or sits in the
+ *  operator's way during a run; 0 = launch it on-screen (useful the first time, to sign
+ *  in). This is a REAL, ordinary Chrome window — just positioned past the visible desktop
+ *  — never `--headless`: Google/OpenAI both actively fingerprint and block headless
+ *  Chrome, which is exactly why this file spawns a normal window and attaches over CDP
+ *  instead of `chromium.launch()` in the first place (see the module comment above). The
+ *  operator can always drag/resize a window manager view back on-screen (or temporarily
+ *  set this to 0) to sign in or watch a run.
+ */
+function launchOffScreen(): boolean {
+  return getSetting("FLOW_BROWSER_HIDDEN") !== "0";
+}
+
 async function ensureNormalChrome(endpoint: string, dir: string): Promise<void> {
   if (await cdpReady(endpoint)) return;
   const executable = chromeExecutable();
   const port = cdpPort();
+  const positionArgs = launchOffScreen() ? ["--window-position=-32000,-32000", "--window-size=1280,900"] : [];
   const child = spawn(executable, [
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${dir}`,
     "--no-first-run",
     "--no-default-browser-check",
+    ...positionArgs,
     projectUrl(),
   ], { detached: true, stdio: "ignore" });
   child.unref();

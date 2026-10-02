@@ -10,6 +10,7 @@ import { ProviderAiFields } from "./_components/ProviderAiFields";
 import { ProviderModelFields } from "./_components/ProviderModelFields";
 import { MagnificBlock } from "./_components/MagnificBlock";
 import { HiggsfieldBlock } from "./_components/HiggsfieldBlock";
+import { LocalGpuBlock } from "./_components/LocalGpuBlock";
 import { ProviderVoiceFields } from "./_components/ProviderVoiceFields";
 import { FootageSources } from "./_components/FootageSources";
 import { FallbackAiMedia } from "./_components/FallbackAiMedia";
@@ -179,6 +180,12 @@ export default function ParametresPage() {
             like Magnific. Two-part key (id + secret) + enable/fallback; the model selects
             are rendered by ProviderModelFields above from the registry. */}
         {aiProvider === "higgsfield" && <HiggsfieldBlock val={val} set={set} />}
+
+        {/* Local GPU — ChatGPT browser (image) + LTX-Video via local ComfyUI (video).
+            No cloud credential for either backend, so this block only owns the
+            ComfyUI connection address and timeouts; the model selects are rendered
+            by ProviderModelFields above from the registry. */}
+        {aiProvider === "local" && <LocalGpuBlock val={val} set={set} />}
 
         <ProviderVoiceFields provider={voiceProvider} val={val} set={set} />
 

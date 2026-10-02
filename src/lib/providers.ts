@@ -169,7 +169,7 @@ export function providerVoiceLabel(id: string | null | undefined): string {
   return `${voiceProviderMeta(id).label} Voice ID`;
 }
 
-export type AiProviderId = "kie" | "69labs" | "magnific" | "runware" | "higgsfield" | "flow_browser";
+export type AiProviderId = "kie" | "69labs" | "magnific" | "runware" | "higgsfield" | "flow_browser" | "local";
 export type AiMedia = "image" | "video";
 
 /** One selectable generation model. `id` is the exact provider string persisted to the setting. */
@@ -306,6 +306,20 @@ export const AI_PROVIDERS: AiProviderMeta[] = [
         { id: "google:4@2", label: "Nano Banana Pro" },
       ],
     },
+  },
+  {
+    id: "local",
+    selectLabel: "Local GPU (ChatGPT browser + LTX-Video)",
+    // No apiKey — ChatGPT is driven through the operator's own logged-in browser
+    // (same CDP connection flow_browser already maintains, see chatgpt-browser.ts)
+    // and LTX-Video runs on the operator's own GPU via a local ComfyUI instance
+    // (COMFYUI_URL), never a paid API.
+    image: { key: "LOCAL_IMAGE_MODEL", models: [{ id: "chatgpt-browser", label: "ChatGPT (browser)", recommended: true }] },
+    // LTX-Video 2B distilled (0.9.x) is the only LTX tier that fits an 8GB consumer
+    // GPU — the newer LTX-2 line (19B/22B) needs 12-32GB. The catalog lists just
+    // this one id; "Custom…" covers a different local checkpoint if the operator
+    // sets one up.
+    video: { key: "LOCAL_VIDEO_MODEL", models: [{ id: "ltxv-2b-distilled", label: "LTX-Video 2B Distilled (0.9.x)", recommended: true }] },
   },
   {
     id: "higgsfield",
