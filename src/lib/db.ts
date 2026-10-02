@@ -297,6 +297,40 @@ tryAddColumn("runs", "avatar_api_engine TEXT");
 // so no backfill is needed (or done).
 tryAddColumn("runs", "avatar_renderer TEXT");
 
+// Scene jobs — one row per LOGICAL remote job (a scene × a stage × a provider × the exact
+// inputs), owned by this process; see scene-job-store.ts for the state machine. Remote
+// workers never write here. No FK to runs, like run_logs/run_costs: the project uses none,
+// and a job row is the only record of a remote job that may still be billing.
+// The CHECKs make half-written states unrepresentable: an in-flight job always has its
+// remote id, a succeeded one always has its output path.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS scene_jobs (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    idempotency_key   TEXT    NOT NULL UNIQUE,
+    run_id            TEXT    NOT NULL,
+    beat_index        INTEGER NOT NULL CHECK (beat_index >= 0),
+    stage             TEXT    NOT NULL,
+    provider          TEXT    NOT NULL,
+    input_fingerprint TEXT    NOT NULL,
+    status            TEXT    NOT NULL DEFAULT 'prepared'
+                      CHECK (status IN ('prepared','submitting','submitted','running','succeeded','failed','cancelled')),
+    attempts          INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    remote_job_id     TEXT,
+    output_path       TEXT,
+    error_code        TEXT,
+    error_message     TEXT,
+    created_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    submitted_at      TEXT,
+    completed_at      TEXT,
+    CHECK (status NOT IN ('submitted','running') OR remote_job_id IS NOT NULL),
+    CHECK (status <> 'succeeded' OR output_path IS NOT NULL)
+  );
+  CREATE INDEX IF NOT EXISTS idx_scene_jobs_run ON scene_jobs(run_id, beat_index);
+  CREATE INDEX IF NOT EXISTS idx_scene_jobs_status ON scene_jobs(status);
+  CREATE INDEX IF NOT EXISTS idx_scene_jobs_remote ON scene_jobs(provider, remote_job_id) WHERE remote_job_id IS NOT NULL;
+`);
+
 // Set (datetime) when the operator deletes a job from the Jobs page. Soft
 // delete: the run row + run_costs are KEPT so the Costs page stays byte-for-byte
 // accurate, but the on-disk files + run_logs are removed. Every runs listing
