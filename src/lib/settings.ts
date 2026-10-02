@@ -167,7 +167,7 @@ export const SETTING_KEYS = [
   "FLOW_BROWSER_HEADLESS",     // 0 = visible (recommended), 1 = headless
   "FLOW_CDP_PORT",             // localhost debugging port used to attach to normal Chrome
   "FLOW_GENERATION_TIMEOUT_SEC", // Max wait for one generated image
-  "FLOW_FALLBACK_PROVIDER",    // none | kie | chain — what to do if the Flow UI fails
+  "FLOW_FALLBACK_PROVIDER",    // none | kie | chain | vids — what to do if the Flow UI fails. "vids" tries Google Vids (free) first, then falls through to the same chain "chain" runs.
   "FLOW_IMAGE_MODEL",          // Model label/id expected in Flow (Nano Banana Pro)
   "VIDS_FIRST",               // Google Vids tried BEFORE Flow: off (default) | image | both. Beats wanting the character reference always skip it.
   "VIDS_PROJECT_URL",         // Optional docs.google.com/videos/d/… URL, opened in a new tab only if no Vids tab is already open.

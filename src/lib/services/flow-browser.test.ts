@@ -42,6 +42,7 @@ import {
   failureBaselineOf,
   chipShowsModel,
   FlowBrowserError,
+  pageHasLoginPrompt,
 } from "./flow-browser";
 
 beforeEach(() => {
@@ -480,5 +481,81 @@ describe("usage-limit card", () => {
   it("ignores a limit card that was already there before submit (the limit may have reset)", () => {
     const body = "Falha\nVocê chegou ao limite de uso. Tente de novo mais tarde.";
     expect(classifyFlowFailureBody(body, "image", failureBaselineOf(body))).toBeNull();
+  });
+});
+
+// ── pageHasLoginPrompt — a momentary blip must not be trusted as a real logout ──
+//
+// Confirmed live 2026-10-01: 3 concurrent beats all reported "Google session expired" within
+// under a second of each other, permanently retiring Flow for the rest of that run — the
+// operator confirmed the account's login never actually dropped. All three beats were polling
+// the SAME shared page and caught the SAME one-shot reading. `waitForTimeout` is faked as an
+// instant resolve here (the real 2.5s wait is a production timing concern, not something a
+// unit test should sleep through) and `url`/the button-text state read off mutable state so a
+// test can simulate "looked logged out, then resolved on its own" without any real delay.
+//
+// `buttonText` stands in for whatever a real `button, a, [role="button"], [role="link"]`
+// locator's `.filter({ hasText })` would find on the page — the fake applies the REAL
+// `hasText` regex the production code passes against this one string, so the test exercises
+// the actual anchoring logic rather than a hand-rolled equivalent.
+function makeLoginFakePage(state: { url: string; buttonText: string }) {
+  return {
+    url: () => state.url,
+    locator: () => ({
+      filter: ({ hasText }: { hasText: RegExp }) => ({
+        first: () => ({ isVisible: async () => hasText.test(state.buttonText) }),
+      }),
+    }),
+    waitForTimeout: async () => undefined,
+  };
+}
+
+describe("pageHasLoginPrompt — rechecks before trusting a positive reading", () => {
+  it("a clean, logged-in page reports false immediately (no wait)", async () => {
+    const page = makeLoginFakePage({ url: "https://labs.google/fx/tools/flow/project/abc", buttonText: "" });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(await pageHasLoginPrompt(page as any)).toBe(false);
+  });
+
+  it("a momentary blip (URL bounces through accounts.google.com, then resolves) is NOT reported as a logout", async () => {
+    const state = { url: "https://accounts.google.com/ServiceLogin?...", buttonText: "" };
+    const page = makeLoginFakePage(state);
+    // Simulate the bounce resolving on its own during the recheck window — the fake
+    // waitForTimeout stands in for the real 2.5s settle wait.
+    const originalWait = page.waitForTimeout;
+    page.waitForTimeout = async () => { state.url = "https://labs.google/fx/tools/flow/project/abc"; await originalWait(); };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(await pageHasLoginPrompt(page as any)).toBe(false);
+  });
+
+  it("a genuine, PERSISTENT logout (still true after the recheck) is still reported", async () => {
+    const page = makeLoginFakePage({ url: "https://accounts.google.com/ServiceLogin?...", buttonText: "" });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(await pageHasLoginPrompt(page as any)).toBe(true);
+  });
+
+  it("a persistent, exact 'Sign in' button (not just a URL bounce) is still reported", async () => {
+    const state = { url: "https://labs.google/fx/tools/flow/project/abc", buttonText: "Sign in" };
+    const page = makeLoginFakePage(state);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(await pageHasLoginPrompt(page as any)).toBe(true);
+  });
+
+  it("NEVER fires on a Flow tile caption that merely CONTAINS the substring 'sign in' (confirmed live regression)", async () => {
+    // The actual live false positive: Flow auto-captions a finished tile from its own content,
+    // and one read "Snow covered street sign in winter...". A bare substring search over the
+    // whole page matched it; anchoring to the control's FULL text must not.
+    const state = { url: "https://labs.google/fx/tools/flow/project/abc", buttonText: "Snow covered street sign in winter, muted colors" };
+    const page = makeLoginFakePage(state);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(await pageHasLoginPrompt(page as any)).toBe(false);
+  });
+
+  it("still catches 'Fazer login' / 'Iniciar sessão' as exact button text (PT-BR)", async () => {
+    for (const text of ["Fazer login", "Iniciar sessão"]) {
+      const page = makeLoginFakePage({ url: "https://labs.google/fx/tools/flow/project/abc", buttonText: text });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(await pageHasLoginPrompt(page as any)).toBe(true);
+    }
   });
 });

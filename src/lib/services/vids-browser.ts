@@ -95,6 +95,14 @@ async function vidsPage(): Promise<Page> {
     await page.waitForTimeout(3000);
   }
   if (/accounts\.google\./.test(page.url())) throw new FlowBrowserError("Google login is required in the Vids tab.", "login");
+  // Vids and Flow share ONE Chrome window as separate tabs. Neither automation is the only
+  // thing touching that window — the operator's own focus moves between them too. Some of
+  // Vids' Angular UI (observed live: the prompt textarea) does not resolve as "visible" to
+  // Playwright while its tab is backgrounded, so a beat run while Flow's tab (or any other
+  // tab) was in front timed out after 8s waiting for a control that was never going to
+  // render. bringToFront() makes Vids the active tab via CDP regardless of what's on screen
+  // — the operator does not need to manually switch tabs for automation to work.
+  await page.bringToFront();
   state.page = page;
   return page;
 }

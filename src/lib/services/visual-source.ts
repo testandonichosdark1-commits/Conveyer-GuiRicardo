@@ -41,7 +41,8 @@ import {
 } from "./stock-footage";
 import type { Scene } from "./scene-split";
 import type { Beat } from "./studio-plan";
-import { DATA_DIR } from "../run-paths";
+import { DATA_DIR, getRunDir } from "../run-paths";
+import { ManualGenerationPendingError, appendManualPrompt, findManualFile } from "./manual-pending";
 
 // Provider-level circuit breaker. Profile-level credential/config failures are handled inside
 // cloudflare-image.ts by deterministic operational failover (Primary → Backup 1 → ...). If the
@@ -3422,8 +3423,16 @@ async function acquireAi(
   let provider = (getSetting("AI_PROVIDER") || "kie").toLowerCase();
   const selectedFlowBrowser = provider === "flow_browser";
   const flowFallbackSetting = getSetting("FLOW_FALLBACK_PROVIDER").toLowerCase();
+  // "vids" = try Google Vids (free, its own queue/quota) BEFORE any paid fallback when
+  // Flow itself fails — requested after a run showed Flow occasionally missing its own
+  // 240s window under FLOW_IMAGE_CONCURRENCY. It is a layer IN FRONT of "chain", not a
+  // replacement for it: if Vids also fails (or the beat wants the character reference,
+  // which Vids' image panel can't take), execution falls through to the same
+  // Cloudflare -> Pollinations -> Meta Muse -> kie.ai chain "chain" already runs — "vids"
+  // is never left with no fallback just because the free source happened to be down too.
+  const flowFallbackVids = selectedFlowBrowser && flowFallbackSetting === "vids";
   // "chain" = Cloudflare -> Pollinations -> Meta Muse -> kie.ai for ordinary stills.
-  const flowFallbackChain = selectedFlowBrowser && flowFallbackSetting === "chain";
+  const flowFallbackChain = selectedFlowBrowser && (flowFallbackSetting === "chain" || flowFallbackVids);
   const flowFallbackToKie = selectedFlowBrowser && (flowFallbackSetting === "kie" || flowFallbackChain);
   const style = (aiStyle ?? getSetting("AI_IMAGE_STYLE")) || "";
   const configuredCharacterRef = (getSetting("AI_CHARACTER_REFERENCE_PATH") || "").trim();
@@ -3513,6 +3522,37 @@ async function acquireAi(
       ? (getSetting("FLOW_REGEN_ATTEMPTS") || "1")
       : (getSetting("AI_REGEN_ATTEMPTS") || "5")
   )));
+
+  // AI_PROVIDER=manual — no generation API is called at all. An operator with no CDP/API
+  // access to the account they want to generate with (e.g. an anti-detect-browser profile
+  // whose vendor charges extra for that) pastes prompts by hand instead. See
+  // manual-pending.ts's doc comment for the full contract; studio-pipeline.ts is what turns
+  // ManualGenerationPendingError into a run-wide pause rather than a per-beat failure.
+  if (provider === "manual") {
+    const { media, reason } = resolveAiMedia(beat, mediaOverride);
+    log(runId, "debug", `Beat ${beat.index}: Manual media = ${media} (reason=${reason})`, { stage: "visual" });
+    const runDir = getRunDir(runId);
+    const existing = findManualFile(runDir, beat.index);
+    if (existing) {
+      if (media === "video") {
+        fs.copyFileSync(existing, outPath);
+        log(runId, "info", `Beat ${beat.index}: using manually generated video (${path.basename(existing)})`, { stage: "visual" });
+        return { path: outPath, kind: "ai", provider: "manual:video" };
+      }
+      const score = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, existing);
+      kenBurns(existing, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+      log(runId, "info", `Beat ${beat.index}: using manually generated image (${path.basename(existing)}) + Ken Burns — match ${score}%`, { stage: "visual" });
+      return { path: outPath, kind: "ai", provider: "manual:image" };
+    }
+    appendManualPrompt(runDir, {
+      index: beat.index,
+      media,
+      aspect,
+      durationSec: media === "video" ? Math.ceil(beatDurSec) : undefined,
+      prompt: buildPrompt(""),
+    });
+    throw new ManualGenerationPendingError(beat.index);
+  }
 
   // Magnific AI — one more AI b-roll backend (Mystic images + Ken Burns, or Hailuo
   // video). Used both as the CHOSEN provider (AI_PROVIDER=magnific) and, when
@@ -3650,9 +3690,20 @@ async function acquireAi(
     }
   }
 
+  // flowSpentRuns is IMAGE-specific (flowVideoSpentRuns is tracked separately), so this
+  // only ever short-circuits an image beat's Flow attempt. With "vids" configured, don't
+  // jump straight to "kie" here — that would skip the SAME Vids-then-chain fallback every
+  // ordinary per-beat Flow failure already uses below, for every beat after the first
+  // credits hit, defeating the point of "vids" as a free layer IN FRONT of the paid chain.
+  // Only "kie"/"chain" (no free layer to preserve) keep the old immediate jump.
+  let flowImageKnownSpent = false;
   if (provider === "flow_browser" && flowFallbackToKie && flowSpentRuns.has(runId)) {
-    log(runId, "debug", `Beat ${beat.index}: Flow session spent for this run — going straight to the fallback`, { stage: "visual" });
-    provider = "kie";
+    if (flowFallbackVids) {
+      flowImageKnownSpent = true;
+    } else {
+      log(runId, "debug", `Beat ${beat.index}: Flow session spent for this run — going straight to the fallback`, { stage: "visual" });
+      provider = "kie";
+    }
   }
 
   if (provider === "flow_browser") {
@@ -3784,6 +3835,9 @@ async function acquireAi(
     if (flowMediaNow === "image") {
       let best: { path: string; score: number; model: string } | null = null;
       let flowError: Error | null = null;
+      if (flowImageKnownSpent) {
+        log(runId, "debug", `Beat ${beat.index}: Flow session spent for this run — skipping straight to Google Vids`, { stage: "visual" });
+      } else {
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         const tmpImg = path.join(os.tmpdir(), `flow_${runId.slice(0, 8)}_${beat.index}_${attempt}.png`);
         let usedModel = "";
@@ -3827,6 +3881,7 @@ async function acquireAi(
           log(runId, "info", `Beat ${beat.index}: Flow image scored ${score}% (<${threshold}) — regenerating ${attempt + 1}/${maxAttempts - 1}`, { stage: "visual" });
         }
       }
+      }
       if (best) {
         kenBurns(best.path, outPath, beatDurSec, beat.index % 2 === 1, resolution);
         try { fs.unlinkSync(best.path); } catch {}
@@ -3836,6 +3891,37 @@ async function acquireAi(
         const modelSlug = best.model.trim().toLowerCase().replace(/\s+/g, "-") || "nano-banana-pro";
         log(runId, "info", `Beat ${beat.index}: AI still via Google Flow/${best.model || "Nano Banana"} + Ken Burns — match ${best.score}%`, { stage: "visual" });
         return { path: outPath, kind: "ai", provider: `flow:${modelSlug}` };
+      }
+
+      // FLOW_FALLBACK_PROVIDER=vids: one free try on Google Vids before anything paid.
+      // Same exclusions as VIDS_FIRST above (no character reference — its image panel
+      // has no reference input; skipped once the run's Vids circuit breaker has tripped)
+      // and the SAME vidsSpentRuns/vidsConsecutiveFailures bookkeeping, since it is the
+      // same account/quota whether Vids is tried before or after Flow.
+      if (flowFallbackVids && !characterReferencePath && !vidsSpentRuns.has(runId)) {
+        const vidsAspect = getSetting("FLOW_ASPECT_RATIO") || aspect;
+        const vidsTmp = path.join(os.tmpdir(), `vidsfb_${runId.slice(0, 8)}_${beat.index}.jpg`);
+        try {
+          log(runId, "info", `Beat ${beat.index}: Flow failed — trying Google Vids before the paid fallback`, { stage: "visual" });
+          const shot = await generateVidsImage(runId, buildPrompt(VARIANTS[0]), vidsTmp, vidsAspect);
+          const vScore = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, vidsTmp);
+          vidsConsecutiveFailures.delete(runId);
+          if (vScore >= threshold) {
+            kenBurns(vidsTmp, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+            try { fs.unlinkSync(vidsTmp); } catch {}
+            log(runId, "info", `Beat ${beat.index}: AI still via Google Vids/Nano Banana (${shot.width}x${shot.height}) + Ken Burns — match ${vScore}% (Flow fallback)`, { stage: "visual" });
+            return { path: outPath, kind: "ai", provider: "vids:nano-banana" };
+          }
+          try { fs.unlinkSync(vidsTmp); } catch {}
+          log(runId, "info", `Beat ${beat.index}: Vids fallback scored ${vScore}% (<${threshold}) — continuing to the configured chain`, { stage: "visual" });
+        } catch (e) {
+          try { fs.unlinkSync(vidsTmp); } catch {}
+          const code = e instanceof FlowBrowserError ? e.code : undefined;
+          const n = (vidsConsecutiveFailures.get(runId) ?? 0) + 1;
+          vidsConsecutiveFailures.set(runId, n);
+          if (code === "credits" || code === "config" || code === "login" || n >= VIDS_FAILURES_BEFORE_SPENT) vidsSpentRuns.add(runId);
+          log(runId, "warn", `Beat ${beat.index}: Vids fallback also failed (${(e as Error).message.slice(0, 160)}) — ${vidsSpentRuns.has(runId) ? "Vids skipped for the rest of this run; " : ""}continuing to the configured chain`, { stage: "visual" });
+        }
       }
 
       if (!flowFallbackToKie) {

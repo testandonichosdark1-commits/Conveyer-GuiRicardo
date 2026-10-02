@@ -169,7 +169,7 @@ export function providerVoiceLabel(id: string | null | undefined): string {
   return `${voiceProviderMeta(id).label} Voice ID`;
 }
 
-export type AiProviderId = "kie" | "69labs" | "magnific" | "runware" | "higgsfield" | "flow_browser";
+export type AiProviderId = "kie" | "69labs" | "magnific" | "runware" | "higgsfield" | "flow_browser" | "manual";
 export type AiMedia = "image" | "video";
 
 /** One selectable generation model. `id` is the exact provider string persisted to the setting. */
@@ -334,6 +334,16 @@ export const AI_PROVIDERS: AiProviderMeta[] = [
         { id: "bytedance/seedance/v1/pro/image-to-video", label: "Seedance 1 Pro" },
       ],
     },
+  },
+  {
+    // Generates nothing itself — see manual-pending.ts. For an operator whose target
+    // account can only be reached by hand (e.g. an anti-detect-browser profile with no
+    // paid CDP/API access): a beat writes its prompt to <runDir>/manual-prompts.txt and
+    // pauses the run instead of calling an API; the operator generates and downloads by
+    // hand, drops the file into <runDir>/manual/beat_XXXX.<ext>, and clicks Resume. No
+    // model catalog — there is no API call here for a model id to configure.
+    id: "manual",
+    selectLabel: "Manual (paste prompts yourself)",
   },
 ];
 

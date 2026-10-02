@@ -21,8 +21,9 @@ import { assembleStudioVideo, sliceAudio, decodeToWav, type RenderBeat } from ".
 import { recordHeygenEngine } from "./services/cost-ledger";
 import { rebuildSceneAssetsFromDisk, syncRunToDrive } from "./services/run-upload";
 import type { HeygenEngine } from "./pricing";
-import { beginRun, endRun } from "./run-lifecycle";
+import { beginRun, endRun, pauseRunForOperator } from "./run-lifecycle";
 import { noteCreditExhausted } from "./services/credit-exhaustion";
+import { ManualGenerationPendingError, manualMediaDir, manualPromptsPath } from "./services/manual-pending";
 import { joinDegraded, type DegradeCode } from "./degraded";
 import { beginStoryblocksRun } from "./services/storyblocks";
 import { FlowBrowserError } from "./services/flow-browser";
@@ -505,6 +506,9 @@ export async function runStudioPipeline(
     const actualSource = new Map<number, "real" | "ai">();
     /** Where each beat's visual came from — written to credits.json after the loop. */
     const credits = new Map<number, CreditEntry>();
+    /** Beats waiting on AI_PROVIDER=manual — never filled from a neighbour, never assembled
+     *  into a finished video until the operator supplies them. See manual-pending.ts. */
+    const manualPendingBeats: number[] = [];
 
     /**
      * Avatar beats the plan asked for, counted BEFORE the loop: a beat that fails is
@@ -536,10 +540,16 @@ export async function runStudioPipeline(
           } catch (e) {
             if (e instanceof CancelledError) throw e; // cancel aborts the beat — never fall back to more work
             if (e instanceof FlowBrowserError && !isFlowBeatExhausted(e)) throw e; // strict Flow-only mode fails closed; never reuse an unrelated image
-            log(runId, "warn", `Beat ${beat.index} visual failed (${(e as Error).message.slice(0, 120)}) — will reuse a neighbour`, {
-              stage: "visual",
-            });
-            visualPath = null; // filled from the nearest good visual after all beats resolve
+            if (e instanceof ManualGenerationPendingError) {
+              manualPendingBeats.push(beat.index);
+              log(runId, "info", `Beat ${beat.index}: waiting for manual AI generation — prompt saved`, { stage: "visual" });
+              visualPath = null; // never filled from a neighbour — see the pause check after this loop
+            } else {
+              log(runId, "warn", `Beat ${beat.index} visual failed (${(e as Error).message.slice(0, 120)}) — will reuse a neighbour`, {
+                stage: "visual",
+              });
+              visualPath = null; // filled from the nearest good visual after all beats resolve
+            }
           }
         }
 
@@ -579,6 +589,10 @@ export async function runStudioPipeline(
               } catch (e) {
                 if (e instanceof CancelledError) throw e; // cancel aborts the beat
                 if (e instanceof FlowBrowserError && !isFlowBeatExhausted(e)) throw e;
+                if (e instanceof ManualGenerationPendingError) {
+                  manualPendingBeats.push(beat.index);
+                  log(runId, "info", `Beat ${beat.index}: waiting for manual AI generation — prompt saved`, { stage: "visual" });
+                }
                 visualPath = null; // filled from the nearest good visual after all beats resolve
               }
             }
@@ -599,6 +613,27 @@ export async function runStudioPipeline(
       if (s.status === "fulfilled") return s.value;
       throw s.reason;
     });
+
+    // AI_PROVIDER=manual: stop here, BEFORE neighbour carry-over or assembly, so a beat
+    // waiting on the operator's own generation is never silently patched with a duplicate
+    // of another beat's visual or shipped as a "done" video missing it. Every beat that
+    // could proceed without manual input already has (real footage, avatar, other AI
+    // providers) — only the ones needing it are left pending. Reuses the exact pause
+    // mechanism a kie.ai credit exhaustion already uses (pauseRunForOperator + checkCancelled
+    // throwing CancelledError), so Resume already knows how to continue once the operator
+    // supplies the files: every beat already rendered is kept, only what's missing (checked
+    // fresh against `<runDir>/manual/`) gets (re)generated.
+    if (manualPendingBeats.length > 0) {
+      pauseRunForOperator(
+        runId,
+        `${manualPendingBeats.length} beat(s) aguardando geração manual de IA. Os prompts foram salvos em ` +
+          `${manualPromptsPath(runDir)} — gere as imagens/vídeos, baixe e salve em ` +
+          `${manualMediaDir(runDir)} nomeados como beat_XXXX.<extensão> (ex: beat_0007.png, beat_0012.mp4), ` +
+          `depois clique Resume: cada beat já pronto é reaproveitado, só o que falta é regenerado.`,
+        "visual"
+      );
+      checkCancelled(runId);
+    }
 
     // 3b. No black screens: any non-avatar beat whose visual failed reuses the
     // NEAREST beat that has a visual (carry-over) instead of a dark placeholder.
@@ -872,6 +907,9 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
     const avatarPlanned = beats.filter((b) => b.layout === "avatar" || b.layout === "split").length;
     let avatarDropped = 0;
     let regenAvatar = 0;
+    /** Beats waiting on AI_PROVIDER=manual — see manual-pending.ts and the matching
+     *  declaration in runStudioPipeline. */
+    const manualPendingBeats: number[] = [];
 
     const settled = await Promise.allSettled(
       beats.map(async (beat): Promise<RenderBeat> => {
@@ -896,9 +934,14 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
             } catch (e) {
               if (e instanceof CancelledError) throw e;
               if (e instanceof FlowBrowserError && !isFlowBeatExhausted(e)) throw e;
-              log(runId, "warn", `Beat ${beat.index} visual failed (${(e as Error).message.slice(0, 120)}) — will reuse a neighbour`, {
-                stage: "visual",
-              });
+              if (e instanceof ManualGenerationPendingError) {
+                manualPendingBeats.push(beat.index);
+                log(runId, "info", `Beat ${beat.index}: waiting for manual AI generation — prompt saved`, { stage: "visual" });
+              } else {
+                log(runId, "warn", `Beat ${beat.index} visual failed (${(e as Error).message.slice(0, 120)}) — will reuse a neighbour`, {
+                  stage: "visual",
+                });
+              }
               visualPath = null;
             }
           }
@@ -944,6 +987,10 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
                   } catch (e2) {
                     if (e2 instanceof CancelledError) throw e2;
                     if (e2 instanceof FlowBrowserError && !isFlowBeatExhausted(e2)) throw e2;
+                    if (e2 instanceof ManualGenerationPendingError) {
+                      manualPendingBeats.push(beat.index);
+                      log(runId, "info", `Beat ${beat.index}: waiting for manual AI generation — prompt saved`, { stage: "visual" });
+                    }
                     visualPath = null;
                   }
                 }
@@ -961,6 +1008,21 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
       if (s.status === "fulfilled") return s.value;
       throw s.reason;
     });
+
+    // AI_PROVIDER=manual: same pause as the first-run pipeline — see its matching comment.
+    // A Resume can still find beats pending manual generation (the operator hasn't supplied
+    // every file yet), and must stop here again rather than reusing a neighbour for them.
+    if (manualPendingBeats.length > 0) {
+      pauseRunForOperator(
+        runId,
+        `${manualPendingBeats.length} beat(s) aguardando geração manual de IA. Os prompts foram salvos em ` +
+          `${manualPromptsPath(runDir)} — gere as imagens/vídeos, baixe e salve em ` +
+          `${manualMediaDir(runDir)} nomeados como beat_XXXX.<extensão> (ex: beat_0007.png, beat_0012.mp4), ` +
+          `depois clique Resume: cada beat já pronto é reaproveitado, só o que falta é regenerado.`,
+        "visual"
+      );
+      checkCancelled(runId);
+    }
 
     // No black screens — same neighbour carry-over as the first-run pipeline.
     const goodIdx = renderBeats.map((b, i) => (b.visualPath ? i : -1)).filter((i) => i >= 0);

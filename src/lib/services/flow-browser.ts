@@ -242,6 +242,12 @@ function projectUrl(): string {
 
 async function launchBrowser(): Promise<{ context: BrowserContext; page: Page }> {
   if (state.context?.browser()?.isConnected() && state.page && !state.page.isClosed()) {
+    // Flow and Vids (services/vids-browser.ts) share ONE Chrome window as separate tabs —
+    // whichever one the operator is looking at, or the other automation last focused, may
+    // not be Flow's. Some Flow UI does not reliably render/respond while its tab is
+    // backgrounded, so make it the active tab before touching it every time, regardless of
+    // what's on screen. Mirrors vidsPage()'s identical fix for the same shared-window issue.
+    await state.page.bringToFront();
     return { context: state.context, page: state.page };
   }
   if (state.launching) return state.launching;
@@ -263,6 +269,7 @@ async function launchBrowser(): Promise<{ context: BrowserContext; page: Page }>
       if (!context) throw new Error("Chrome exposed no browser context");
       const pages = context.pages();
       const page = pages.find((p) => /labs\.google/.test(p.url())) ?? pages[0] ?? await context.newPage();
+      await page.bringToFront();
       state.context = context;
       state.page = page;
       context.on("close", () => {
@@ -296,9 +303,44 @@ function looksLikeLogin(url: string): boolean {
   return /accounts\.google\.|\/signin|ServiceLogin/i.test(url);
 }
 
-async function pageHasLoginPrompt(page: Page): Promise<boolean> {
-  if (looksLikeLogin(page.url())) return true;
-  return page.getByText(/Sign in|Fazer login|Iniciar sessão/i).first().isVisible().catch(() => false);
+/** Matches ONLY when a clickable control's entire text is (close to) just this phrase — never
+ *  a substring inside unrelated prose. Confirmed live (2026-10-01): a bare `/Sign in/i` search
+ *  over the WHOLE page matched a Flow tile's own auto-generated caption, "Snow covered street
+ *  SIGN IN winter...", because Flow permanently leaves every finished tile's caption in the
+ *  DOM. That caption never goes away on its own, which is exactly why neither the settle-wait
+ *  recheck above nor a full server restart ever cleared it — the false signal wasn't transient,
+ *  it was a fixed piece of page content. Anchoring to the control's FULL text (not "contains")
+ *  is what rules out a caption with many other words in it. */
+const SIGN_IN_PHRASE = /^\s*(?:Sign in|Fazer login|Iniciar sessão)\s*$/i;
+
+function pageLooksLoggedOut(page: Page): Promise<boolean> {
+  if (looksLikeLogin(page.url())) return Promise.resolve(true);
+  const control = page.locator('button, a, [role="button"], [role="link"]').filter({ hasText: SIGN_IN_PHRASE });
+  return control.first().isVisible().catch(() => false);
+}
+
+/**
+ * Confirmed live (2026-10-01, real account): 3 CONCURRENT beats all reported "Google session
+ * expired" within under a second of each other, tripping the run's Flow circuit breaker — yet
+ * the operator confirmed the Google account's login never actually dropped. All three were
+ * polling the SAME shared page at the same instant and caught the SAME one-shot reading, which
+ * this function used to trust immediately. Google can bounce a tab through accounts.google.com
+ * (or briefly render sign-in text) for a silent background session/token recheck that resolves
+ * itself in well under a couple of seconds, with no action needed and nothing wrong with the
+ * login — indistinguishable from a real logout at the exact instant of the bounce. A single
+ * false reading here is disproportionately expensive: it permanently retires Flow for the rest
+ * of the run (noteFlowFailure's `login` code counts toward flowSpentRuns), not just this one
+ * beat. So a positive reading is no longer trusted immediately — it is rechecked once after a
+ * short settle window, and only reported as a real logout if it still holds. This costs nothing
+ * on every ordinary poll (the wait only runs on the RARE positive branch) and costs a genuine
+ * logout only ~2.5s of extra detection time, which is trivial next to losing Flow for an entire
+ * run over a blip that resolved on its own.
+ */
+/** Exported for unit tests — see the doc comment above pageLooksLoggedOut's sibling helper. */
+export async function pageHasLoginPrompt(page: Page): Promise<boolean> {
+  if (!(await pageLooksLoggedOut(page))) return false;
+  await page.waitForTimeout(2_500);
+  return pageLooksLoggedOut(page);
 }
 
 async function gotoFlow(page: Page): Promise<void> {
@@ -943,6 +985,39 @@ async function ensureFlowImageMode(page: Page, modelOverride?: string): Promise<
 async function ensureFlowVideoMode(page: Page): Promise<void> {
   await ensureFlowMediaMode(page, "video");
   await ensureVeoModel(page);
+}
+
+/**
+ * Video-mode-only: a SECOND `role="radio"` pair lives in the same composer settings popover
+ * as media-mode/aspect-ratio — "Frames" (start/end still images) vs "Elementos"/"Elements"
+ * (character/object reference "ingredients"). Verified live on a second Flow account
+ * (2026-09-30, pt-BR, "guiaraki" project, ULTRA plan): that account's reference-photo attach
+ * only works with "Elementos" as the active input mode — Flow's own default is "Frames",
+ * which accepts start/end stills instead of a character reference. The operator confirmed
+ * there is no way to deselect it back to "Frames" once chosen on this account, and that
+ * leaving "Elementos" selected with no reference actually attached is safe — so this always
+ * selects it before every video generation, whether or not this beat attaches a reference,
+ * rather than only when `referenceImagePath` is set.
+ *
+ * Best-effort like ensureFlowAspectRatio/ensureFlowDuration: an older Flow layout without
+ * this second radio pair (not yet confirmed on every account) simply has nothing to find, and
+ * video generation proceeds exactly as it did before this existed.
+ */
+async function ensureFlowVeoElementsMode(page: Page): Promise<boolean> {
+  if (!(await openComposerSettingsPopover(page))) return false;
+  const radio = page.getByRole("radio", { name: /^Element/i });
+  if (!(await radio.first().isVisible().catch(() => false))) {
+    await dismissOpenOverlays(page);
+    return false;
+  }
+  if ((await radio.first().getAttribute("aria-checked").catch(() => null)) !== "true") {
+    await radio.first().click().catch(() => undefined);
+    // Same settle window as ensureFlowMediaMode/ensureFlowAspectRatio — a click immediately
+    // followed by dismissOpenOverlays' Escape was observed live to race the state update.
+    await page.waitForTimeout(400);
+  }
+  await dismissOpenOverlays(page);
+  return true;
 }
 
 /**
@@ -1688,14 +1763,15 @@ async function attemptFlowImage(
   // search, which is consistent with (not yet proven to be) something that search opened
   // still sitting in front of the model picker on the retry.
   const setupComposer = async (): Promise<Locator> => {
-    await dismissOpenOverlays(page);
-    const box = await promptBox(page);
-    await ensureFlowImageMode(page, model);
-    await ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
+    const D = withPresubmitDeadline;
+    await D("close overlays", () => dismissOpenOverlays(page));
+    const box = await D("find prompt box", () => promptBox(page));
+    await D("switch to image mode", () => ensureFlowImageMode(page, model));
+    await D("set aspect ratio", () => ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9"));
     // Remove any composer attachment left by a previous beat. Then attach the
     // portrait only for a beat explicitly routed as a character scene. This keeps
     // object/detail shots from inheriting the housekeeper by accident.
-    await prepareComposerReference(page, box, options?.referenceImagePath ?? null);
+    await D("attach reference", () => prepareComposerReference(page, box, options?.referenceImagePath ?? null), 3 * FLOW_PRESUBMIT_STEP_MS);
     return box;
   };
   let input: Locator;
@@ -1712,6 +1788,13 @@ async function attemptFlowImage(
     // existing model/provider fallback chain. Observed live: three different "could not
     // find X" errors within 33 seconds after ~1h40 of continuous use of the same tab
     // (beats 149/151/152 of a 174-beat run) — this is aimed squarely at that pattern.
+    //
+    // A presubmit STALL (code "timeout", stalled: true, from withPresubmitDeadline above)
+    // does NOT get this free retry — it falls straight through to the caller's own
+    // model/provider fallback chain, same as any other Flow image failure. Unlike video,
+    // an image beat has no cheaper media kind to degrade to, so there is nothing a retry
+    // buys here that the existing fallback chain doesn't already provide, and no reason to
+    // widen isPresubmitUiGlitch's pinned "ui"-only boundary.
     const code = e instanceof FlowBrowserError ? e.code : undefined;
     if (!isPresubmitUiGlitch(code)) throw e;
     log(runId, "warn", `Google Flow: composer setup failed (${(e as Error).message.slice(0, 140)}) — reloading the tab and retrying once`, { stage: "visual" });
@@ -1912,11 +1995,27 @@ async function findAndClaimMatchingTile(
   page: Page,
   prompt: string,
   deadline: number,
-  runId: string
+  runId: string,
+  failureBaseline?: FlowFailureBaseline
 ): Promise<{ mediaId: string; src: string } | null> {
+  // Checked INSIDE this loop, not only after it exhausts: a credits/policy failure card
+  // (e.g. "Você chegou ao limite de uso") can appear within seconds of submit, and this
+  // loop is what actually burns the whole `deadline` waiting for a tile that will never
+  // come. Checking only after the loop returns is checking only once the deadline has
+  // already passed — that check can then never fire, and every account-wide limit hit
+  // was misclassified as a generic 240s "timeout" instead of "credits", so the run-level
+  // Flow circuit breaker (flowSpentRuns in visual-source.ts) never tripped. The serial
+  // (non-concurrent) path already interleaves this same check every 4s; this brings the
+  // concurrent path to parity.
+  let nextFailureCheck = Date.now() + 4_000;
   while (Date.now() < deadline) {
     if (runId) checkCancelled(runId);
     if (await pageHasLoginPrompt(page)) throw new FlowBrowserError("Google session expired during generation.", "login");
+    if (failureBaseline && Date.now() >= nextFailureCheck) {
+      const failure = await detectFlowFailure(page, "image", failureBaseline);
+      if (failure) throw failure;
+      nextFailureCheck = Date.now() + 4_000;
+    }
     const tiles = await currentFlowImageTiles(page);
     const scored = tiles
       .filter((t) => !claimedMediaIds.has(t.mediaId))
@@ -1976,17 +2075,21 @@ async function attemptFlowImageConcurrent(
     }
     await maybeRecycleFlowTab(page, runId);
     const setupComposer = async (): Promise<Locator> => {
-      await dismissOpenOverlays(page);
-      const box = await promptBox(page);
-      await ensureFlowImageMode(page, model);
-      await ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
-      await prepareComposerReference(page, box, options?.referenceImagePath ?? null);
+      const D = withPresubmitDeadline;
+      await D("close overlays", () => dismissOpenOverlays(page));
+      const box = await D("find prompt box", () => promptBox(page));
+      await D("switch to image mode", () => ensureFlowImageMode(page, model));
+      await D("set aspect ratio", () => ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9"));
+      await D("attach reference", () => prepareComposerReference(page, box, options?.referenceImagePath ?? null), 3 * FLOW_PRESUBMIT_STEP_MS);
       return box;
     };
     let input: Locator;
     try {
       input = await setupComposer();
     } catch (e) {
+      // See attemptFlowImage's identical catch for why a presubmit STALL (code "timeout",
+      // stalled: true) does not get this free retry: nothing a reload buys here that the
+      // caller's own model/provider fallback chain doesn't already provide.
       const code = e instanceof FlowBrowserError ? e.code : undefined;
       if (!isPresubmitUiGlitch(code)) throw e;
       log(runId, "warn", `Google Flow: composer setup failed (${(e as Error).message.slice(0, 140)}) — reloading the tab and retrying once`, { stage: "visual" });
@@ -2014,14 +2117,7 @@ async function attemptFlowImageConcurrent(
     const timeoutMs = flowImageTimeoutMs();
     const deadline = Date.now() + timeoutMs;
     let nextFailureCheck = Date.now() + 4_000;
-    const claimed = await findAndClaimMatchingTile(page, prompt, deadline, runId);
-    // A failure check even while polling for the match — a credits/policy card is
-    // account-wide, so it can still legitimately end THIS beat's wait even though it
-    // wasn't found via the caption match loop's own timing.
-    if (!claimed && Date.now() < deadline) {
-      const failure = await detectFlowFailure(page, "image", failureBaseline);
-      if (failure) throw failure;
-    }
+    const claimed = await findAndClaimMatchingTile(page, prompt, deadline, runId, failureBaseline);
     if (!claimed) {
       throw new FlowBrowserError(
         `No Flow tile confidently matched this beat's prompt within ${Math.round(timeoutMs / 1000)}s (concurrent path). The UI may have changed, or the caption never resolved.`,
@@ -2459,6 +2555,12 @@ export async function generateFlowVideo(
     await D("set aspect ratio", () => ensureFlowAspectRatio(page, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9"));
     const requestedDurationSec = options?.durationSec && options.durationSec > 0 ? options.durationSec : flowRequestedVideoDurationSec();
     await D("set duration", () => ensureFlowDuration(page, requestedDurationSec));
+    // Some accounts' video composer gates the reference-attach flow behind a "Frames" vs
+    // "Elementos"/"Elements" input-mode choice — see ensureFlowVeoElementsMode's doc comment.
+    // Runs before the attach step (not just when a reference is wanted) since the operator
+    // confirmed leaving it selected with nothing attached is safe, and best-effort like
+    // aspect ratio/duration: a layout without this control has nothing to find here.
+    await D("set video input mode", () => ensureFlowVeoElementsMode(page));
     // Reference handling mirrors the image path exactly (prepareComposerReference is the
     // shared seam): cleared before every beat, attached only when this beat wants it, and
     // NEVER silently skipped — a failed attach throws rather than rendering a video that

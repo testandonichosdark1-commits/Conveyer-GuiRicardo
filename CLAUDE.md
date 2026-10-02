@@ -429,7 +429,7 @@ beat requires video."` for any video-routed beat; removed):
   either, and avoids resubmitting the same prompt.
 - Returns `{ kind: "ai", provider: "flow:veo3" }`; Ken Burns is never applied to a video result.
 
-### Fallback — `FLOW_FALLBACK_PROVIDER` (`none` default | `kie`)
+### Fallback — `FLOW_FALLBACK_PROVIDER` (`none` default | `kie` | `chain` | `vids`)
 
 Preserves the beat's media KIND on failure, for both directions: a video-routed beat that exhausts
 Flow's Veo path falls to `kie.ai`'s Veo (never its nano-banana image path), and an image-routed beat
@@ -439,6 +439,21 @@ even though the KIE branch below is itself generic: on a Flow-video fallback, `p
 `"kie"` and execution falls through into the SAME `resolveAiMedia()` call the kie branch already
 makes for every other route — it independently resolves back to `"video"` from the same beat/override/
 settings, so the handoff is not a special case, just letting the existing kie logic run.
+
+**`vids` (2026-09-29) — a free try on Google Vids IN FRONT of the `chain` fallback, requested after
+a real run showed Flow occasionally missing its own 240s window under `FLOW_IMAGE_CONCURRENCY`.**
+It is a layer, not a replacement: on an ordinary still, when Flow's own attempt loop fails,
+`generateVidsImage` is tried once before anything paid; if it also fails (or scores below the
+gate), or the beat wants the character reference (Vids' image panel has no reference input — same
+exclusion as `VIDS_FIRST` above), execution falls straight through to the SAME
+Cloudflare → Pollinations → Meta Muse → kie.ai chain `chain` already runs. `vids` is never left with
+no fallback just because the free source happened to be down too — the chain still runs underneath
+it, unconditionally. Reuses the EXISTING `vidsSpentRuns`/`vidsConsecutiveFailures` circuit breaker
+(built for `VIDS_FIRST`) rather than duplicating it, since it's the same Vids account/quota whether
+Vids is tried before or after Flow. Covered by `flow-vids-fallback.test.ts` (Vids succeeds; Vids
+also fails and falls to Cloudflare; both unavailable and it still reaches kie.ai; a
+character-reference beat skips Vids entirely; plain `chain` never touches Vids — regression guard).
+Video beats are unaffected — Vids' video path isn't wired into this fallback, only its image panel.
 
 **Attaching the reference — verified live (2026-09-24, pt-BR), and it is SELECT-or-upload, in two
 layouts.** The composer's "+" (`aria-label="Adicionar elementos à caixa de comando"`) opens Flow's
@@ -500,6 +515,90 @@ Chrome against a structural mock (both layouts) — it proves the logic, not tha
 - **Style slot**: when the style has `[INSIRA O ASSUNTO AQUI]`, the subject goes through
   `fitSubjectToSlot` ("An over-the-shoulder shot of X." -> "X, over-the-shoulder shot") and the
   "in a documentary about: …" anchor is omitted. Prompts without a slot are byte-identical to before.
+
+### Second Flow account mapping — "Frames" vs "Elementos" video input mode (2026-09-30)
+
+Mapped by screenshot walkthrough (no CDP access to this account — a separate anti-detect-browser
+profile, not the operator's normal automation Chrome) against a second Flow account ("guiaraki",
+ULTRA plan). Two findings:
+
+- **The model-name matcher needed no fix.** This account's Veo dropdown lists FIVE distinct tiers
+  — Omni 1.1 Flash, Veo 3.1 - Lite, Veo 3.1 - Fast, Veo 3.1 - Quality, **and** Veo 3.1 - Lite
+  [Lower Priority] as a SEPARATE entry (the operator gets unlimited generation specifically on the
+  bracketed one). This looked at first like it would collide with `flowModelLabelMatches`'s
+  "strips cosmetic decoration" rule, but re-reading `cleanModelLabelLine` settled it: it only
+  replaces the bracket/paren PUNCTUATION characters with spaces — it does not drop their
+  contents — so "Veo 3.1 - Lite [Lower Priority]" normalizes to `veo 3.1 lite lower priority`,
+  genuinely different from plain `veo 3.1 lite`. Setting `FLOW_VIDEO_MODEL=veo-3.1-lite-lower-priority`
+  is all that is needed to target the unlimited tier specifically; no code changed.
+- **A second `role="radio"` pair the video composer settings popover — "Frames" (start/end still
+  images) vs "Elementos"/"Elements" (character/object reference "ingredients") — was NOT wired
+  into `generateFlowVideo` at all**, though `openComposerSettingsPopover`'s own doc comment had
+  already noted its existence from an earlier session without anyone acting on it. On this
+  account the reference-photo attach only works with "Elementos" active; Flow's own default is
+  "Frames" (accepts start/end stills instead). The operator confirmed there is no way to
+  deselect it back to "Frames" once chosen, and that leaving "Elementos" selected with nothing
+  attached is safe — so `ensureFlowVeoElementsMode` (same `role="radio"` + `aria-checked` pattern
+  as `ensureFlowMediaMode`/`ensureFlowAspectRatio`) now runs on EVERY video generation, before the
+  reference-attach step, regardless of whether that beat actually has a reference. Best-effort
+  like aspect ratio/duration: an older layout without this second radio pair has nothing to find
+  and generation proceeds exactly as before this existed.
+- **Not yet verified**: whether this second radio pair exists on the PRIMARY Flow account/project
+  documented elsewhere in this file, or is specific to this second account/a newer Flow rollout.
+  `openComposerSettingsPopover`'s own doc comment already described seeing "Frames/Elementos"
+  together with the other radios, so it is likely present broadly — but only this second
+  account's reference-attach dependency on it has actually been confirmed live.
+
+### A one-shot "Sign in" check retired Flow for an entire run over a blip, not a real logout (fixed 2026-10-01)
+
+Diagnosed on a real run: 3 CONCURRENT beats (15/16/17) all reported "Google session expired
+during generation" within under a second of each other — three non-policy/non-credits failures
+is exactly `FLOW_FAILURES_BEFORE_SPENT`, so `flowSpentRuns` tripped at beat 18 and every later
+beat skipped Flow for the rest of the run. **The operator confirmed the Google login never
+actually dropped.** All three beats were polling the SAME shared page (Flow's tab is one
+module-global page, per the "serialized process-wide" design) at the same instant, and all
+three caught the SAME one-shot reading from `pageHasLoginPrompt` — a plain URL-pattern check
+(`accounts.google.com`/`/signin`/`ServiceLogin`) plus a page-wide text search for "Sign in". Both
+halves can be transiently true for an instant during a SILENT background session/token recheck
+that Google itself resolves in well under a couple of seconds, with no operator action and
+nothing actually wrong with the login — a momentary bounce is indistinguishable from a real
+logout at the exact instant it's sampled.
+
+The cost of trusting that one-shot reading is wildly disproportionate: a single false positive
+doesn't just fail one beat, it marks the run's whole Flow session "spent" (`login` is a
+non-policy code, so it counts toward the same 3-strikes counter a real problem would trip) —
+permanently retiring Flow for every remaining beat even though the account was never actually
+logged out. Fixed by splitting the check into `pageLooksLoggedOut` (the original one-shot
+logic) and `pageHasLoginPrompt` (exported for tests), which now only trusts a positive reading
+after a 2.5s settle wait AND a second check still agreeing. This costs nothing on the ordinary
+path (the wait only ever runs on the rare positive branch, never on every poll tick) and costs
+a genuine logout only ~2.5s of extra detection time — trivial next to losing Flow for an entire
+run over a blip that would have resolved on its own. All 9 call sites across the image/video
+setup checks and wait loops share the one fixed function, so every one of them benefits
+uniformly without the fix needing to be duplicated. Covered by `flow-browser.test.ts`: a clean
+page reports false with no wait, a momentary bounce that resolves during the recheck is NOT
+reported as a logout, and a persistent logout (URL or visible "Sign in" text, still true after
+the recheck) is still correctly reported.
+
+**The SAME day, a second and more stubborn false positive in this exact check, found live on a
+later run**: 3 beats again reported "session expired"/"login required", this time surviving
+BOTH the 2.5s recheck above AND a full server restart — yet the operator confirmed no login or
+consent screen was ever visible in the Flow tab. Connecting Playwright directly to the SAME
+CDP port the app's own automation Chrome uses (`127.0.0.1:9223` — this is the operator's own
+local automation profile, not a third-party tool) and running the live `getByText` search
+found the culprit: it matched a `<span>` reading **"Snow covered street sign in winter, muted
+colors..."** — one of Flow's own auto-generated tile captions (see "Concurrent image generation
+v2" above: Flow captions every finished tile from its own content) for a winter-themed run. A
+bare, unanchored `/Sign in/i` search matches that substring anywhere ANY text contains those
+characters in sequence — "street SIGN IN winter" quietly satisfies it exactly as much as a real
+"Sign in" button would. This is why neither the recheck nor a restart ever cleared it: a tile
+caption is permanent page content, not a transient state, so the false reading was never
+going to resolve on its own. Fixed by requiring the match to be a clickable control
+(`button, a, [role="button"], [role="link"]`) whose ENTIRE text is (closely) just "Sign in" /
+"Fazer login" / "Iniciar sessão" (`SIGN_IN_PHRASE`, anchored `^...$`) rather than a substring
+search over the whole page — a caption with many other words in it can no longer match no
+matter what words it happens to contain. Pinned by a regression test using this EXACT caption
+string, plus confirms the PT-BR phrases are still caught as exact button text.
 
 ### Veo video capture — verified live (2026-09-25)
 
@@ -641,6 +740,25 @@ having grabbed a reference the instant a placeholder appeared:
 small run (10–15 beats) first and check every resulting image against its own beat's prompt
 — cheap to eyeball in full, and exactly how v1's bug was actually caught.
 
+**A second real bug, found live 2026-09-29: `findAndClaimMatchingTile` never checked for a
+failure card WHILE polling, only after — and "after" can never fire.** The serial
+(non-concurrent) `attemptFlowImage` interleaves `detectFlowFailure` every 4s inside its wait
+loop, so a credits/policy card ends the wait in seconds. The concurrent path's wait was split
+into `findAndClaimMatchingTile` (poll for a matching TILE) and a failure check the caller ran
+`if (!claimed && Date.now() < deadline)` — but `findAndClaimMatchingTile` itself loops until
+`Date.now() >= deadline`, so by the time it returns `null` that condition is already false:
+the failure check is dead code, unreachable in practice. Confirmed live on a real account
+whose Nano Banana 2 had hit its usage limit (a Flow project grid full of "Você chegou ao
+limite de uso" cards): every affected beat burned the full 240s and was misclassified as a
+generic `"timeout"` instead of `"credits"` — and because `noteFlowFailure` (visual-source.ts)
+only marks `flowSpentRuns` on an explicit `credits` code (or 3 CONSECUTIVE non-policy
+failures, a counter any interleaved Flow success resets), the run's circuit breaker never
+tripped and Flow kept being retried fresh on every later beat instead of the run correctly
+recognizing "Flow is out" and sticking to `FLOW_FALLBACK_PROVIDER` (Vids) for its remainder.
+Fixed by moving the same 4s-interleaved `detectFlowFailure` check inside
+`findAndClaimMatchingTile`'s own loop (now takes `failureBaseline`), matching the serial
+path; the caller's now-unreachable post-loop check was removed rather than kept as dead code.
+
 ### Self-healing for "random-looking" Flow UI failures (2026-09-27)
 
 Diagnosed against a real 174-beat run: three DIFFERENT UI-detection errors fired within 33
@@ -691,6 +809,75 @@ uninterrupted session, not three independent selector bugs.
   count than ~20, that's a signal the real trigger is something else (e.g. elapsed TIME
   rather than generation COUNT), and the fix should move from a count-based to a
   time-based schedule instead.
+
+### The IMAGE path's composer setup had no presubmit deadline (fixed 2026-09-29)
+
+Diagnosed live: a resumed run submitted 3 beats to Flow's image queue (`FLOW_IMAGE_CONCURRENCY=2`)
+and then went **completely silent for 5+ minutes** — no log line, no error, no timeout — for all
+three. `generateFlowVideo` already wraps every composer-setup step (mode switch, ratio, reference
+attach) in `withPresubmitDeadline` (90s) specifically because "a control that never answered held
+Flow's single serialized queue for good, stalling every later beat — images included" (see the
+comment on `FLOW_PRESUBMIT_STEP_MS` above) — but `attemptFlowImage` and
+`attemptFlowImageConcurrent`'s `setupComposer()` (`dismissOpenOverlays` → `promptBox` →
+`ensureFlowImageMode` → `ensureFlowAspectRatio` → `prepareComposerReference`) ran those same steps
+**bare, with no deadline at all**. A control that never resolves there hangs forever, holding
+`enqueue()`'s lock and silently blocking every later Flow beat behind it — exactly the symptom
+observed, and worse than the video case since NOTHING downstream of that lock can run at all.
+
+Fixed by wrapping both composer-setup closures in `withPresubmitDeadline` the same way
+`generateFlowVideo` already does (`prepareComposerReference` gets `3× FLOW_PRESUBMIT_STEP_MS`,
+same as video, since it can involve an upload). **Deliberately does NOT widen
+`isPresubmitUiGlitch`'s free-reload-retry to cover the resulting stall** (`code: "timeout",
+stalled: true`) — that boundary is pinned by test as "ui" only, and a stall now simply throws
+out of `setupComposer()` into the SAME fallback chain (model fallback → `FLOW_FALLBACK_PROVIDER`)
+that already handles every other Flow image failure. Unlike video, an image beat has no cheaper
+media kind to degrade to, so a reload-retry would buy nothing the existing chain doesn't already
+provide.
+
+**A second, independent misconfiguration compounded the same incident**: `FLOW_IMAGE_MODEL_FALLBACK`
+was set to the SAME value as `FLOW_IMAGE_MODEL` (both `nano-banana-2`), on an account whose Nano
+Banana 2 had hit its usage limit (confirmed live — a Flow project grid full of "Você chegou ao
+limite de uso" cards). `generateFlowImageConcurrent`'s own guard (`isLimited(primaryModel) &&
+(!fallbackModel || isLimited(fallbackModel))` → throw immediately) means a fallback model equal to
+an already-limited primary is worse than no fallback at all: it walks through a second full
+composer-setup + submit cycle against a model already known to be blocked, burning the presubmit
+deadline's 90s+ again before finally giving up — instead of the immediate `credits` throw an EMPTY
+`FLOW_IMAGE_MODEL_FALLBACK` produces. Operator fix (not code): set `FLOW_IMAGE_MODEL_FALLBACK` to a
+genuinely different tier, or leave it blank so a limit hit falls straight through to
+`FLOW_FALLBACK_PROVIDER` (here, `vids`) with no wasted retry.
+
+**Live-testing the two fixes above surfaced a third, more fundamental bug, also fixed 2026-09-29**:
+neither Flow nor Vids ever called `page.bringToFront()`. They share ONE Chrome window as separate
+tabs, and the operator watched it happen live — a beat correctly fell over to Vids and generated
+successfully (100% match) **only after manually switching Chrome to the Vids tab**; a later beat's
+Vids fallback then failed outright (`locator.click: Timeout 8000ms exceeded … waiting for
+locator('textarea').filter({ visible: true })`) while the operator was looking at the Flow tab
+instead, and the run only recovered once they switched back to Vids. Some of Vids' own Angular UI
+(confirmed live: the prompt textarea) simply does not resolve as `visible` to Playwright while its
+tab is backgrounded — so which automation actually WORKS silently depended on which tab a human
+happened to have on screen, defeating the entire point of an unattended fallback chain. Fixed by
+calling `page.bringToFront()` in both `vidsPage()` (vids-browser.ts) and `launchBrowser()`
+(flow-browser.ts, both the cached-page fast path and the freshly-connected path) — each automation
+now makes ITS OWN tab the active one via CDP immediately before touching it, regardless of what the
+operator has on screen. The operator no longer needs to babysit which tab is focused.
+
+**A fourth bug, found the same day once the failure-detection fix above (see "Concurrent image
+generation v2") started correctly tripping `flowSpentRuns`**: once a run's Flow session is marked
+spent, `visual-source.ts`'s early short-circuit (right before `if (provider === "flow_browser")`)
+unconditionally set `provider = "kie"` — which skips the ENTIRE `flow_browser` branch, including the
+per-beat "Flow failed → try Vids → then the chain" block that lives inside it. So the very first
+`credits` hit correctly stopped wasting time on Flow, but **every beat after that jumped straight
+to the paid chain, never trying Vids again** — exactly backwards from `vids`'s purpose as a free
+layer in front of the chain, and exactly the gap the operator caught live ("não faz sentido... era
+pra ficar somente no Vids"). Fixed with a `flowImageKnownSpent` flag: when `flowFallbackVids` is
+configured, the short-circuit no longer reassigns `provider` at all — it lets the beat still enter
+the `flow_browser` branch, skips only the actual `generateFlowImage` attempt loop (logging "Flow
+session spent for this run — skipping straight to Google Vids"), and falls through to the SAME
+Vids-then-chain block a fresh per-beat failure already uses. `flowSpentRuns` is IMAGE-only
+(`flowVideoSpentRuns` is separate), so this only ever touches the image path; a video-routed beat is
+unaffected. Regression-covered in `flow-vids-fallback.test.ts`: a run whose first beat trips
+`flowSpentRuns` via a `credits` failure, then a second beat on the SAME run id, asserts
+`generateFlowImage` is never called again while `generateVidsImage` still is, every beat.
 
 ### Google Vids provider (`VIDS_FIRST`) — verified live 2026-09-26
 
@@ -1544,6 +1731,55 @@ billed ~6x, while 1,428 `gemini-2.5-flash` rows were billed at the lite rate.
   ledger; their runs are near-zero on /costs by construction.
 - **Avatar creation spend.** HeyGen group create/train and the kie reference image are
   billable but run under an avatar id, not a run id — they need an account-level scope.
+
+## Manual AI generation (`AI_PROVIDER=manual`) — added 2026-09-30
+
+For an operator whose target account can only be reached by hand — e.g. a second Flow account
+logged into an anti-detect-browser profile (GinsBrowser/DICloak) whose vendor charges $28.80/mo
+extra (the "Plus" tier) just for local CDP/API automation access, confirmed against DICloak's
+own pricing page. Rather than pay for that or risk the account by moving its login into the
+app's own automation Chrome (defeats the point of an isolated fingerprint profile), the operator
+pastes prompts into the account themselves and hands the resulting files back to the pipeline.
+
+- **No generation API is called at all.** A beat routed here (`services/manual-pending.ts`)
+  first checks `<runDir>/manual/` for a file already named `beat_XXXX.<ext>` (any extension —
+  never assumed, since an operator's download could be .png/.jpg or .mp4/.mov/.webm). Found: an
+  image goes through Ken Burns exactly like any other AI still (`provider: "manual:image"`); a
+  video is copied through as-is, unmodified — no re-encoding here, same reasoning as every other
+  video source (the beat compositor's `renderBeat` already re-encodes every beat visual to the
+  project's exact frame count, `-an` always strips audio). Not found: the beat's prompt (built
+  from the SAME `buildPrompt` every other AI provider uses, so wording is never a second,
+  drifted copy) is appended to `<runDir>/manual-prompts.txt`, and `ManualGenerationPendingError`
+  is thrown.
+- **Never reused from a neighbour, never silently degrades the video.** `studio-pipeline.ts`
+  recognizes that error specially in both `runStudioPipeline` and `resumeStudioPipeline`'s
+  per-beat catch (both the b-roll attempt and the avatar-beat's b-roll-degrade fallback): the
+  beat's index is collected into `manualPendingBeats` instead of falling into the ordinary
+  "will reuse a neighbour" path. Every OTHER beat still proceeds completely normally — real
+  footage, avatar clips, other AI providers — only the ones actually needing manual input wait.
+- **The run pauses, it doesn't half-finish.** Once every beat that COULD proceed has, if
+  `manualPendingBeats` is non-empty the pipeline calls `pauseRunForOperator` (the exact same
+  mechanism a kie.ai credit exhaustion already uses — see Cost Monitoring above) naming the
+  prompts file and the folder to drop files into, then `checkCancelled(runId)` to unwind through
+  the identical clean-stop path a user-initiated Stop uses. This runs BEFORE the neighbour
+  carry-over loop and BEFORE `assembleStudioVideo`, so a pending beat is never patched with a
+  duplicate visual or shipped inside a video marked "done". Resume re-enters the SAME per-beat
+  check, which now finds the operator's files (or re-writes the prompt again, harmlessly — see
+  below — if some are still missing) and only regenerates what's still absent.
+- **The prompts file never accumulates duplicates across retries/resumes.** `appendManualPrompt`
+  checks for the beat's own `===== Beat NNNN (...) =====` header before writing, so a beat
+  re-attempted on a later Resume (because the operator hadn't gotten to it yet) does not grow
+  the file with the same prompt over and over.
+- **Registered as a normal `AiProviderId`** (`providers.ts`) with no `image`/`video` model
+  catalog and no `apiKey` — `ProviderModelFields`/`ProviderAiFields` already render nothing for
+  a provider missing those (capability-driven, no dead fields), so selecting "Manual" in
+  Settings shows no irrelevant model-picker or API-key box.
+- Covered by `manual-pending.test.ts` (the pure file/prompt-file helpers) and
+  `visual-source-manual.test.ts` (the `acquireAi` branch: pending-then-throw, image-found,
+  video-found, and that a video-pinned beat's prompt is labelled `video` not `image`). The
+  pause/never-reuse behavior in `studio-pipeline.ts` itself is not unit-tested — that file has
+  no test suite at all (too integration-heavy; every other guarantee there is verified by
+  running real end-to-end video pipelines, per this file's own "Verified" sections).
 
 ## Known follow-ups
 
