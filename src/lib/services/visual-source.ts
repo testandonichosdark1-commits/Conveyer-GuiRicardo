@@ -8,7 +8,7 @@ import { pLimit } from "../plimit";
 import { resolveFfmpeg } from "../ffmpeg-bin";
 import { log } from "../logger";
 import { checkCancelled } from "../cancellation";
-import { kenBurns } from "./ken-burns";
+import { animateStill } from "./still-animator";
 import { animateScene } from "./img2vid";
 import { labs69Image } from "./image-gen";
 import { generateImageUrl, generateVideoUrl, downloadKie } from "./kie";
@@ -2152,7 +2152,7 @@ async function materialize(
   }
   const tmpImg = path.join(os.tmpdir(), `kb_${runId.slice(0, 8)}_${beat.index}${path.extname(new URL(hit.url).pathname) || ".jpg"}`);
   await downloadToFile(hit.url, tmpImg, { "User-Agent": UA });
-  kenBurns(tmpImg, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+  await animateStill({ imagePath: tmpImg, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
   try {
     fs.unlinkSync(tmpImg);
   } catch {}
@@ -3540,7 +3540,7 @@ async function acquireAi(
         return { path: outPath, kind: "ai", provider: "manual:video" };
       }
       const score = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, existing);
-      kenBurns(existing, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+      await animateStill({ imagePath: existing, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
       log(runId, "info", `Beat ${beat.index}: using manually generated image (${path.basename(existing)}) + Ken Burns — match ${score}%`, { stage: "visual" });
       return { path: outPath, kind: "ai", provider: "manual:image" };
     }
@@ -3600,7 +3600,7 @@ async function acquireAi(
       }
     }
     if (best) {
-      kenBurns(best.path, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+      await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
       try { fs.unlinkSync(best.path); } catch {}
       log(runId, "info", `Beat ${beat.index}: AI still via Magnific/Mystic + Ken Burns — match ${best.score}%`, { stage: "visual" });
       return { path: outPath, kind: "ai", provider: "magnific:mystic" };
@@ -3654,7 +3654,7 @@ async function acquireAi(
       }
     }
     if (best) {
-      kenBurns(best.path, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+      await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
       try { fs.unlinkSync(best.path); } catch {}
       log(runId, "info", `Beat ${beat.index}: AI still via Higgsfield/Soul + Ken Burns — match ${best.score}%`, { stage: "visual" });
       return { path: outPath, kind: "ai", provider: "higgsfield:soul" };
@@ -3751,7 +3751,7 @@ async function acquireAi(
         const vScore = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, vidsTmp);
         vidsConsecutiveFailures.delete(runId);
         if (vScore >= threshold) {
-          kenBurns(vidsTmp, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+          await animateStill({ imagePath: vidsTmp, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
           try { fs.unlinkSync(vidsTmp); } catch {}
           log(runId, "info", `Beat ${beat.index}: AI still via Google Vids/Nano Banana (${shot.width}x${shot.height}) + Ken Burns — match ${vScore}%`, { stage: "visual" });
           return { path: outPath, kind: "ai", provider: "vids:nano-banana" };
@@ -3883,7 +3883,7 @@ async function acquireAi(
       }
       }
       if (best) {
-        kenBurns(best.path, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+        await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
         try { fs.unlinkSync(best.path); } catch {}
         // Reflects whichever model actually produced this image — the configured
         // FLOW_IMAGE_MODEL, or FLOW_IMAGE_MODEL_FALLBACK if the primary hit a limit and
@@ -3907,7 +3907,7 @@ async function acquireAi(
           const vScore = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, vidsTmp);
           vidsConsecutiveFailures.delete(runId);
           if (vScore >= threshold) {
-            kenBurns(vidsTmp, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+            await animateStill({ imagePath: vidsTmp, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
             try { fs.unlinkSync(vidsTmp); } catch {}
             log(runId, "info", `Beat ${beat.index}: AI still via Google Vids/Nano Banana (${shot.width}x${shot.height}) + Ken Burns — match ${vScore}% (Flow fallback)`, { stage: "visual" });
             return { path: outPath, kind: "ai", provider: "vids:nano-banana" };
@@ -3988,7 +3988,7 @@ async function acquireAi(
           });
           const cfScore = await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, cfImg);
           if (cfScore >= threshold) {
-            kenBurns(cfImg, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+            await animateStill({ imagePath: cfImg, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
             try { fs.unlinkSync(cfImg); } catch {}
             log(runId, "info", `Beat ${beat.index}: AI still via Cloudflare/FLUX.2 Klein [${cfGeneration.profileLabel}] + Ken Burns — match ${cfScore}% (later providers avoided)`, { stage: "visual" });
             return { path: outPath, kind: "ai", provider: "cloudflare:flux-2-klein" };
@@ -4027,7 +4027,7 @@ async function acquireAi(
           await generatePollinationsImage(buildPrompt(""), pollImg, aspect);
           const pollScore = await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, pollImg);
           if (pollScore >= threshold) {
-            kenBurns(pollImg, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+            await animateStill({ imagePath: pollImg, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
             try { fs.unlinkSync(pollImg); } catch {}
             log(runId, "info", `Beat ${beat.index}: AI still via Pollinations/${pollModel} + Ken Burns — match ${pollScore}% (Meta/kie.ai avoided)`, { stage: "visual" });
             return { path: outPath, kind: "ai", provider: `pollinations:${pollModel}` };
@@ -4061,7 +4061,7 @@ async function acquireAi(
           });
           const metaScore = await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, metaImg);
           if (metaScore >= threshold) {
-            kenBurns(metaImg, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+            await animateStill({ imagePath: metaImg, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
             try { fs.unlinkSync(metaImg); } catch {}
             log(runId, "info", `Beat ${beat.index}: AI still via Meta Muse/${metaModel} + Ken Burns — match ${metaScore}% (kie.ai avoided)`, { stage: "visual" });
             return { path: outPath, kind: "ai", provider: `meta:${metaModel}` };
@@ -4126,7 +4126,7 @@ async function acquireAi(
       }
     }
     if (best) {
-      kenBurns(best.path, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+      await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
       try { fs.unlinkSync(best.path); } catch {}
       log(runId, "info", `Beat ${beat.index}: AI still via kie.ai/nano-banana + Ken Burns — match ${best.score}%`, { stage: "visual" });
       return { path: outPath, kind: "ai", provider: "kie:nano-banana" };
@@ -4189,7 +4189,7 @@ async function acquireAi(
         }
       }
       if (best) {
-        kenBurns(best.path, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+        await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
         try { fs.unlinkSync(best.path); } catch {}
         log(runId, "info", `Beat ${beat.index}: AI still via Runware + Ken Burns — match ${best.score}%`, { stage: "visual" });
         return { path: outPath, kind: "ai", provider: "runware" };
@@ -4241,7 +4241,7 @@ async function acquireAi(
         }
       }
       if (best) {
-        kenBurns(best.path, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+        await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
         try { fs.unlinkSync(best.path); } catch {}
         log(runId, "info", `Beat ${beat.index}: AI still via 69labs + Ken Burns — match ${best.score}%`, { stage: "visual" });
         return { path: outPath, kind: "ai", provider: "69labs:image" };
