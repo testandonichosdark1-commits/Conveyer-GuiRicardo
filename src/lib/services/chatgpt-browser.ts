@@ -220,11 +220,19 @@ export async function generateChatGptImage(runId: string, prompt: string, outPat
     const before = new Set(await assistantImageSrcs(page));
 
     const box = await promptBox(page);
-    await box.click({ timeout: 8000 });
+    // 8000ms used to be the budget here, but a real run (2026-10-03) measured the
+    // composer taking longer than that to become clickable under ordinary load (this
+    // Chrome window also runs Flow/Vids in other tabs) — every one of 5 consecutive
+    // beats hit this exact timeout and fell through to a paid fallback with no API key
+    // configured, which then reused one neighbouring beat's image across the whole
+    // video. 25000ms gives the page real room to settle without masking a genuinely
+    // dead page (openChatGptPage()/startFreshConversation() already fail fast on an
+    // actual login/navigation problem).
+    await box.click({ timeout: 25_000 });
     // Real key events, not fill() — ChatGPT's own composer only enables Send on genuine input events.
     await page.keyboard.type(`Generate an image: ${prompt}`.slice(0, 4000), { delay: 1 });
     const send = await sendButton(page);
-    if (send) await send.click({ timeout: 8000 });
+    if (send) await send.click({ timeout: 25_000 });
     else await page.keyboard.press("Enter");
 
     const deadline = Date.now() + imageTimeoutMs();
