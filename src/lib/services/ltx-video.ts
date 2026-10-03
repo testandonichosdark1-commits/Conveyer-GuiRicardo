@@ -81,7 +81,16 @@ function buildWorkflow(opts: { imageFileName: string; prompt: string; width: num
         height: opts.height,
         length: opts.length,
         batch_size: 1,
-        strength: 1,
+        // ComfyUI core's nodes_lt.py: conditioning_latent_frames_mask = 1.0 - strength —
+        // i.e. standard img2img semantics (1.0 = ignore the starting frame, free
+        // generation; 0.0 = frozen on it, no motion at all). 1.0 (the node's own default)
+        // measurably still distorts complex, busy textures (an electrical panel's many
+        // switches/wires) partway into the clip, even though the FIRST frame is correct —
+        // confirmed live 2026-10-03 by extracting frames across a real beat. 0.65 keeps
+        // real motion but gives the model much less room to reinvent fine detail it
+        // should just be tracking. This reduces the risk, it does not eliminate it — no
+        // current video model guarantees zero drift on busy textures.
+        strength: 0.65,
       },
     },
     "69": { class_type: "LTXVConditioning", inputs: { positive: ["77", 0], negative: ["77", 1], frame_rate: 25 } },
