@@ -155,6 +155,13 @@ export const SETTING_KEYS = [
   "RUNPOD_API_KEY",                  // Bearer key for api.runpod.ai. Server-only; masked like every *_KEY.
   "RUNPOD_LTX_ENDPOINT_ID",          // Queue endpoint for the future LTX still-animation worker
   "RUNPOD_INFINITETALK_ENDPOINT_ID", // Queue endpoint for the future InfiniteTalk avatar worker
+  // Runpod network volume via its S3-compatible API (services/runpod-asset-store.ts) — no callers
+  // or form fields yet. The S3 key pair is a SEPARATE credential from RUNPOD_API_KEY.
+  "RUNPOD_NETWORK_VOLUME_ID",        // Network volume id = the S3 bucket name
+  "RUNPOD_S3_ENDPOINT",              // Datacenter S3 endpoint, e.g. https://s3api-eu-ro-1.runpod.io
+  "RUNPOD_S3_REGION",                // Datacenter id, e.g. EU-RO-1
+  "RUNPOD_S3_ACCESS_KEY_ID",         // S3 API key "access key" (user_…). Secret; masked.
+  "RUNPOD_S3_SECRET_ACCESS_KEY",     // S3 API key "secret" (rps_…). Secret; masked.
   "AVATAR_BACKGROUND",         // HeyGen avatar background color (hex) + placeholder color
   "VISUAL_CONCURRENCY",        // parallel b-roll fetch/gen jobs (default 3)
   "AVATAR_CONCURRENCY",        // parallel HeyGen avatar-clip jobs (default 2)
@@ -632,6 +639,11 @@ export const DEFAULTS: Record<SettingKey, string> = {
   RUNPOD_API_KEY: "",
   RUNPOD_LTX_ENDPOINT_ID: "",
   RUNPOD_INFINITETALK_ENDPOINT_ID: "",
+  RUNPOD_NETWORK_VOLUME_ID: "",
+  RUNPOD_S3_ENDPOINT: "",
+  RUNPOD_S3_REGION: "",
+  RUNPOD_S3_ACCESS_KEY_ID: "",
+  RUNPOD_S3_SECRET_ACCESS_KEY: "",
   // Stock agencies serve watermarked comps, unusable in a finished video. The last three are
   // there for a different reason: they are RE-UPLOAD sites, so the page a search lands on is
   // never the rights holder and gives an operator nothing to check a licence against. A
