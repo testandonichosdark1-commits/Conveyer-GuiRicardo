@@ -153,7 +153,14 @@ export async function generateLtxVideo(
   const imageFileName = await uploadComfyInput(startImagePath, "image");
   const { width, height } = ltxDimensions(opts.aspectWide);
   const length = ltxFrameCount(Math.max(1, opts.durationSec), 25);
-  const steps = opts.steps ?? 8; // the distilled checkpoint's whole point: ~8 steps vs ~30+
+  // 8 (the distilled checkpoint's whole point: ~8 steps vs ~30+ for the base model) was
+  // the original choice; 12 was measured live 2026-10-03 on the same source frame/prompt
+  // that produced the operator-reported breaker-panel distortion — visibly cleaner result
+  // (panel stayed legible frame to last frame, more natural head/arm motion), ~40% slower
+  // (64s vs 46s for a 7s clip). Worth it: this provider's whole job is beat visuals the
+  // operator actually watches, not a background batch job where the extra ~18s/beat adds up
+  // unnoticed.
+  const steps = opts.steps ?? 12;
   const seed = Math.floor(Math.random() * 2 ** 32);
 
   const workflow = buildWorkflow({ imageFileName, prompt, width, height, length, steps, seed });
