@@ -29,7 +29,7 @@ interface LogLine { id?: number; ts: string; level: string; message: string }
  * touched/migrated) and is still manageable (logs, retry, delete) — just not re-creatable.
  */
 function engineLabel(a: Pick<Avatar, "api_engine" | "use_avatar_iv" | "provider">): string {
-  if (a.provider === "local_infinitetalk") return "Local GPU (InfiniteTalk)";
+  if (a.provider === "local_infinitetalk") return "Local GPU";
   if (a.api_engine === "avatar_v") return "Avatar V (HeyGen)";
   return a.use_avatar_iv === "1" ? "Avatar IV (HeyGen)" : "Legacy (HeyGen)";
 }
@@ -163,8 +163,8 @@ export default function AvatarsPage() {
       <h1>{tr("Avatars", "Avatars")}</h1>
       <p className="muted" style={{ marginBottom: 18, fontSize: 14, lineHeight: 1.6 }}>
         {tr(
-          "Créez un avatar récurrent à partir d'une photo de référence — gratuit, rendu localement sur votre GPU (InfiniteTalk). Il est mémorisé et réutilisable.",
-          "Create a recurring avatar from a reference photo — free, rendered locally on your GPU (InfiniteTalk). It's memorized and reusable."
+          "Créez un avatar récurrent à partir d'une photo de référence — gratuit, rendu localement sur votre GPU. Il est mémorisé et réutilisable.",
+          "Create a recurring avatar from a reference photo — free, rendered locally on your GPU. It's memorized and reusable."
         )}
       </p>
 
@@ -195,8 +195,8 @@ export default function AvatarsPage() {
           </div>
           <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>
             {tr(
-              "Portrait net, de face — tourne sur votre propre GPU via InfiniteTalk, gratuit, pas de compte HeyGen requis.",
-              "Sharp, front-facing portrait — runs on your own GPU via InfiniteTalk, free, no HeyGen account needed."
+              "Portrait net, de face — tourne sur votre propre GPU, gratuit, pas de compte HeyGen requis.",
+              "Sharp, front-facing portrait — runs on your own GPU, free, no HeyGen account needed."
             )}
           </div>
         </div>
