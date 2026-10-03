@@ -28,7 +28,10 @@ const CLIP_VISION_MODEL = "clip_vision_h.safetensors";
 const LORA_MODEL = "WanVideo\\Lightx2v\\lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors";
 const TEXT_ENCODER_MODEL = "umt5-xxl-enc-fp8_e4m3fn.safetensors";
 const WAV2VEC_MODEL = "wav2vec2-chinese-base_fp16.safetensors";
-const MELBAND_MODEL = "MelBandRoFormer\\MelBandRoformer_fp16.safetensors";
+// Folder is "MelBandRoformer" (lowercase f) — matches download-infinitetalk-checkpoints.ps1's
+// actual destination path; confirmed live via ComfyUI's own "value not in list" error, which
+// echoes the exact folder listing it scanned.
+const MELBAND_MODEL = "MelBandRoformer\\MelBandRoformer_fp16.safetensors";
 
 const NEGATIVE_PROMPT =
   "bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards";
@@ -63,7 +66,12 @@ function buildWorkflow(opts: {
         base_precision: "fp16_fast",
         quantization: "disabled",
         load_device: "offload_device",
-        attention_mode: "sageattn",
+        // "sageattn" is what the official example uses, but requires the sageattention
+        // package (observed live: NOT installed by setup-infinitetalk-nodes.ps1 — it
+        // needs a matching CUDA/torch build to compile and isn't a plain pip install).
+        // "sdpa" is PyTorch's own scaled-dot-product-attention, always available, no
+        // extra install — slower than sageattn but correctness over speed here.
+        attention_mode: "sdpa",
       },
     },
     "125": { class_type: "LoadAudio", inputs: { audio: opts.audioFileName, upload: null } },

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useT } from "./_i18n";
-import { AvatarSelect } from "./_components/AvatarSelect";
+import { AvatarPhotoGrid } from "./_components/AvatarPhotoGrid";
 
 interface AvatarLite {
   id: number;
@@ -22,6 +22,9 @@ interface Channel {
   interval_sec: number;
   format: string;
   avatar_id: number | null;
+  /** The real, many-to-many relationship — the avatars linked to this channel on the
+   *  Channels page. When non-empty, Create a video narrows the photo grid to just these. */
+  avatars: AvatarLite[];
 }
 type VisualMode = "ai" | "real" | "mix";
 /** Where the narration comes from: we synthesize it, or the operator already recorded it. */
@@ -203,17 +206,20 @@ export default function CreerVideoPage() {
     // Channel no longer overrides seconds-per-visual — the on-screen control (seeded
     // from the global setting) is the single source of truth.
     //
-    // Deliberately does NOT auto-apply ch.avatar_id anymore. Avatar/HeyGen is a billable,
+    // Deliberately does NOT auto-apply any avatar. Avatar is a billable-by-GPU-time,
     // opt-in choice — picking a channel must never silently turn it on. Observed live: an
     // operator picked the Finn channel (which has a default avatar configured) to set its
-    // voice/visual style, and the video came back running HeyGen avatar beats they never
-    // asked for, because selecting the channel alone flipped the Avatar dropdown on for
-    // them. /api/studio still resolves `channel?.avatar_id` as a fallback when avatarId
-    // isn't sent, so an avatarId can still end up set server-side from the channel — but
-    // avatarPercent now starts at 0 (see its declaration above) and 0% routes zero beats
-    // to avatar regardless of whether an avatarId got resolved, so that fallback can no
-    // longer produce an avatar beat on its own. The operator has to deliberately raise the
-    // slider — which requires picking an avatar on screen first — before any beat uses it.
+    // voice/visual style, and the video came back running avatar beats they never asked
+    // for, because selecting the channel alone flipped the Avatar picker on for them.
+    // avatarPercent starts at 0 (see its declaration above) and 0% routes zero beats to
+    // avatar regardless of which avatarId ends up resolved, so that alone can no longer
+    // produce an avatar beat. The operator has to deliberately raise the slider — which
+    // requires picking an avatar on screen first — before any beat uses it.
+    //
+    // If the avatar already picked on screen isn't one of THIS channel's own avatars, the
+    // photo grid below narrows to the channel's list and that id would become invisible —
+    // clear it rather than leave a selection the operator can no longer see or change.
+    if (ch.avatars?.length && !ch.avatars.some((a) => a.id === avatarId)) setAvatarId(null);
   }
 
   const preparing = avatars.filter((a) => a.status === "pending" || a.status === "training");
@@ -591,28 +597,28 @@ export default function CreerVideoPage() {
 
         <div>
           <label className="label">{tr("Avatar", "Avatar")}</label>
-          <AvatarSelect avatars={avatars} value={avatarId} onChange={setAvatarId} />
-          <div className="faint" style={{ fontSize: 12, marginTop: 5 }}>
+          {(() => {
+            // When the selected channel has its own linked avatars, narrow the grid to
+            // just those — the operator picks per-run which one of the channel's own
+            // avatars to use (e.g. the same recurring character against a different
+            // background). No channel selected, or a channel with none linked, falls
+            // back to every available avatar — same as before this feature existed.
+            const selectedChannel = channelId != null ? channels.find((c) => c.id === channelId) : undefined;
+            const scoped = selectedChannel?.avatars?.length ? selectedChannel.avatars : avatars;
+            return (
+              <AvatarPhotoGrid
+                avatars={scoped}
+                selected={avatarId}
+                onChange={(next) => setAvatarId(next as number | null)}
+                multi={false}
+                emptyHint={tr("Aucun avatar disponible.", "No avatars available.")}
+              />
+            );
+          })()}
+          <div className="faint" style={{ fontSize: 12, marginTop: 8 }}>
             {preparing.length > 0 && `${preparing.length} ${tr("avatar(s) en préparation", "avatar(s) preparing")} · `}
             <Link href="/avatars">{tr("Créer ou gérer les avatars →", "Create or manage avatars →")}</Link>
           </div>
-          {(() => {
-            // Picking an avatar does NOT pick its channel — a tester assumed it
-            // does and lost the channel's voice/prompt. Offer the one-click fix.
-            const av = avatars.find((a) => a.id === avatarId);
-            const ch = av?.channel_id != null ? channels.find((c) => c.id === av.channel_id) : undefined;
-            if (!ch || channelId === ch.id) return null;
-            return (
-              <div style={{ fontSize: 12.5, color: "#b45309", marginTop: 6 }}>
-                ⚠ {tr(`Cet avatar appartient à la chaîne « ${ch.name} », mais elle n'est pas sélectionnée — sa voix et son prompt ne s'appliqueront pas.`,
-                       `This avatar belongs to channel "${ch.name}", but that channel isn't selected — its voice and prompt won't apply.`)}{" "}
-                <button type="button" onClick={() => applyChannel(ch.id)}
-                  style={{ background: "none", border: "none", padding: 0, color: "var(--accent)", cursor: "pointer", fontSize: 12.5, textDecoration: "underline" }}>
-                  {tr(`Utiliser la chaîne « ${ch.name} »`, `Use channel "${ch.name}"`)}
-                </button>
-              </div>
-            );
-          })()}
         </div>
 
         {/* Everything below is optional — a picked channel already sets it.

@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 import { ensureInit } from "@/lib/init";
-import { listChannels, createChannel, getChannel, toClientChannel, mergeChannelApiKeys, deriveVoiceProvider } from "@/lib/channels";
+import { listChannels, createChannel, getChannel, toClientChannel, mergeChannelApiKeys, deriveVoiceProvider, listChannelAvatars, setChannelAvatars } from "@/lib/channels";
 
 export const runtime = "nodejs";
 
 export async function GET() {
   ensureInit();
-  return NextResponse.json(listChannels().map(toClientChannel));
+  // Each channel carries its full linked-avatar list inline (photo grid data included) —
+  // one round trip for the Create-a-video page instead of N+1 per-channel fetches.
+  return NextResponse.json(
+    listChannels().map((c) => ({ ...toClientChannel(c), avatars: listChannelAvatars(c.id) }))
+  );
 }
 
 export async function POST(req: Request) {
@@ -37,8 +41,14 @@ export async function POST(req: Request) {
       format: body.format != null ? String(body.format) : undefined,
       avatar_id: body.avatar_id != null ? Number(body.avatar_id) : null,
     });
+    // avatarIds: the new many-to-many list (see setChannelAvatars). Optional — a client
+    // that doesn't send it (e.g. an older cached page) leaves the channel with no linked
+    // avatars rather than throwing, same tolerant shape as every other optional field here.
+    if (Array.isArray(body.avatarIds)) {
+      setChannelAvatars(id, (body.avatarIds as unknown[]).map(Number).filter(Number.isFinite));
+    }
     const created = getChannel(id);
-    return NextResponse.json(created ? toClientChannel(created) : null);
+    return NextResponse.json(created ? { ...toClientChannel(created), avatars: listChannelAvatars(id) } : null);
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 409 });
   }

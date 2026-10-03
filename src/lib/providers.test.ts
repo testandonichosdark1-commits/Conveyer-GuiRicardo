@@ -77,9 +77,13 @@ describe("AI provider/model registry", () => {
     }
   });
 
-  it("runware is not the default provider — kie still is", () => {
+  it("runware is not the default provider", () => {
     // Runware is experimental: it must be opt-in, never inherited by an existing install.
-    expect(DEFAULTS.AI_PROVIDER).toBe("kie");
+    // DEFAULTS.AI_PROVIDER moved from "kie" to "local" when the free local-GPU stack
+    // (ChatGPT browser image + LTX-Video) became the app's intended default path.
+    // aiProviderMeta(null)'s fallback is unrelated to DEFAULTS — it's AI_PROVIDERS[0], the
+    // array's own first entry, still "kie" (the array wasn't reordered).
+    expect(DEFAULTS.AI_PROVIDER).toBe("local");
     expect(aiProviderMeta(null).id).toBe("kie");
   });
 });

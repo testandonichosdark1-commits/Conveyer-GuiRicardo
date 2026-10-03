@@ -164,6 +164,20 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  -- A channel can now have MULTIPLE avatars (e.g. the same recurring character shot
+  -- against different backgrounds) — this junction table is the real relationship;
+  -- channels.avatar_id above is kept (read-only going forward, see studio/route.ts) for
+  -- back-compat with runs created before this existed. No FK/CASCADE here on purpose —
+  -- this project never turns PRAGMA foreign_keys on, so a declared CASCADE would be
+  -- silently inert; deleteChannel()/deleteAvatar() clean up matching rows explicitly
+  -- instead (see channels.ts/avatars.ts), same as every other delete path in this app.
+  CREATE TABLE IF NOT EXISTS channel_avatars (
+    channel_id INTEGER NOT NULL,
+    avatar_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (channel_id, avatar_id)
+  );
 `);
 
 // Migrations for older DBs. SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT

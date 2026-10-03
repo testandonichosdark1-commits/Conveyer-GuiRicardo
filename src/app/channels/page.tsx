@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
 import { useT } from "../_i18n";
-import { AvatarSelect, type AvatarLite } from "../_components/AvatarSelect";
+import { AvatarPhotoGrid, type AvatarPhotoLite } from "../_components/AvatarPhotoGrid";
 import { CharacterReferenceField } from "../settings/_components/CharacterReferenceField";
 import { ChannelApiKeysField } from "./_components/ChannelApiKeysField";
 import { ChannelAi33VoiceField } from "./_components/ChannelAi33VoiceField";
@@ -20,6 +20,9 @@ interface Channel {
   interval_sec: number;
   format: string;
   avatar_id: number | null;
+  /** The real, many-to-many relationship — full avatar rows (photo grid data included),
+   *  sent inline by GET /api/channels. See listChannelAvatars()/setChannelAvatars(). */
+  avatars: AvatarPhotoLite[];
 }
 
 interface Draft {
@@ -35,7 +38,9 @@ interface Draft {
   character_terms: string;
   voice_id: string; // ai33.pro voice id — see ChannelAi33VoiceField
   voice_speed: string;
-  avatar_id: number | null;
+  /** A channel can now have SEVERAL avatars (e.g. the same recurring character shot
+   *  against different backgrounds) — picked here, chosen per-run on Create a video. */
+  avatarIds: number[];
   api_keys: Record<string, string>; // CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN / AI33_API_KEY
 }
 
@@ -49,14 +54,14 @@ const EMPTY: Draft = {
   character_terms: "",
   voice_id: "",
   voice_speed: "",
-  avatar_id: null,
+  avatarIds: [],
   api_keys: {},
 };
 
 export default function ChainesPage() {
   const tr = useT();
   const [channels, setChannels] = useState<Channel[]>([]);
-  const [avatars, setAvatars] = useState<AvatarLite[]>([]);
+  const [avatars, setAvatars] = useState<AvatarPhotoLite[]>([]);
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [edit, setEdit] = useState<Draft>(EMPTY);
@@ -74,7 +79,15 @@ export default function ChainesPage() {
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
-    fetch("/api/avatars").then((r) => (r.ok ? r.json() : null)).then((rows) => { if (Array.isArray(rows)) setAvatars(rows); }).catch(() => {});
+    // Same filter as Create a video: only local-GPU (InfiniteTalk) avatars are offered
+    // for linking to a channel now — a pre-existing HeyGen avatar stays usable on old
+    // runs but isn't something a channel should newly point to.
+    fetch("/api/avatars")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((rows: (AvatarPhotoLite & { provider: string | null })[] | null) => {
+        if (Array.isArray(rows)) setAvatars(rows.filter((a) => a.provider === "local_infinitetalk"));
+      })
+      .catch(() => {});
   }, []);
 
   function bodyOf(d: Draft) {
@@ -82,7 +95,7 @@ export default function ChainesPage() {
       name: d.name.trim(),
       voice_id: d.voice_id, // voice_provider is derived server-side from this — see deriveVoiceProvider()
       voice_speed: d.voice_speed,
-      avatar_id: d.avatar_id,
+      avatarIds: d.avatarIds,
       api_keys: d.api_keys,
       // Preserved from existing/default values — not user-editable here anymore.
       visual_mode: d.visual_mode,
@@ -118,7 +131,7 @@ export default function ChainesPage() {
       format: c.format,
       voice_id: c.voice_id ?? "",
       voice_speed: c.voice_speed != null ? String(c.voice_speed) : "",
-      avatar_id: c.avatar_id,
+      avatarIds: (c.avatars ?? []).map((a) => a.id),
       api_keys: c.api_keys ?? {},
     });
   }
@@ -144,15 +157,29 @@ export default function ChainesPage() {
 
   const fields = (d: Draft, set: (d: Draft) => void, channelId: number | null) => (
     <>
-      <div className="grid-2" style={{ gap: 16 }}>
-        <div>
-          <label className="label">{tr("Nom", "Name")}</label>
-          <input className="input" value={d.name} onChange={(e) => set({ ...d, name: e.target.value })} placeholder={tr("Ma chaîne", "My channel")} />
+      <div>
+        <label className="label">{tr("Nom", "Name")}</label>
+        <input className="input" value={d.name} onChange={(e) => set({ ...d, name: e.target.value })} placeholder={tr("Ma chaîne", "My channel")} />
+      </div>
+
+      <div>
+        <label className="label">{tr("Avatars de cette chaîne", "This channel's avatars")}</label>
+        <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>
+          {tr(
+            "Plusieurs avatars possibles (ex. le même personnage sur des fonds différents) — choisi par vidéo sur « Créer une vidéo ».",
+            "Several avatars allowed (e.g. the same character against different backgrounds) — picked per video on Create a video."
+          )}
         </div>
-        <div>
-          <label className="label">{tr("Avatar par défaut", "Default avatar")}</label>
-          <AvatarSelect avatars={avatars} value={d.avatar_id} onChange={(id) => set({ ...d, avatar_id: id })} noneLabel={tr("Aucun — voix seule / choisi au lancement", "None — voice only / chosen at run")} />
-        </div>
+        <AvatarPhotoGrid
+          avatars={avatars}
+          selected={d.avatarIds}
+          onChange={(next) => set({ ...d, avatarIds: next as number[] })}
+          multi
+          emptyHint={tr(
+            "Aucun avatar local disponible — créez-en un dans Avatars.",
+            "No local avatars available yet — create one on the Avatars page."
+          )}
+        />
       </div>
 
       <ChannelAi33VoiceField voiceId={d.voice_id} onChange={(v) => set({ ...d, voice_id: v })} />
@@ -235,7 +262,7 @@ export default function ChainesPage() {
       {channels.length > 0 && (
         <div style={{ display: "grid", gap: 10 }}>
           {channels.map((c) => {
-            const avatarName = c.avatar_id != null ? avatars.find((a) => a.id === c.avatar_id)?.name : undefined;
+            const avatarNames = (c.avatars ?? []).map((a) => a.name).join(", ") || undefined;
             return (
               <div key={c.id} className="card" style={{ padding: editingId === c.id ? 16 : "12px 16px", display: "grid", gap: editingId === c.id ? 16 : 0 }}>
                 {editingId === c.id ? (
@@ -252,7 +279,7 @@ export default function ChainesPage() {
                     <div style={{ fontSize: 13.5, minWidth: 0 }}>
                       <strong>{c.name}</strong>
                       <span className="faint">
-                        {avatarName ? ` · ${avatarName}` : ""}
+                        {avatarNames ? ` · ${avatarNames}` : ""}
                         {c.voice_provider === "ai33" ? ` · ${tr("voix ai33", "ai33 voice")}` : ""}
                         {Object.values(c.api_keys || {}).some((v) => v.trim()) ? ` · ${tr("comptes propres", "own accounts")}` : ""}
                       </span>

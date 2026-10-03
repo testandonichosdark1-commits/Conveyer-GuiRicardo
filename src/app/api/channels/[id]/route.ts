@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { ensureInit } from "@/lib/init";
-import { getChannel, updateChannel, deleteChannel, toClientChannel, mergeChannelApiKeys, deriveVoiceProvider } from "@/lib/channels";
+import { getChannel, updateChannel, deleteChannel, toClientChannel, mergeChannelApiKeys, deriveVoiceProvider, listChannelAvatars, setChannelAvatars } from "@/lib/channels";
 
 export const runtime = "nodejs";
 
@@ -9,7 +9,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const { id } = await params;
   const channel = getChannel(Number(id));
   if (!channel) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  return NextResponse.json(toClientChannel(channel));
+  return NextResponse.json({ ...toClientChannel(channel), avatars: listChannelAvatars(channel.id) });
 }
 
 export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -48,8 +48,14 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
       format: body.format != null ? String(body.format) : undefined,
       avatar_id: body.avatar_id != null ? Number(body.avatar_id) : null,
     });
+    // avatarIds is OPTIONAL — only touched when the caller actually sent an array, same
+    // "don't silently wipe what the form didn't show" rule as api_keys above. An empty
+    // array IS a deliberate "unlink everything", so it's distinguished from "not sent".
+    if (Array.isArray(body.avatarIds)) {
+      setChannelAvatars(cid, (body.avatarIds as unknown[]).map(Number).filter(Number.isFinite));
+    }
     const updated = getChannel(cid);
-    return NextResponse.json(updated ? toClientChannel(updated) : null);
+    return NextResponse.json(updated ? { ...toClientChannel(updated), avatars: listChannelAvatars(cid) } : null);
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 400 });
   }

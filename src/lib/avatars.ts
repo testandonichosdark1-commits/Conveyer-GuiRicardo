@@ -177,6 +177,9 @@ export function updateAvatar(
 }
 
 export function deleteAvatar(id: number): void {
+  // No FK cascade (see channel_avatars' own comment in db.ts) — clean up the junction
+  // rows explicitly so a deleted avatar doesn't leave orphaned links behind.
+  db.prepare("DELETE FROM channel_avatars WHERE avatar_id = ?").run(id);
   deleteStmt.run(id);
 }
 

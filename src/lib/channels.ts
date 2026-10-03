@@ -1,5 +1,6 @@
 import db from "./db";
 import { isSecretKey, shortMask, type SettingKey } from "./settings";
+import type { Avatar } from "./avatars";
 
 /**
  * Channels ("Chaîne") — a simple per-channel defaults bundle the operator picks
@@ -184,7 +185,41 @@ export function updateChannel(id: number, input: ChannelInput): void {
 }
 
 export function deleteChannel(id: number): void {
+  // No FK cascade (see channel_avatars' own comment in db.ts) — clean up the junction
+  // rows explicitly so a deleted channel doesn't leave orphaned links behind.
+  db.prepare("DELETE FROM channel_avatars WHERE channel_id = ?").run(id);
   deleteStmt.run(id);
+}
+
+const listChannelAvatarsStmt = db.prepare(
+  `SELECT a.* FROM channel_avatars ca
+   JOIN avatars a ON a.id = ca.avatar_id
+   WHERE ca.channel_id = ?
+   ORDER BY ca.created_at ASC`
+);
+const deleteChannelAvatarsStmt = db.prepare("DELETE FROM channel_avatars WHERE channel_id = ?");
+const insertChannelAvatarStmt = db.prepare(
+  "INSERT OR IGNORE INTO channel_avatars (channel_id, avatar_id) VALUES (?, ?)"
+);
+
+/** Every avatar associated with a channel — the real, many-to-many relationship (a
+ *  channel can have several avatars, e.g. the same recurring character against
+ *  different backgrounds; see setChannelAvatars). Full Avatar rows (not just ids), so
+ *  callers can render a photo grid directly without a second round-trip. */
+export function listChannelAvatars(channelId: number): Avatar[] {
+  return listChannelAvatarsStmt.all(channelId) as Avatar[];
+}
+
+/** Replaces the WHOLE set of avatars linked to a channel (not an add/remove delta) —
+ *  simplest correct semantics for a form that submits "here is the list, as selected
+ *  right now". Wrapped in one transaction so a save can never leave the channel with
+ *  a half-updated set if something throws partway through. */
+export function setChannelAvatars(channelId: number, avatarIds: number[]): void {
+  const unique = [...new Set(avatarIds)];
+  db.transaction(() => {
+    deleteChannelAvatarsStmt.run(channelId);
+    for (const avatarId of unique) insertChannelAvatarStmt.run(channelId, avatarId);
+  })();
 }
 
 /** A Channel row shaped for the browser: `api_keys_json` (raw plaintext) replaced by
