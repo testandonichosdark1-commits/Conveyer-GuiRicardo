@@ -122,7 +122,13 @@ export default function CreerVideoPage() {
       if (typeof d.script === "string") setScript(d.script);
       if (d.channelId === null || typeof d.channelId === "number") setChannelId(d.channelId);
       if (d.avatarId === null || typeof d.avatarId === "number") { setAvatarId(d.avatarId); draftChoseAvatar.current = true; }
-      if (d.visualMode === "ai" || d.visualMode === "real" || d.visualMode === "mix") setVisualMode(d.visualMode);
+      // "mix" is deliberately NOT restored from an old draft — it used to be the page's
+      // own default (nobody had to choose it), so a draft saved before "ai" became the
+      // default would silently resurrect real-footage beats the operator never actually
+      // asked for. Confirmed live: an operator who'd used this page before the default
+      // changed still got Pexels videos, because their saved draft still said "mix". "ai"
+      // and "real" ARE restored — those can only be in a draft from an explicit click.
+      if (d.visualMode === "ai" || d.visualMode === "real") setVisualMode(d.visualMode);
       if (Number.isFinite(d.realPercent)) setRealPercent(d.realPercent);
       if (Number.isFinite(d.aiVideoPercent)) setAiVideoPercent(d.aiVideoPercent);
       // secondsPerVisual is intentionally NOT restored from the draft — it is seeded
