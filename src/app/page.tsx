@@ -72,7 +72,11 @@ export default function CreerVideoPage() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [channelId, setChannelId] = useState<number | null>(null);
   const [avatarId, setAvatarId] = useState<number | null>(null);
-  const [visualMode, setVisualMode] = useState<VisualMode>("mix");
+  // "ai" (not "mix") is the default now — the operator wants every b-roll beat generated
+  // via the local AI stack (LTX-Video + ChatGPT), never real stock footage. studio-
+  // pipeline.ts maps visualMode="ai" straight to realPercent=0, so this alone guarantees
+  // zero real-footage beats — no separate "disable real footage" flag needed.
+  const [visualMode, setVisualMode] = useState<VisualMode>("ai");
   const [realPercent, setRealPercent] = useState(50);
   const [secondsPerVisual, setSecondsPerVisual] = useState(4.5);
   // Starts at 0, not a nonzero default — this is what actually gates avatar/HeyGen spend.
@@ -643,7 +647,7 @@ export default function CreerVideoPage() {
             <div>
               <label className="label">{tr("Mode visuel", "Visual mode")}</label>
               <div className="grid-3" style={{ gap: 10 }}>
-                {seg("ai", tr("100% IA", "Full AI"), tr("B-roll généré (nano-banana / Veo)", "Generated b-roll (nano-banana / Veo)"))}
+                {seg("ai", tr("100% IA", "Full AI"), tr("B-roll généré localement (LTX-Video + ChatGPT)", "Generated b-roll, local GPU (LTX-Video + ChatGPT)"))}
                 {seg("real", tr("Vrai footage", "Real footage"), tr("Vidéos & images réelles d'internet", "Real videos & images from the internet"))}
                 {seg("mix", tr("Mix", "Mix"), tr("Mélange réel + IA", "Blend real + AI"))}
               </div>
