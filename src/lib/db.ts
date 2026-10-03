@@ -226,6 +226,12 @@ tryAddColumn("avatars", "imported TEXT");
 // 'avatar_v' = the operator chose Avatar V (v3). NULL = the v2 path. Intent, not a
 // cached capability. No backfill: NULL is already correct for every existing row.
 tryAddColumn("avatars", "api_engine TEXT");
+// 'local_infinitetalk' = this avatar renders via a local ComfyUI InfiniteTalk workflow
+// (free, on the operator's own GPU) instead of HeyGen. NULL = HeyGen (every existing
+// row — no backfill needed, NULL already means "the only engine that existed"). Unlike
+// `engine` (talking_photo | photo_avatar_group, a HeyGen-specific concept), this column
+// picks which GENERATION BACKEND renders the clip at all; see studio-pipeline.ts readAvatar().
+tryAddColumn("avatars", "provider TEXT");
 // Backfill for rows imported before the column existed — otherwise they stay
 // indistinguishable from ours and deleting one would destroy the operator's own
 // HeyGen asset (the bug this column fixes).
@@ -290,6 +296,17 @@ tryAddColumn("runs", "avatar_motion_prompt TEXT");
 // finds nothing and degrades to v2. That is the same silent substitution, only later
 // and harder to see. NULL is correct for every existing row: none of them is Avatar V.
 tryAddColumn("runs", "avatar_api_engine TEXT");
+// Snapshot of avatars.provider at run-create time — same reasoning as every other
+// avatar_* snapshot column above: a run must replay what it was CREATED with, never a
+// live read of the avatars row (which can be edited/deleted between create and resume).
+// NULL = HeyGen (every run created before this column, and every HeyGen run after it).
+tryAddColumn("runs", "avatar_provider TEXT");
+// Snapshot of avatars.ref_image_path, ONLY meaningful when avatar_provider =
+// 'local_infinitetalk'. HeyGen runs don't need this (the HeyGen-side handle columns
+// above are what they replay), but a local avatar's photo could be replaced or deleted
+// between a run's creation and its Resume — same "replay what it was created with"
+// principle, just with no billing consequence attached this time.
+tryAddColumn("runs", "avatar_ref_image_path TEXT");
 
 // Set (datetime) when the operator deletes a job from the Jobs page. Soft
 // delete: the run row + run_costs are KEPT so the Costs page stays byte-for-byte

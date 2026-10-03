@@ -167,6 +167,17 @@ export async function POST(req: Request) {
   const useAvatarIv = String(form.get("useAvatarIv") || "") === "1";
   const channelIdRaw = String(form.get("channelId") || "").trim();
   const channelId = channelIdRaw ? Number(channelIdRaw) : null;
+  // "local_infinitetalk" = render via a local ComfyUI workflow instead of HeyGen — free,
+  // no remote ingest/training. Needs a real reference photo (InfiniteTalk has no
+  // text-to-image fallback the way HeyGen's ingest does via kie.ai).
+  const providerRaw = String(form.get("provider") || "").trim();
+  const isLocalProvider = providerRaw === "local_infinitetalk";
+  if (isLocalProvider && !hasImage) {
+    return NextResponse.json(
+      { error: "A local-GPU avatar needs a reference photo (no text-to-image fallback)." },
+      { status: 400 }
+    );
+  }
 
   let id: number;
   try {
@@ -178,6 +189,7 @@ export async function POST(req: Request) {
       use_avatar_iv: useAvatarIv,
       channel_id: channelId,
       status: "pending",
+      provider: isLocalProvider ? "local_infinitetalk" : null,
     });
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 409 });
@@ -199,11 +211,17 @@ export async function POST(req: Request) {
     }
   }
 
-  // Ingest into HeyGen in the background; the UI polls /api/avatars/[id] for status.
-  ingestAvatar(id).catch((e) => {
-    // eslint-disable-next-line no-console
-    console.error("avatar ingest crash", e);
-  });
+  if (isLocalProvider) {
+    // No remote ingest at all — InfiniteTalk consumes ref_image_path directly at render
+    // time (see infinitetalk.ts), so the avatar is ready the instant its photo is saved.
+    updateAvatar(id, { status: "ready" });
+  } else {
+    // Ingest into HeyGen in the background; the UI polls /api/avatars/[id] for status.
+    ingestAvatar(id).catch((e) => {
+      // eslint-disable-next-line no-console
+      console.error("avatar ingest crash", e);
+    });
+  }
 
   return NextResponse.json(getAvatar(id));
 }

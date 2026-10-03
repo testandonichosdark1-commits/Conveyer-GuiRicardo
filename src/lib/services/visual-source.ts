@@ -25,6 +25,9 @@ import { generateHiggsfieldImageUrl, generateHiggsfieldVideoUrl, downloadHiggsfi
 import { generateRunwareImage, downloadRunware } from "./runware";
 import { FlowBrowserError, generateFlowImage, generateFlowVideo } from "./flow-browser";
 import { generateVidsImage, generateVidsVideo } from "./vids-browser";
+import { generateChatGptImage } from "./chatgpt-browser";
+import { generateLtxVideo } from "./ltx-video";
+import { LocalGpuError } from "./comfyui-client";
 import { storyblocksSearch, reserveDownload as sbReserveDownload, resolveStoryblocksFile } from "./storyblocks";
 import { recordStoryblocksDownload, recordGoogleCseQuery, recordGemini, recordKieImage, recordKieVeo, recordLabs69, recordLabs69Image, recordMagnificImage, recordMagnificVideo, recordHiggsfieldImage, recordHiggsfieldVideo, recordRunwareImage } from "./cost-ledger";
 import { callGemini } from "./gemini-models";
@@ -3872,6 +3875,74 @@ async function acquireAi(
       }
       log(runId, "warn", `Beat ${beat.index}: Flow unavailable — using the configured kie.ai Nano Banana fallback`, { stage: "visual" });
       provider = "kie";
+    }
+  }
+
+  // Local GPU — AI_PROVIDER=local. Image via the operator's own logged-in ChatGPT tab
+  // (chatgpt-browser.ts, no API key); video via LTX-Video on a local ComfyUI instance
+  // (ltx-video.ts, no API key). Both free. Mirrors the Magnific/Higgsfield closures
+  // exactly: honors the image/video media mode, runs the same scoring/regen loop for
+  // images (video has none, same reasoning as Veo — one generation, no re-score), falls
+  // through to the universal 69labs/Grok floor on failure rather than throwing. The one
+  // asymmetry vs. those closures: a LocalGpuError with code "not_running"/"config"
+  // (ComfyUI unreachable or COMFYUI_URL unset) fails every beat identically for the rest
+  // of the run, so it's logged once at warn instead of spamming every beat at the same
+  // volume as a one-off generation failure.
+  if (provider === "local") {
+    const { media, reason } = resolveAiMedia(beat, mediaOverride);
+    log(runId, "debug", `Beat ${beat.index}: Local GPU media = ${media} (reason=${reason})`, { stage: "visual" });
+    if (media === "video") {
+      try {
+        log(runId, "info", `Beat ${beat.index}: LTX-Video generation started (local ComfyUI)`, { stage: "visual" });
+        const aspectWide = (() => {
+          const [w, h] = aspect.split(":").map(Number);
+          return !Number.isFinite(w) || !Number.isFinite(h) || w >= h;
+        })();
+        await generateLtxVideo(runId, buildPrompt(""), outPath, { durationSec: beatDurSec, aspectWide });
+        log(runId, "info", `Beat ${beat.index}: AI video via LTX-Video (local)`, { stage: "visual" });
+        return { path: outPath, kind: "ai", provider: "local:ltx-video" };
+      } catch (e) {
+        const code = e instanceof LocalGpuError ? e.code : undefined;
+        log(runId, "warn", `Beat ${beat.index}: LTX-Video failed (${(e as Error).message.slice(0, 160)}) — falling back to 69labs/Grok`, { stage: "visual" });
+        if (code === "not_running" || code === "config") {
+          log(runId, "warn", `Local ComfyUI is unreachable (COMFYUI_URL) — every Local GPU video beat this run will fall back the same way until it's fixed`, { stage: "visual" });
+        }
+      }
+    } else {
+      let best: { path: string; score: number } | null = null;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const tmpImg = path.join(os.tmpdir(), `local_${runId.slice(0, 8)}_${beat.index}_${attempt}.png`);
+        try {
+          log(runId, "info", `Beat ${beat.index}: ChatGPT image generation started`, { stage: "visual" });
+          await generateChatGptImage(runId, buildPrompt(VARIANTS[attempt % VARIANTS.length]), tmpImg);
+          const score = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, tmpImg);
+          if (!best || score > best.score) {
+            if (best) { try { fs.unlinkSync(best.path); } catch {} }
+            best = { path: tmpImg, score };
+          } else {
+            try { fs.unlinkSync(tmpImg); } catch {}
+          }
+          if (score >= threshold) break;
+          if (attempt < maxAttempts - 1) {
+            log(runId, "info", `Beat ${beat.index}: ChatGPT image scored ${score}% (<${threshold}) — regenerating ${attempt + 1}/${maxAttempts - 1}`, { stage: "visual" });
+          }
+        } catch (e) {
+          const code = e instanceof FlowBrowserError ? e.code : undefined;
+          log(runId, "debug", `Beat ${beat.index}: ChatGPT image gen failed (${(e as Error).message.slice(0, 120)})`, { stage: "visual" });
+          if (code === "login" || code === "config") {
+            log(runId, "warn", `ChatGPT tab needs attention (${code}) — every Local GPU image beat this run will fall back the same way until it's fixed`, { stage: "visual" });
+            break;
+          }
+          if (attempt < maxAttempts - 1) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+        }
+      }
+      if (best) {
+        kenBurns(best.path, outPath, beatDurSec, beat.index % 2 === 1, resolution);
+        try { fs.unlinkSync(best.path); } catch {}
+        log(runId, "info", `Beat ${beat.index}: AI still via ChatGPT + Ken Burns — match ${best.score}%`, { stage: "visual" });
+        return { path: outPath, kind: "ai", provider: "local:chatgpt" };
+      }
+      log(runId, "warn", `Beat ${beat.index}: ChatGPT produced nothing after ${maxAttempts} attempts — falling back to 69labs/Grok`, { stage: "visual" });
     }
   }
 

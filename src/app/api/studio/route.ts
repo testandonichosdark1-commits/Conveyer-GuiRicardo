@@ -34,7 +34,7 @@ const setSpeedSnapshot = db.prepare("UPDATE runs SET voice_speed = ? WHERE id = 
 // TTS model this run was created with (NULL → the provider reads its global setting).
 const setModelSnapshot = db.prepare("UPDATE runs SET voice_model = ? WHERE id = ?");
 const setAvatarSnapshot = db.prepare(
-  "UPDATE runs SET avatar_db_id = ?, avatar_engine = ?, avatar_heygen_id = ?, avatar_image_key = ?, avatar_use_iv = ?, avatar_motion_prompt = ?, avatar_api_engine = ? WHERE id = ?"
+  "UPDATE runs SET avatar_db_id = ?, avatar_engine = ?, avatar_heygen_id = ?, avatar_image_key = ?, avatar_use_iv = ?, avatar_motion_prompt = ?, avatar_api_engine = ?, avatar_provider = ?, avatar_ref_image_path = ? WHERE id = ?"
 );
 
 interface Body {
@@ -167,7 +167,11 @@ export async function POST(req: Request) {
     // is now as renderable as any other. What replaces it is the eligibility re-check
     // below — support is per-avatar, mutable, and must never be assumed from the fact
     // that we stored "avatar_v" at import time.
-    const ready = found && found.status === "ready" && found.heygen_id;
+    //
+    // A local-GPU avatar has no heygen_id (it never had a remote ingest to begin with —
+    // see /api/avatars) — ref_image_path is what "ready" means for it instead.
+    const isLocal = found?.provider === "local_infinitetalk";
+    const ready = found && found.status === "ready" && (isLocal ? found.ref_image_path : found.heygen_id);
     if (!ready) {
       if (explicit) {
         const reason = !found ? "introuvable" : `pas encore prêt (statut : ${found.status})`;
@@ -322,6 +326,8 @@ export async function POST(req: Request) {
       // that tells a resumed run which engine it was created with. Reading it live
       // would render on whatever the avatar row says NOW — or on v2 if the row is gone.
       avatar.api_engine,
+      avatar.provider,
+      avatar.provider === "local_infinitetalk" ? avatar.ref_image_path : null,
       id
     );
   }

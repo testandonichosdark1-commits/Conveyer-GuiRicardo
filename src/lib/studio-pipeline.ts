@@ -16,6 +16,7 @@ import { planBeats, type Beat, type VideoStructure } from "./services/studio-pla
 import { acquireVisual, createTopicPool } from "./services/visual-source";
 import { writeCredits, readCredits, creditFrom, type CreditEntry } from "./services/credits";
 import { generateAvatarClip, type AvatarHandle } from "./services/heygen-video";
+import { generateLocalAvatarClip, type LocalAvatarHandle } from "./services/infinitetalk";
 import { checkAvatarVSupport } from "./services/heygen-avatar";
 import { assembleStudioVideo, sliceAudio, decodeToWav, type RenderBeat } from "./services/studio-assemble";
 import { recordHeygenEngine } from "./services/cost-ledger";
@@ -82,7 +83,7 @@ const setStructure = db.prepare("UPDATE runs SET structure_json = ? WHERE id = ?
 const setDuration = db.prepare("UPDATE runs SET duration_sec = ? WHERE id = ?");
 const getConfigStmt = db.prepare("SELECT config_json FROM runs WHERE id = ?");
 const getAvatarSnapStmt = db.prepare(
-  "SELECT avatar_db_id, avatar_engine, avatar_heygen_id, avatar_image_key, avatar_use_iv, avatar_motion_prompt, avatar_api_engine FROM runs WHERE id = ?"
+  "SELECT avatar_db_id, avatar_engine, avatar_heygen_id, avatar_image_key, avatar_use_iv, avatar_motion_prompt, avatar_api_engine, avatar_provider, avatar_ref_image_path FROM runs WHERE id = ?"
 );
 const getVoiceSnapStmt = db.prepare("SELECT preset_voice_id, voice_speed, voice_model FROM runs WHERE id = ?");
 const getTitleStmt = db.prepare("SELECT title FROM runs WHERE id = ?");
@@ -242,7 +243,9 @@ export function decodeEngine(raw: string | null): AvatarHandle["engine"] {
   throw new Error(`Unknown avatar engine "${raw}" on this run — refusing to guess how to render it.`);
 }
 
-function readAvatar(runId: string): (AvatarHandle & { dbId: number }) | null {
+type AnyAvatarHandle = (AvatarHandle & { dbId: number }) | (LocalAvatarHandle & { dbId: number });
+
+function readAvatar(runId: string): AnyAvatarHandle | null {
   const row = getAvatarSnapStmt.get(runId) as
     | {
         avatar_db_id: number | null;
@@ -252,9 +255,23 @@ function readAvatar(runId: string): (AvatarHandle & { dbId: number }) | null {
         avatar_use_iv: string | null;
         avatar_motion_prompt: string | null;
         avatar_api_engine: string | null;
+        avatar_provider: string | null;
+        avatar_ref_image_path: string | null;
       }
     | undefined;
-  if (!row?.avatar_db_id || !row.avatar_heygen_id) return null;
+  if (!row?.avatar_db_id) return null;
+  // Local avatars have no remote handle to check — ref_image_path is the whole
+  // requirement, same spirit as avatar_heygen_id gating the HeyGen branch below.
+  if (row.avatar_provider === "local_infinitetalk") {
+    if (!row.avatar_ref_image_path) return null;
+    return {
+      dbId: row.avatar_db_id,
+      provider: "local_infinitetalk",
+      refImagePath: row.avatar_ref_image_path,
+      motionPrompt: row.avatar_motion_prompt,
+    };
+  }
+  if (!row.avatar_heygen_id) return null;
   return {
     dbId: row.avatar_db_id,
     engine: decodeEngine(row.avatar_engine),
@@ -264,6 +281,26 @@ function readAvatar(runId: string): (AvatarHandle & { dbId: number }) | null {
     motionPrompt: row.avatar_motion_prompt,
     apiEngine: decodeApiEngine(row.avatar_api_engine),
   };
+}
+
+function isLocalAvatar(avatar: AnyAvatarHandle): avatar is LocalAvatarHandle & { dbId: number } {
+  return "provider" in avatar && avatar.provider === "local_infinitetalk";
+}
+
+/** Dispatches to the right generation backend by avatar type — the ONE place the two
+ *  providers fork, so both call sites below (fresh run + Resume) share this instead of
+ *  duplicating the branch. Mirrors generateAvatarClip's exact call shape. */
+async function generateAnyAvatarClip(
+  runId: string,
+  avatar: AnyAvatarHandle,
+  audioPath: string,
+  outPath: string,
+  opts: { title?: string; resolution?: string }
+): Promise<string> {
+  if (isLocalAvatar(avatar)) {
+    return generateLocalAvatarClip(runId, avatar, audioPath, outPath, { resolution: opts.resolution });
+  }
+  return generateAvatarClip(runId, avatar, audioPath, outPath, opts);
 }
 
 /**
@@ -328,8 +365,8 @@ export async function syncFinishedRunToDrive(runId: string, runDir: string, fina
  *
  * No-op for v2 runs, so the resume path is untouched for Avatar IV / Legacy.
  */
-async function assertAvatarVStillEligible(runId: string, avatar: AvatarHandle | null): Promise<void> {
-  if (avatar?.apiEngine !== "avatar_v") return;
+async function assertAvatarVStillEligible(runId: string, avatar: AnyAvatarHandle | null): Promise<void> {
+  if (!avatar || isLocalAvatar(avatar) || avatar.apiEngine !== "avatar_v") return;
   const cap = await checkAvatarVSupport(avatar.heygenId);
   if (cap.ok && cap.supported) {
     log(runId, "info", "Avatar V still supported for this avatar — resuming", { stage: "avatar_video" });
@@ -552,11 +589,14 @@ export async function runStudioPipeline(
             sliceAudio(voiceoverWav, beat.startMs, beat.endMs, beatAudio);
             const clip = path.join(avatarDir, `beat_${String(beat.index).padStart(4, "0")}.mp4`);
             await limitAvatar(() =>
-              generateAvatarClip(runId, avatar, beatAudio, clip, { title: `beat ${beat.index}`, resolution: cfg.format })
+              generateAnyAvatarClip(runId, avatar, beatAudio, clip, { title: `beat ${beat.index}`, resolution: cfg.format })
             );
             // Cost Monitoring — HeyGen billed per generated clip-second (this beat slice),
-            // at the rate of the engine this avatar actually renders with.
-            recordHeygenEngine(runId, Math.max(0, (beat.endMs - beat.startMs) / 1000), billingEngine(avatar));
+            // at the rate of the engine this avatar actually renders with. A local-GPU
+            // avatar has no billing event at all — it's free, on the operator's own GPU.
+            if (!isLocalAvatar(avatar)) {
+              recordHeygenEngine(runId, Math.max(0, (beat.endMs - beat.startMs) / 1000), billingEngine(avatar));
+            }
             avatarClipPath = clip;
           } catch (e) {
             if (e instanceof CancelledError) throw e; // cancel aborts the beat — never degrade to a new b-roll call
@@ -917,9 +957,11 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
               const beatAudio = path.join(avatarDir, `beat_${pad}.mp3`);
               sliceAudio(voiceoverWav, beat.startMs, beat.endMs, beatAudio);
               await limitAvatar(() =>
-                generateAvatarClip(runId, avatar, beatAudio, clip, { title: `beat ${beat.index}`, resolution: cfg.format })
+                generateAnyAvatarClip(runId, avatar, beatAudio, clip, { title: `beat ${beat.index}`, resolution: cfg.format })
               );
-              recordHeygenEngine(runId, Math.max(0, (beat.endMs - beat.startMs) / 1000), billingEngine(avatar));
+              if (!isLocalAvatar(avatar)) {
+                recordHeygenEngine(runId, Math.max(0, (beat.endMs - beat.startMs) / 1000), billingEngine(avatar));
+              }
               avatarClipPath = clip;
               regenAvatar++;
             } catch (e) {

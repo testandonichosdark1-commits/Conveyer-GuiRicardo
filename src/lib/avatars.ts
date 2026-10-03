@@ -34,6 +34,15 @@ export type AvatarEngine = "talking_photo" | "photo_avatar_group";
  */
 export type ApiEngine = "avatar_v";
 
+/**
+ * Which GENERATION BACKEND renders this avatar's clips — a different axis from
+ * `engine`/`api_engine` (both HeyGen-specific concepts). NULL = HeyGen (every avatar
+ * before this existed). "local_infinitetalk" = a local ComfyUI InfiniteTalk workflow on
+ * the operator's own GPU — free, no HeyGen ingest/training, consumes `ref_image_path`
+ * directly at render time instead of a remote heygen_id handle.
+ */
+export type AvatarProvider = "local_infinitetalk";
+
 export type AvatarStatus = "pending" | "training" | "ready" | "error";
 
 export interface Avatar {
@@ -71,19 +80,21 @@ export interface Avatar {
   api_engine: string | null;
   /** Optional channel this avatar belongs to (NULL = available to all). */
   channel_id: number | null;
+  /** NULL = HeyGen. "local_infinitetalk" = renders via local ComfyUI. See AvatarProvider. */
+  provider: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const COLS =
-  "id, name, description, engine, heygen_id, group_id, image_key, ref_image_path, preview_url, status, error, motion_prompt, use_avatar_iv, imported, api_engine, channel_id, created_at, updated_at";
+  "id, name, description, engine, heygen_id, group_id, image_key, ref_image_path, preview_url, status, error, motion_prompt, use_avatar_iv, imported, api_engine, channel_id, provider, created_at, updated_at";
 
 const listStmt = db.prepare(`SELECT ${COLS} FROM avatars ORDER BY created_at DESC`);
 const getStmt = db.prepare(`SELECT ${COLS} FROM avatars WHERE id = ?`);
 const getByNameStmt = db.prepare(`SELECT ${COLS} FROM avatars WHERE name = ?`);
 const insertStmt = db.prepare(
-  `INSERT INTO avatars (name, description, engine, image_key, ref_image_path, status, motion_prompt, use_avatar_iv, imported, api_engine, channel_id)
-   VALUES (@name, @description, @engine, @image_key, @ref_image_path, @status, @motion_prompt, @use_avatar_iv, @imported, @api_engine, @channel_id)`
+  `INSERT INTO avatars (name, description, engine, image_key, ref_image_path, status, motion_prompt, use_avatar_iv, imported, api_engine, channel_id, provider)
+   VALUES (@name, @description, @engine, @image_key, @ref_image_path, @status, @motion_prompt, @use_avatar_iv, @imported, @api_engine, @channel_id, @provider)`
 );
 const deleteStmt = db.prepare("DELETE FROM avatars WHERE id = ?");
 
@@ -113,6 +124,8 @@ export interface CreateAvatarInput {
   /** "avatar_v" = render this avatar on v3 with Avatar V. Null = the v2 path. */
   api_engine?: ApiEngine | null;
   channel_id?: number | null;
+  /** "local_infinitetalk" = this avatar renders locally, no HeyGen ingest. Null = HeyGen. */
+  provider?: AvatarProvider | null;
 }
 
 export function createAvatar(input: CreateAvatarInput): number {
@@ -131,6 +144,7 @@ export function createAvatar(input: CreateAvatarInput): number {
     imported: input.imported ? "1" : null,
     api_engine: input.api_engine ?? null,
     channel_id: input.channel_id ?? null,
+    provider: input.provider ?? null,
   });
   return Number(res.lastInsertRowid);
 }
