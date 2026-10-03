@@ -9,7 +9,7 @@ An isolated project: nothing in the Conveyer app imports it, and the app does no
 | LTX weights | `Lightricks/LTX-2.5` revision `2356ce76915d6c48d313d7e8b25900e1dd3abaa8` (gated) |
 | Pipeline | `ltx_pipelines.distilled.DistilledPipeline` (fast/distilled; no DFR, no dev model) |
 | Runtime | Python 3.12, torch `2.13.0+cu132`, torchvision `0.28.0+cu132`, torchaudio `2.11.0+cu132`, natten `0.21.7+torch2130cu132`, cuDNN `9.24.0.43`, transformers `5.14.1` (resolved) |
-| Image base | `nvidia/cuda:13.2.0-base-ubuntu24.04` — hosts need a driver supporting CUDA 13.2 |
+| Image base | `nvidia/cuda:13.2.0-base-ubuntu24.04` (build arg `CUDA_BASE_TAG`; `TORCH_CUDA=cu130` variant documented in DEPLOYMENT.md) |
 | SDK | `runpod==1.12.0`, `huggingface_hub==1.33.0` (transformers < 5.15 requires hub < 2) |
 
 ## Input (`job.input`)
@@ -44,12 +44,15 @@ count. Example:
 
 ```json
 { "storage": "network_volume", "path": "jobs/ab12cd/output.mp4",
-  "model": "LTX-2.5", "pipeline": "distilled", "ltxVersion": "v1.4.2",
+  "workerRevision": "<git sha>", "ltxVersion": "v1.4.2", "ltxCommit": "9ec55f9f…",
+  "weightsRevision": "2356ce76…", "torchCuda": "cu132",
+  "model": "LTX-2.5", "pipeline": "distilled",
   "residency": "page_cache", "quantization": "fp8-cast",
   "width": 1920, "height": 1088, "fps": 24, "numFrames": 121, "durationSec": 5.041667,
   "seed": 42, "bytes": 123456, "codec": "h264",
   "sha256": "9f2c…64 lowercase hex chars…",
-  "timings": { "loadSec": 0.0, "generateSec": 81.2, "validateSec": 0.6, "totalSec": 82.0 } }
+  "timings": { "loadSec": 0.0, "generateSec": 81.2, "validateSec": 0.6, "totalSec": 82.0 },
+  "peakCudaMemoryBytes": 31138512896 }
 ```
 
 `sha256` is the lowercase-hex SHA-256 of the published file, computed by the worker after
@@ -139,7 +142,16 @@ docker run --gpus all -e RUNPOD_VOLUME_MOUNT=/vol -v /tmp/vol:/vol \
 
 (`--test_input` is the Runpod SDK's local mode.)
 
+## Provenance & logs
+
+Each result also carries `workerRevision`, `ltxVersion`, `ltxCommit`, `weightsRevision`,
+`torchCuda` (and `buildTimestamp` when built by CI), plus `peakCudaMemoryBytes` when CUDA is
+present. Logs are operational only (startup, GPU, load, per-job timings) — prompts by length,
+never secrets. See DEPLOYMENT.md §11.
+
 ## Deploy (later — not done in this phase)
+
+See **DEPLOYMENT.md** for the endpoint, GPU, CUDA, volume, data-center and smoke-test plan.
 
 Push the image to a registry; create a queue-based Serverless endpoint with a network volume,
 max concurrency 1 per worker, allowed CUDA ≥ 13.2, GPU priority list on the endpoint, the env

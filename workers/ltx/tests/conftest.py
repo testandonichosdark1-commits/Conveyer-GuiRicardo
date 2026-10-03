@@ -35,6 +35,7 @@ class FakeEngine:
         self.load_calls = 0
         self._loaded = False
         self.calls: list[tuple[GenerationRequest, Path, Path]] = []
+        self.peak: int | None = None
 
     @property
     def loaded(self) -> bool:
@@ -64,10 +65,10 @@ class FakeEngine:
             return EngineOutput(num_frames=req.num_frames - 8)
         else:
             make_mp4(out, width=req.width, height=req.height, frames=req.num_frames, fps=req.fps)
-        return EngineOutput(num_frames=req.num_frames)
+        return EngineOutput(num_frames=req.num_frames, peak_cuda_bytes=self.peak)
 
     def info(self) -> dict[str, object]:
-        return {"model": "LTX-2.5", "pipeline": "distilled", "ltxVersion": "v1.4.2"}
+        return {"model": "LTX-2.5", "pipeline": "distilled", "residency": "page_cache", "quantization": "fp8-cast"}
 
 
 @pytest.fixture

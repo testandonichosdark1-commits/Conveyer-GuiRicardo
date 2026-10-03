@@ -41,7 +41,7 @@ def test_unknown_modes_fail_loudly(monkeypatch: pytest.MonkeyPatch, var, value):
 def test_constructing_the_real_engine_loads_nothing():
     e = Ltx25DistilledEngine(EngineConfig())
     assert e.loaded is False
-    assert e.info() == {"model": "LTX-2.5", "pipeline": "distilled", "ltxVersion": "v1.4.2", "residency": "page_cache", "quantization": "fp8-cast"}
+    assert e.info() == {"model": "LTX-2.5", "pipeline": "distilled", "residency": "page_cache", "quantization": "fp8-cast"}
 
 
 def test_versions_are_pinned_not_floating():

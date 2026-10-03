@@ -7,3 +7,4 @@ requirements-test.txt
 *.safetensors
 *.mp4
 .env*
+DEPLOYMENT.md

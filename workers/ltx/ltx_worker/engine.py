@@ -36,6 +36,7 @@ scaling is more workers on the endpoint, not two jobs on one GPU.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -56,6 +57,9 @@ RESIDENCY_MODES = ("page_cache", "gpu", "cpu")
 QUANTIZATION_MODES = ("none", "fp8-cast")
 
 
+log = logging.getLogger("ltx_worker")
+
+
 class EngineError(RuntimeError):
     """Generation failed inside the model or encoder."""
 
@@ -63,6 +67,7 @@ class EngineError(RuntimeError):
 @dataclass(frozen=True)
 class EngineOutput:
     num_frames: int  # frames the pipeline reports it produced
+    peak_cuda_bytes: int | None = None  # torch.cuda.max_memory_allocated during this job
 
 
 class LtxEngine(Protocol):
@@ -122,7 +127,9 @@ class Ltx25DistilledEngine:
 
             from .weights import resolve_model_files  # noqa: PLC0415
 
+            log.info("resolving weights (residency=%s, quantization=%s)", self._config.residency, self._config.quantization)
             files = (self._resolve_files or resolve_model_files)()
+            log.info("weights ready; building DistilledPipeline")
             paths = ModelPaths.from_split(
                 transformer_path=str(files.transformer),
                 text_encoder_path=str(files.text_encoder),
@@ -143,6 +150,7 @@ class Ltx25DistilledEngine:
                 offload_mode=OffloadMode.CPU if self._config.residency == "cpu" else OffloadMode.NONE,
             )
             self.load_seconds = round(time.monotonic() - t0, 3)
+            log.info("model loaded in %.1fs", self.load_seconds)
 
     def generate(self, req: GenerationRequest, image: Path, out: Path) -> EngineOutput:
         self.load()
@@ -152,6 +160,9 @@ class Ltx25DistilledEngine:
         from ltx_pipelines.utils.types import ImageConditioningInput  # noqa: PLC0415
 
         with self._lock, torch.inference_mode():
+            cuda = torch.cuda.is_available()
+            if cuda:
+                torch.cuda.reset_peak_memory_stats()
             try:
                 result = self._pipeline(
                     prompt=req.prompt,
@@ -173,13 +184,13 @@ class Ltx25DistilledEngine:
                 )
             except Exception as e:
                 raise EngineError(f"{type(e).__name__}: {e}") from None
-        return EngineOutput(num_frames=int(result.num_frames))
+            peak = int(torch.cuda.max_memory_allocated()) if cuda else None
+        return EngineOutput(num_frames=int(result.num_frames), peak_cuda_bytes=peak)
 
     def info(self) -> dict[str, object]:
         return {
             "model": MODEL,
             "pipeline": PIPELINE,
-            "ltxVersion": LTX_GIT_TAG,
             "residency": self._config.residency,
             "quantization": self._config.quantization,
         }
