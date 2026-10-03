@@ -46,7 +46,10 @@ interface Draft {
 
 const EMPTY: Draft = {
   name: "",
-  visual_mode: "mix",
+  // "ai" (not "mix") — this field has no UI control, so whatever a channel is created
+  // with sticks silently forever; the operator runs 100% local GPU (LTX-Video + ChatGPT),
+  // never real stock footage, so a new channel must not come back in via this hidden field.
+  visual_mode: "ai",
   visual_prompt: "",
   interval_sec: 4.5,
   format: "1920x1080",
