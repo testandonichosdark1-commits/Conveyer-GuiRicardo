@@ -17,6 +17,7 @@ import { acquireVisual, createTopicPool } from "./services/visual-source";
 import { writeCredits, readCredits, creditFrom, type CreditEntry } from "./services/credits";
 import { generateAvatarClip, type AvatarHandle } from "./services/heygen-video";
 import { generateLocalAvatarClip, type LocalAvatarHandle } from "./services/infinitetalk";
+import { generateSadTalkerClip } from "./services/sadtalker";
 import { checkAvatarVSupport } from "./services/heygen-avatar";
 import { assembleStudioVideo, sliceAudio, decodeToWav, type RenderBeat } from "./services/studio-assemble";
 import { recordHeygenEngine } from "./services/cost-ledger";
@@ -298,7 +299,16 @@ async function generateAnyAvatarClip(
   opts: { title?: string; resolution?: string }
 ): Promise<string> {
   if (isLocalAvatar(avatar)) {
-    return generateLocalAvatarClip(runId, avatar, audioPath, outPath, { resolution: opts.resolution });
+    // Which MODEL renders a "local_infinitetalk"-provider avatar — AVATAR_LOCAL_MODEL,
+    // not the provider column itself. InfiniteTalk (Wan 2.1 14B) is NOT practical on an
+    // 8GB GPU (live-tested 2026-10-03: never finished a single sampling step in 16+
+    // minutes); SadTalker is the default because it actually runs. Kept selectable —
+    // never deleted — for different/future hardware.
+    const localModel = getSetting("AVATAR_LOCAL_MODEL") || "sadtalker";
+    if (localModel === "infinitetalk") {
+      return generateLocalAvatarClip(runId, avatar, audioPath, outPath, { resolution: opts.resolution });
+    }
+    return generateSadTalkerClip(runId, avatar, audioPath, outPath, { resolution: opts.resolution });
   }
   return generateAvatarClip(runId, avatar, audioPath, outPath, opts);
 }

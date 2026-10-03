@@ -244,6 +244,7 @@ export const SETTING_KEYS = [
   "COMFYUI_TIMEOUT_SEC",       // deadline for one ComfyUI workflow run (queue + generate), default 600 (10 min — local GPU generation is slow)
   "LOCAL_IMAGE_MODEL",         // chatgpt-browser (only option today — see providers.ts)
   "LOCAL_VIDEO_MODEL",         // ltxv-2b-distilled (only ComfyUI LTX tier that fits an 8GB GPU — see providers.ts)
+  "AVATAR_LOCAL_MODEL",        // sadtalker (recommended) or infinitetalk — which model renders a local_infinitetalk avatar, see studio-pipeline.ts
   "CHATGPT_URL",               // ChatGPT page opened by the browser worker, default https://chatgpt.com/
   "CHATGPT_IMAGE_TIMEOUT_SEC", // deadline for one ChatGPT image generation, default 180
   "CHATGPT_PROMPT_SELECTOR",   // advanced escape hatch — custom CSS selector for ChatGPT's prompt box, tried before the built-in candidates
@@ -737,6 +738,7 @@ export const DEFAULTS: Record<SettingKey, string> = {
   COMFYUI_TIMEOUT_SEC: "600",
   LOCAL_IMAGE_MODEL: defaultAiModel("local", "image"), // = "chatgpt-browser"
   LOCAL_VIDEO_MODEL: defaultAiModel("local", "video"), // = "ltxv-2b-distilled"
+  AVATAR_LOCAL_MODEL: "sadtalker",
   CHATGPT_URL: "https://chatgpt.com/",
   CHATGPT_IMAGE_TIMEOUT_SEC: "180",
   CHATGPT_PROMPT_SELECTOR: "",
