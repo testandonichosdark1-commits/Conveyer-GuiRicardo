@@ -151,6 +151,10 @@ export const SETTING_KEYS = [
   "WIGOLO_EXCLUDE_DOMAINS",    // CSV of domains to drop — stock agencies serve WATERMARKED comps, unusable in a finished video
   "WIGOLO_MIN_PX",             // Drop hits smaller than this on either side; open-web search has no size floor of its own
   "WIGOLO_BIN",                // Explicit path to the wigolo binary. Empty = look on PATH, then node_modules/.bin. Never installs.
+  // Runpod Serverless (services/runpod-manager.ts) — no callers and no form field yet.
+  "RUNPOD_API_KEY",                  // Bearer key for api.runpod.ai. Server-only; masked like every *_KEY.
+  "RUNPOD_LTX_ENDPOINT_ID",          // Queue endpoint for the future LTX still-animation worker
+  "RUNPOD_INFINITETALK_ENDPOINT_ID", // Queue endpoint for the future InfiniteTalk avatar worker
   "AVATAR_BACKGROUND",         // HeyGen avatar background color (hex) + placeholder color
   "VISUAL_CONCURRENCY",        // parallel b-roll fetch/gen jobs (default 3)
   "AVATAR_CONCURRENCY",        // parallel HeyGen avatar-clip jobs (default 2)
@@ -625,6 +629,9 @@ export const DEFAULTS: Record<SettingKey, string> = {
   // nowhere to send the query. Empty is still respected as an off switch — see wigoloSearch.
   WIGOLO_URL: "http://127.0.0.1:3477",
   WIGOLO_API_TOKEN: "",
+  RUNPOD_API_KEY: "",
+  RUNPOD_LTX_ENDPOINT_ID: "",
+  RUNPOD_INFINITETALK_ENDPOINT_ID: "",
   // Stock agencies serve watermarked comps, unusable in a finished video. The last three are
   // there for a different reason: they are RE-UPLOAD sites, so the page a search lands on is
   // never the rights holder and gives an operator nothing to check a licence against. A

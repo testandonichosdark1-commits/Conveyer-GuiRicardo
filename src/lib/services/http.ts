@@ -64,7 +64,7 @@ export function provesRequestNeverArrived(e: unknown): boolean {
  * aborts with a TimeoutError. Any caller-supplied signal (cancellation) is composed in,
  * so a user cancel still wins early.
  */
-async function fetchBounded(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+export async function fetchBounded(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const ctrl = new AbortController();
   const timer = setTimeout(
     () => ctrl.abort(new DOMException(`operation timed out after ${timeoutMs}ms`, "TimeoutError")),
