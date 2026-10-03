@@ -10,6 +10,7 @@ interface AvatarLite {
   name: string;
   status: "pending" | "training" | "ready" | "error";
   channel_id: number | null;
+  provider: string | null;
 }
 interface Channel {
   id: number;
@@ -150,13 +151,17 @@ export default function CreerVideoPage() {
       .then((r) => (r.ok ? r.json() : null))
       .then((rows: AvatarLite[] | null) => {
         if (!Array.isArray(rows)) return; // transient error → keep what we have
-        setAvatars(rows);
-        // Deliberately NO auto-selection of "the first ready avatar" — avatar/HeyGen is a
-        // billable, opt-in choice (and, combined with avatarPercent's own default below,
-        // silently turns on real spend the moment this page loads). An operator reported
-        // exactly that: a video went out with HeyGen avatar beats they never asked for,
-        // because an avatar got auto-picked here. The dropdown still shows every ready
-        // avatar; the operator just has to actually choose one.
+        // Local GPU (InfiniteTalk) is the only avatar engine this page offers now — a
+        // HeyGen avatar (provider NULL) still exists in the library (so old runs can
+        // still be inspected/resumed) but is deliberately not selectable for a NEW run
+        // from this page anymore.
+        setAvatars(rows.filter((a) => a.provider === "local_infinitetalk"));
+        // Deliberately NO auto-selection of "the first ready avatar" — avatar is a
+        // billable-by-GPU-time, opt-in choice (and, combined with avatarPercent's own
+        // default below, silently turns on avatar generation the moment this page
+        // loads). An operator reported exactly that: a video went out with avatar beats
+        // they never asked for, because an avatar got auto-picked here. The dropdown
+        // still shows every ready avatar; the operator just has to actually choose one.
       })
       .catch(() => {});
     fetch("/api/channels")
@@ -326,8 +331,8 @@ export default function CreerVideoPage() {
       <h1>{tr("Créer une vidéo", "Create a video")}</h1>
       <p className="muted" style={{ marginBottom: 18, fontSize: 14, lineHeight: 1.6 }}>
         {tr(
-          "Collez un script, choisissez un avatar récurrent et la source des visuels — ElevenLabs narre, HeyGen anime l'avatar, et le reste est illustré par du vrai footage ou de l'IA.",
-          "Paste a script, pick a recurring avatar and the visual source — ElevenLabs narrates, HeyGen animates the avatar, and the rest is illustrated with real footage or AI."
+          "Collez un script, choisissez un avatar récurrent et la source des visuels — la narration est synthétisée, un moteur local (GPU) anime l'avatar, et le reste est illustré par du vrai footage ou de l'IA.",
+          "Paste a script, pick a recurring avatar and the visual source — narration is synthesized, a local (GPU) engine animates the avatar, and the rest is illustrated with real footage or AI."
         )}
       </p>
 

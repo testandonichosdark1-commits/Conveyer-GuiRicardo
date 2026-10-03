@@ -655,7 +655,7 @@ export const DEFAULTS: Record<SettingKey, string> = {
   YT_DLP_CC_ONLY: "0",
 
   // AI provider
-  AI_PROVIDER: "kie",
+  AI_PROVIDER: "local",
   FLOW_PROJECT_URL: "https://labs.google/fx/tools/flow",
   FLOW_BROWSER_PROFILE_DIR: "",
   FLOW_BROWSER_HIDDEN: "1",
@@ -741,7 +741,7 @@ export const DEFAULTS: Record<SettingKey, string> = {
   CHATGPT_IMAGE_TIMEOUT_SEC: "180",
   CHATGPT_PROMPT_SELECTOR: "",
   CHATGPT_CONVO_RECYCLE_EVERY: "25",
-  AVATAR_ENGINE_DEFAULT: "talking_photo",
+  AVATAR_ENGINE_DEFAULT: "local_infinitetalk",
   SMART_ASSIGN: "0",
   // On by default: beats sharing a topicKey reuse ONE provider gather per broaden
   // attempt, cutting Pexels/stock search volume (the main cause of 429 rate limits).
