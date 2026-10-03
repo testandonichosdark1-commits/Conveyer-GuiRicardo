@@ -312,14 +312,26 @@ export const AI_PROVIDERS: AiProviderMeta[] = [
     selectLabel: "Local GPU (ChatGPT browser + LTX-Video)",
     // No apiKey — ChatGPT is driven through the operator's own logged-in browser
     // (same CDP connection flow_browser already maintains, see chatgpt-browser.ts)
-    // and LTX-Video runs on the operator's own GPU via a local ComfyUI instance
-    // (COMFYUI_URL), never a paid API.
+    // and both video backends run on the operator's own GPU via a local ComfyUI
+    // instance (COMFYUI_URL), never a paid API.
     image: { key: "LOCAL_IMAGE_MODEL", models: [{ id: "chatgpt-browser", label: "ChatGPT (browser)", recommended: true }] },
-    // LTX-Video 2B distilled (0.9.x) is the only LTX tier that fits an 8GB consumer
-    // GPU — the newer LTX-2 line (19B/22B) needs 12-32GB. The catalog lists just
-    // this one id; "Custom…" covers a different local checkpoint if the operator
-    // sets one up.
-    video: { key: "LOCAL_VIDEO_MODEL", models: [{ id: "ltxv-2b-distilled", label: "LTX-Video 2B Distilled (0.9.x)", recommended: true }] },
+    // "wan-i2v-14b" (wan-i2v.ts) would animate a ChatGPT-generated still with Wan 2.1
+    // I2V 14B instead of generating from scratch — in principle the fix for LTX-Video
+    // 2B distilled's fine-detail distortion (text, numbers, clock faces), since the
+    // starting frame is already correct and the model only has to imagine motion.
+    // NOT recommended: live-tested 2026-10-03 on this 8GB GPU (Q4_K_M GGUF + 20-block
+    // swap, sdpa attention) and it never finished a single sampling step in 25 minutes
+    // (interrupted) — same failure mode as infinitetalk.ts's 14B avatar model. Kept
+    // selectable for different/future hardware, never as a default. LTX-Video stays
+    // recommended despite its own distortion problem because it's the only one of the
+    // two that actually finishes.
+    video: {
+      key: "LOCAL_VIDEO_MODEL",
+      models: [
+        { id: "ltxv-2b-distilled", label: "LTX-Video 2B Distilled (0.9.x, text-to-video)", recommended: true },
+        { id: "wan-i2v-14b", label: "Wan 2.1 I2V 14B (animates a ChatGPT still — very slow on 8GB)" },
+      ],
+    },
   },
   {
     id: "higgsfield",

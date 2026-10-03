@@ -27,6 +27,7 @@ import { FlowBrowserError, generateFlowImage, generateFlowVideo } from "./flow-b
 import { generateVidsImage, generateVidsVideo } from "./vids-browser";
 import { generateChatGptImage } from "./chatgpt-browser";
 import { generateLtxVideo } from "./ltx-video";
+import { generateWanI2vVideo } from "./wan-i2v";
 import { LocalGpuError } from "./comfyui-client";
 import { storyblocksSearch, reserveDownload as sbReserveDownload, resolveStoryblocksFile } from "./storyblocks";
 import { recordStoryblocksDownload, recordGoogleCseQuery, recordGemini, recordKieImage, recordKieVeo, recordLabs69, recordLabs69Image, recordMagnificImage, recordMagnificVideo, recordHiggsfieldImage, recordHiggsfieldVideo, recordRunwareImage } from "./cost-ledger";
@@ -3891,24 +3892,12 @@ async function acquireAi(
   if (provider === "local") {
     const { media, reason } = resolveAiMedia(beat, mediaOverride);
     log(runId, "debug", `Beat ${beat.index}: Local GPU media = ${media} (reason=${reason})`, { stage: "visual" });
-    if (media === "video") {
-      try {
-        log(runId, "info", `Beat ${beat.index}: LTX-Video generation started (local ComfyUI)`, { stage: "visual" });
-        const aspectWide = (() => {
-          const [w, h] = aspect.split(":").map(Number);
-          return !Number.isFinite(w) || !Number.isFinite(h) || w >= h;
-        })();
-        await generateLtxVideo(runId, buildPrompt(""), outPath, { durationSec: beatDurSec, aspectWide });
-        log(runId, "info", `Beat ${beat.index}: AI video via LTX-Video (local)`, { stage: "visual" });
-        return { path: outPath, kind: "ai", provider: "local:ltx-video" };
-      } catch (e) {
-        const code = e instanceof LocalGpuError ? e.code : undefined;
-        log(runId, "warn", `Beat ${beat.index}: LTX-Video failed (${(e as Error).message.slice(0, 160)}) — falling back to 69labs/Grok`, { stage: "visual" });
-        if (code === "not_running" || code === "config") {
-          log(runId, "warn", `Local ComfyUI is unreachable (COMFYUI_URL) — every Local GPU video beat this run will fall back the same way until it's fixed`, { stage: "visual" });
-        }
-      }
-    } else {
+
+    // Shared by both the still-image path (Ken Burns) and the Wan I2V video path
+    // (animates this exact still) — a beat's starting frame is generated the same way
+    // regardless of what happens to it afterward, so there is exactly one scored-regen
+    // loop instead of two copies that could drift.
+    async function generateBestLocalStill(): Promise<{ path: string; score: number } | null> {
       let best: { path: string; score: number } | null = null;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         const tmpImg = path.join(os.tmpdir(), `local_${runId.slice(0, 8)}_${beat.index}_${attempt}.png`);
@@ -3930,12 +3919,67 @@ async function acquireAi(
           const code = e instanceof FlowBrowserError ? e.code : undefined;
           log(runId, "debug", `Beat ${beat.index}: ChatGPT image gen failed (${(e as Error).message.slice(0, 120)})`, { stage: "visual" });
           if (code === "login" || code === "config") {
-            log(runId, "warn", `ChatGPT tab needs attention (${code}) — every Local GPU image beat this run will fall back the same way until it's fixed`, { stage: "visual" });
+            log(runId, "warn", `ChatGPT tab needs attention (${code}) — every Local GPU beat this run will fall back the same way until it's fixed`, { stage: "visual" });
             break;
           }
           if (attempt < maxAttempts - 1) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
         }
       }
+      return best;
+    }
+
+    if (media === "video") {
+      const aspectWide = (() => {
+        const [w, h] = aspect.split(":").map(Number);
+        return !Number.isFinite(w) || !Number.isFinite(h) || w >= h;
+      })();
+      const videoModel = getSetting("LOCAL_VIDEO_MODEL") || "ltxv-2b-distilled";
+      if (videoModel === "wan-i2v-14b") {
+        // Opt-in only (never the default): generate a correct still first (same loop the
+        // image path uses), then animate IT via Wan 2.1 I2V — in principle the fix for
+        // LTX-Video's fine-detail distortion, since the starting frame's geometry is
+        // already right and the model only has to imagine motion. Live-tested 2026-10-03
+        // on this 8GB GPU and it never finished a single sampling step in 25 minutes —
+        // kept selectable for different/future hardware, not pushed on this one.
+        const still = await generateBestLocalStill();
+        if (still) {
+          try {
+            log(runId, "info", `Beat ${beat.index}: Wan I2V animation started (local ComfyUI) — match ${still.score}%`, { stage: "visual" });
+            await generateWanI2vVideo(runId, still.path, buildPrompt(""), outPath, { durationSec: beatDurSec, aspectWide });
+            log(runId, "info", `Beat ${beat.index}: AI video via Wan I2V (local)`, { stage: "visual" });
+            return { path: outPath, kind: "ai", provider: "local:wan-i2v" };
+          } catch (e) {
+            const code = e instanceof LocalGpuError ? e.code : undefined;
+            log(runId, "warn", `Beat ${beat.index}: Wan I2V failed (${(e as Error).message.slice(0, 160)}) — falling back to 69labs/Grok`, { stage: "visual" });
+            if (code === "not_running" || code === "config") {
+              log(runId, "warn", `Local ComfyUI is unreachable (COMFYUI_URL) — every Local GPU video beat this run will fall back the same way until it's fixed`, { stage: "visual" });
+            }
+          } finally {
+            try { fs.unlinkSync(still.path); } catch {}
+          }
+        } else {
+          log(runId, "warn", `Beat ${beat.index}: ChatGPT produced nothing after ${maxAttempts} attempts — falling back to 69labs/Grok`, { stage: "visual" });
+        }
+      } else {
+        // Default: pure text-to-video, no starting frame — faster than Wan I2V and
+        // doesn't depend on the ChatGPT step succeeding first, but it measurably
+        // distorts fine-detail objects (text, numbers, clock faces) since the model has
+        // to invent the whole shape AND the motion at once.
+        try {
+          log(runId, "info", `Beat ${beat.index}: LTX-Video generation started (local ComfyUI)`, { stage: "visual" });
+          await generateLtxVideo(runId, buildPrompt(""), outPath, { durationSec: beatDurSec, aspectWide });
+          log(runId, "info", `Beat ${beat.index}: AI video via LTX-Video (local)`, { stage: "visual" });
+          return { path: outPath, kind: "ai", provider: "local:ltx-video" };
+        } catch (e) {
+          const code = e instanceof LocalGpuError ? e.code : undefined;
+          log(runId, "warn", `Beat ${beat.index}: LTX-Video failed (${(e as Error).message.slice(0, 160)}) — falling back to 69labs/Grok`, { stage: "visual" });
+          if (code === "not_running" || code === "config") {
+            log(runId, "warn", `Local ComfyUI is unreachable (COMFYUI_URL) — every Local GPU video beat this run will fall back the same way until it's fixed`, { stage: "visual" });
+          }
+        }
+      }
+    } else {
+      const best = await generateBestLocalStill();
       if (best) {
         kenBurns(best.path, outPath, beatDurSec, beat.index % 2 === 1, resolution);
         try { fs.unlinkSync(best.path); } catch {}
