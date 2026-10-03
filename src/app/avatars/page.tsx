@@ -12,6 +12,8 @@ interface Avatar {
   use_avatar_iv: string | null;
   /** "avatar_v" when the operator chose Avatar V (v3); null = the v2 path. */
   api_engine: string | null;
+  /** "local_infinitetalk" = renders via a local ComfyUI workflow, free, no HeyGen. */
+  provider: string | null;
   channel_id: number | null;
   created_at: string;
 }
@@ -34,12 +36,16 @@ const AVATARS_UNREACHABLE = "__compatible_avatars_unreachable__";
  * which meant three places independently deciding what mode we were in, with an implicit
  * precedence between them. One explicit value instead: pick the engine, get its inputs.
  *
- *  - "iv" / "legacy" → rendered on v2; differ ONLY by use_avatar_iv_model.
- *  - "avatar_v"      → rendered on v3. Availability is per-avatar and decided solely by
- *    HeyGen's live supported_api_engines, so this mode can only pick from avatars that
- *    already exist on HeyGen and report support — never an upload we haven't created yet.
+ *  - "iv" / "legacy" → rendered on v2 (HeyGen); differ ONLY by use_avatar_iv_model.
+ *  - "avatar_v"      → rendered on v3 (HeyGen). Availability is per-avatar and decided
+ *    solely by HeyGen's live supported_api_engines, so this mode can only pick from
+ *    avatars that already exist on HeyGen and report support — never an upload we
+ *    haven't created yet.
+ *  - "local"         → rendered via a local ComfyUI InfiniteTalk workflow, free, no
+ *    HeyGen involved at all. Needs a real reference photo (no text-description
+ *    fallback — InfiniteTalk has nothing analogous to HeyGen ingest's nano-banana step).
  */
-type CreateMode = "iv" | "legacy" | "avatar_v";
+type CreateMode = "iv" | "legacy" | "avatar_v" | "local";
 interface LogLine { id?: number; ts: string; level: string; message: string }
 
 /**
@@ -56,9 +62,10 @@ interface LogLine { id?: number; ts: string; level: string; message: string }
  * actually do, not a default we picked. Keep this in lockstep with readAvatar — if the two
  * ever disagree, the card is lying about what the operator will be billed for.
  */
-function engineLabel(a: Pick<Avatar, "api_engine" | "use_avatar_iv">): string {
-  if (a.api_engine === "avatar_v") return "Avatar V";
-  return a.use_avatar_iv === "1" ? "Avatar IV" : "Legacy";
+function engineLabel(a: Pick<Avatar, "api_engine" | "use_avatar_iv" | "provider">): string {
+  if (a.provider === "local_infinitetalk") return "Local GPU (InfiniteTalk)";
+  if (a.api_engine === "avatar_v") return "Avatar V (HeyGen)";
+  return a.use_avatar_iv === "1" ? "Avatar IV (HeyGen)" : "Legacy (HeyGen)";
 }
 
 const STATUS_COLOR: Record<Avatar["status"], { color: string; bg: string }> = {
@@ -81,11 +88,14 @@ export default function AvatarsPage() {
   // creation engine. The backend still supports photo_avatar_group so any pre-existing
   // trained avatars keep rendering.
   const engine = "talking_photo";
-  const [mode, setMode] = useState<CreateMode>("iv");
+  // Local GPU is the default now — it's free and doesn't need a HeyGen account at all,
+  // which is what most operators creating an avatar on this install actually want.
+  const [mode, setMode] = useState<CreateMode>("local");
   // Derived, never stored: Avatar IV is one of the v2 modes, so the wire flag follows
   // from the mode rather than living beside it as a second thing to keep in sync.
   const useIv = mode === "iv";
   const twinMode = mode === "avatar_v";
+  const localMode = mode === "local";
   const [file, setFile] = useState<File | null>(null);
   const [heygenId, setHeygenId] = useState("");
   const [importType, setImportType] = useState<"avatar" | "talking_photo">("avatar");
@@ -230,18 +240,25 @@ export default function AvatarsPage() {
     return new Set([...seen].filter(([, n]) => n > 1).map(([n]) => n));
   }, [compatible]);
 
-  const canCreate = name.trim().length > 0 && (twinMode ? pickedAvatarId.length > 0 : !!file || !!description.trim() || !!heygenId.trim());
+  const canCreate =
+    name.trim().length > 0 &&
+    (localMode ? !!file : twinMode ? pickedAvatarId.length > 0 : !!file || !!description.trim() || !!heygenId.trim());
 
   async function create() {
     if (!canCreate) return;
-    const importing = !twinMode && heygenId.trim().length > 0;
+    const importing = !twinMode && !localMode && heygenId.trim().length > 0;
 
     setBusy(true);
     try {
       const fd = new FormData();
       fd.set("name", name.trim());
       if (channelId != null) fd.set("channelId", String(channelId));
-      if (twinMode) {
+      if (localMode) {
+        // No HeyGen fields at all — the route skips ingest entirely for this provider
+        // and goes straight to "ready" once the photo is saved (see /api/avatars POST).
+        fd.set("provider", "local_infinitetalk");
+        if (file) fd.set("image", file);
+      } else if (twinMode) {
         // Avatar V reuses the ordinary import-by-id flow — the picker just supplies an id
         // it knows is compatible. Two fields are deliberately NOT sent: `useAvatarIv` (a v2
         // flag with no meaning on v3 — the engine here is apiEngine), and `description`
@@ -280,8 +297,8 @@ export default function AvatarsPage() {
       <h1>{tr("Avatars", "Avatars")}</h1>
       <p className="muted" style={{ marginBottom: 18, fontSize: 14, lineHeight: 1.6 }}>
         {tr(
-          "Créez un avatar récurrent à partir d'une image OU d'une description. Il est mémorisé et réutilisable.",
-          "Create a recurring avatar from an image OR a description. It's memorized and reusable."
+          "Créez un avatar récurrent à partir d'une photo de référence. Il est mémorisé et réutilisable.",
+          "Create a recurring avatar from a reference photo. It's memorized and reusable."
         )}
       </p>
 
@@ -323,16 +340,22 @@ export default function AvatarsPage() {
             value={mode}
             onChange={(e) => setMode(e.target.value as CreateMode)}
           >
+            <option value="local">
+              {tr(
+                "GPU locale (InfiniteTalk) — Gratuit · Tourne sur votre propre GPU",
+                "Local GPU (InfiniteTalk) — Free · Runs on your own GPU"
+              )}
+            </option>
             <option value="iv">
               {tr(
-                "Avatar IV (recommandé) — Réalisme maximal · Coût plus élevé (~3 $/min)",
-                "Avatar IV (Recommended) — Highest realism · Higher cost (~$3/min)"
+                "Avatar IV (HeyGen) — Réalisme maximal · Coût plus élevé (~3 $/min)",
+                "Avatar IV (HeyGen) — Highest realism · Higher cost (~$3/min)"
               )}
             </option>
             <option value="legacy">
               {tr(
-                "Legacy — Coût réduit (~1 $/min) · Un peu moins réaliste",
-                "Legacy — Lower cost (~$1/min) · Slightly less realistic"
+                "Legacy (HeyGen) — Coût réduit (~1 $/min) · Un peu moins réaliste",
+                "Legacy (HeyGen) — Lower cost (~$1/min) · Slightly less realistic"
               )}
             </option>
             {/* "Estimated" rather than the "~" the other two use, because the difference is
@@ -354,11 +377,42 @@ export default function AvatarsPage() {
               )}
             </p>
           )}
+          {localMode && (
+            <p className="faint" style={{ fontSize: 11.5, marginTop: 3, lineHeight: 1.4 }}>
+              {tr(
+                "Tourne sur votre GPU, pas de compte HeyGen requis — plus lent et de qualité variable, selon votre GPU.",
+                "Runs on your own GPU, no HeyGen account needed — slower and more variable in quality, depending on your GPU."
+              )}
+            </p>
+          )}
         </div>
+
+        {/* Local GPU's whole form: just a reference photo. No HeyGen ingest at all (see
+            /api/avatars POST) — InfiniteTalk has no text-to-image fallback, so unlike the
+            HeyGen path there's no "— or —" description/import alternative here. */}
+        {localMode && (
+          <div>
+            <label className="label">{tr("Photo de référence (upload)", "Reference photo (upload)")}</label>
+            <div onClick={() => fileRef.current?.click()}
+              style={{ border: `1.5px dashed ${file ? "var(--accent)" : "var(--border-strong)"}`, borderRadius: "var(--r-sm)",
+                padding: "16px", textAlign: "center", cursor: "pointer", background: "var(--surface)" }}>
+              <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" style={{ display: "none" }}
+                onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+              {file ? <div style={{ fontWeight: 600, fontSize: 13.5 }}>{file.name}</div>
+                : <div className="faint" style={{ fontSize: 13 }}>{tr("Choisir le fichier — portrait net, de face", "Choose a file — sharp, front-facing portrait")}</div>}
+            </div>
+            <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>
+              {tr(
+                "Obligatoire pour ce moteur — pas de génération à partir d'une description.",
+                "Required for this engine — no generating one from a text description."
+              )}
+            </div>
+          </div>
+        )}
 
         {/* The v2 inputs (Avatar IV / Legacy). One fragment gated on the mode, so the
             Avatar IV and Avatar V controls can never be on screen at the same time. */}
-        {!twinMode && (
+        {!twinMode && !localMode && (
         <>
         <div>
           <label className="label">{tr("Image de référence (upload)", "Reference image (upload)")}</label>
@@ -536,13 +590,17 @@ export default function AvatarsPage() {
               {": "}
               {[
                 !name.trim() ? tr("un nom (champ « Nom »)", "a name (the \"Name\" field)") : null,
-                twinMode
-                  ? !pickedAvatarId
-                    ? tr("un avatar compatible sélectionné", "a selected compatible avatar")
+                localMode
+                  ? !file
+                    ? tr("une photo de référence", "a reference photo")
                     : null
-                  : !file && !description.trim() && !heygenId.trim()
-                    ? tr("une image, une description OU un ID HeyGen", "an image, a description OR a HeyGen ID")
-                    : null,
+                  : twinMode
+                    ? !pickedAvatarId
+                      ? tr("un avatar compatible sélectionné", "a selected compatible avatar")
+                      : null
+                    : !file && !description.trim() && !heygenId.trim()
+                      ? tr("une image, une description OU un ID HeyGen", "an image, a description OR a HeyGen ID")
+                      : null,
               ].filter(Boolean).join(" + ")}
             </div>
           )}
