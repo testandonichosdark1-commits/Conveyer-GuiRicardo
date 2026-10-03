@@ -1,0 +1,9 @@
+tests/
+**/__pycache__/
+.pytest_cache/
+*.pyc
+README.md
+requirements-test.txt
+*.safetensors
+*.mp4
+.env*

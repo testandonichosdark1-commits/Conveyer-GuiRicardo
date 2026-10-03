@@ -1,0 +1,3 @@
+# Worker runtime dependencies (torch and LTX are installed by the Dockerfile at pinned versions).
+runpod==1.12.0          # Serverless SDK; 1.12.0 provides runpod.serverless.VolumeCache
+huggingface_hub==1.33.0  # per-file, revision-pinned weight downloads into HF_HOME

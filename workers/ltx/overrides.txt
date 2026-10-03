@@ -1,0 +1,4 @@
+# Mirrors [tool.uv] override-dependencies in Lightricks/LTX-2 v1.4.2's root pyproject.toml:
+# torch 2.13+cu132 pins nvidia-cudnn-cu13==9.20.0.48, which lacks libcudnn_engines_tensor_ir;
+# 9.24.0.43 ships it and matches torch 2.13 / cuDNN 9.24.
+nvidia-cudnn-cu13==9.24.0.43; sys_platform == 'linux'

@@ -1,0 +1,3 @@
+# CPU-only test dependencies. No torch, no LTX, no runpod: tests run the handler against a fake engine.
+pytest==8.4.2
+huggingface_hub==1.33.0

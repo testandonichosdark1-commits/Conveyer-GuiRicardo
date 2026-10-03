@@ -1,0 +1,10 @@
+[project]
+name = "conveyer-ltx-worker"
+version = "0.1.0"
+description = "Runpod Serverless worker: still image -> LTX-2.5 DistilledPipeline -> MP4 on a network volume"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
