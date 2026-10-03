@@ -108,6 +108,17 @@ async function sendButton(page: Page): Promise<import("playwright").Locator | nu
   return null;
 }
 
+/** The composer's native file input — confirmed live (2026-10-03) that ChatGPT always
+ *  has one in the DOM (hidden, no need to click the "+" menu to reveal it), so attaching
+ *  a reference image is a direct `setInputFiles()`, never a menu-click sequence that
+ *  could break if that menu's structure changes. `image/*` is preferred (the plain image
+ *  uploader); `image/*,video/*` is the fallback seen on some layouts. */
+async function fileInput(page: Page): Promise<import("playwright").Locator> {
+  const onlyImages = page.locator('input[type="file"][accept="image/*"]');
+  if (await onlyImages.count()) return onlyImages.first();
+  return page.locator('input[type="file"][accept*="image"]').first();
+}
+
 function looksLikeLogin(url: string): boolean {
   return /\/auth\/login|accounts\.google\.|chatgpt\.com\/auth/i.test(url);
 }
@@ -208,6 +219,59 @@ export function classifyChatGptFailure(text: string): { code: "credits" | "polic
 
 export interface ChatGptImageResult { path: string; width: number; height: number }
 
+/** Types the prompt, submits it, and polls for the resulting image — the part shared by
+ *  the plain and reference-attached paths. Caller has already done any page setup
+ *  (navigation, conversation recycling, attaching a reference) and taken the before-snapshot. */
+async function submitAndCapture(runId: string, page: Page, promptText: string, before: Set<string>, outPath: string): Promise<ChatGptImageResult> {
+  const box = await promptBox(page);
+  // 8000ms used to be the budget here, and later force:false also turned out to be too
+  // strict — a real run (2026-10-03) measured the composer repeatedly failing Playwright's
+  // actionability check (not genuinely slow: a manual force-click succeeded instantly)
+  // under ordinary load (this Chrome window also runs Flow/Vids in other tabs). Every one
+  // of 5 consecutive beats hit this and fell through to a paid fallback with no API key
+  // configured, which then reused one neighbouring beat's image across the whole video.
+  // force:true skips the extra stability/receives-events checks on an element already
+  // confirmed visible and correctly positioned; openChatGptPage()/startFreshConversation()
+  // still fail fast on an actual login/navigation problem, so this doesn't mask those.
+  await box.click({ timeout: 25_000, force: true });
+  // Real key events, not fill() — ChatGPT's own composer only enables Send on genuine input events.
+  await page.keyboard.type(promptText.slice(0, 4000), { delay: 1 });
+  const send = await sendButton(page);
+  if (send) await send.click({ timeout: 25_000, force: true });
+  else await page.keyboard.press("Enter");
+
+  const deadline = Date.now() + imageTimeoutMs();
+  const started = Date.now();
+  while (Date.now() < deadline) {
+    if (runId) checkCancelled(runId);
+    await page.waitForTimeout(1500);
+    const srcs = await assistantImageSrcs(page);
+    const fresh = srcs.find((s) => !before.has(s));
+    if (fresh) {
+      const dims = await page.evaluate((src) => {
+        const i = Array.from(document.images).find((x) => (x.currentSrc || x.src) === src);
+        return i ? { w: i.naturalWidth, h: i.naturalHeight } : { w: 0, h: 0 };
+      }, fresh);
+      const { buffer, contentType } = await fetchImageBytes(page, fresh);
+      if (buffer.length < 20_000 || !/^image\//.test(contentType)) {
+        throw new FlowBrowserError(`ChatGPT returned an unusable image (${contentType}, ${buffer.length} bytes).`, "capture");
+      }
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      fs.writeFileSync(outPath, buffer);
+      log(runId, "success", "ChatGPT image captured via direct fetch of the rendered <img> src", { stage: "visual" });
+      return { path: outPath, width: dims.w, height: dims.h };
+    }
+    if (Date.now() - started > 8000) {
+      const failure = classifyChatGptFailure(await lastAssistantText(page));
+      if (failure) {
+        if (failure.code === "credits") state.limitedUntil = Date.now() + LIMIT_COOLDOWN_MS;
+        throw new FlowBrowserError(`ChatGPT image generation failed: ${failure.message}`, failure.code);
+      }
+    }
+  }
+  throw new FlowBrowserError(`No ChatGPT image appeared within ${Math.round(imageTimeoutMs() / 1000)}s.`, "timeout");
+}
+
 /** Generates ONE image from a text prompt via ChatGPT and saves it to `outPath`. */
 export async function generateChatGptImage(runId: string, prompt: string, outPath: string): Promise<ChatGptImageResult> {
   return enqueue(async () => {
@@ -218,52 +282,67 @@ export async function generateChatGptImage(runId: string, prompt: string, outPat
     // Snapshot BEFORE submitting — the result is whichever src appears afterward that
     // wasn't already here, so reusing one long conversation never picks a stale image.
     const before = new Set(await assistantImageSrcs(page));
+    return submitAndCapture(runId, page, `Generate an image: ${prompt}`, before, outPath);
+  });
+}
 
-    const box = await promptBox(page);
-    // 8000ms used to be the budget here, but a real run (2026-10-03) measured the
-    // composer taking longer than that to become clickable under ordinary load (this
-    // Chrome window also runs Flow/Vids in other tabs) — every one of 5 consecutive
-    // beats hit this exact timeout and fell through to a paid fallback with no API key
-    // configured, which then reused one neighbouring beat's image across the whole
-    // video. 25000ms gives the page real room to settle without masking a genuinely
-    // dead page (openChatGptPage()/startFreshConversation() already fail fast on an
-    // actual login/navigation problem).
-    await box.click({ timeout: 25_000 });
-    // Real key events, not fill() — ChatGPT's own composer only enables Send on genuine input events.
-    await page.keyboard.type(`Generate an image: ${prompt}`.slice(0, 4000), { delay: 1 });
-    const send = await sendButton(page);
-    if (send) await send.click({ timeout: 25_000 });
-    else await page.keyboard.press("Enter");
+/** Generates ONE image of the SAME person as `referenceImagePath`, in a new context
+ *  described by `prompt` — used for avatar beats so the avatar's background/setting can
+ *  vary per beat (matching the narration) instead of always being the one fixed reference
+ *  photo. Live-verified 2026-10-03: identity preservation (face, hairstyle, build) held up
+ *  well across a real test, though it is not guaranteed on every generation the way a
+ *  purpose-built reference tool (e.g. Flow's asset picker) would be — ChatGPT here is
+ *  being driven as a general chat product, not a dedicated identity-preserving editor.
+ *
+ * ALWAYS starts a brand-new conversation (never reuses/shares the ongoing b-roll
+ * conversation `generateChatGptImage` maintains) for two reasons: the attached reference
+ * must not leak into unrelated b-roll prompts in the same context window, and a stale
+ * reference from a PREVIOUS avatar beat must not linger into this one — every call attaches
+ * its own fresh copy of `referenceImagePath`, so there is never an ambiguous "which photo
+ * is this continuing from" state. The tradeoff (named explicitly: avatar beats are a small
+ * percentage of total beats by design — AVATAR_FREQUENCY_PERCENT defaults to 15 — so the
+ * extra fresh-conversation cost here is bounded, unlike b-roll's much higher call volume,
+ * which is why b-roll keeps its conversation-reuse optimization). */
+export async function generateChatGptImageWithReference(
+  runId: string,
+  referenceImagePath: string,
+  prompt: string,
+  outPath: string
+): Promise<ChatGptImageResult> {
+  return enqueue(async () => {
+    if (chatGptLimitedNow()) throw new FlowBrowserError("ChatGPT reported a usage limit a moment ago — not retrying yet.", "credits");
+    const page = await openChatGptPage();
+    await startFreshConversation(page);
 
-    const deadline = Date.now() + imageTimeoutMs();
-    const started = Date.now();
-    while (Date.now() < deadline) {
-      if (runId) checkCancelled(runId);
-      await page.waitForTimeout(1500);
-      const srcs = await assistantImageSrcs(page);
-      const fresh = srcs.find((s) => !before.has(s));
-      if (fresh) {
-        const dims = await page.evaluate((src) => {
-          const i = Array.from(document.images).find((x) => (x.currentSrc || x.src) === src);
-          return i ? { w: i.naturalWidth, h: i.naturalHeight } : { w: 0, h: 0 };
-        }, fresh);
-        const { buffer, contentType } = await fetchImageBytes(page, fresh);
-        if (buffer.length < 20_000 || !/^image\//.test(contentType)) {
-          throw new FlowBrowserError(`ChatGPT returned an unusable image (${contentType}, ${buffer.length} bytes).`, "capture");
-        }
-        fs.mkdirSync(path.dirname(outPath), { recursive: true });
-        fs.writeFileSync(outPath, buffer);
-        log(runId, "success", "ChatGPT image captured via direct fetch of the rendered <img> src", { stage: "visual" });
-        return { path: outPath, width: dims.w, height: dims.h };
-      }
-      if (Date.now() - started > 8000) {
-        const failure = classifyChatGptFailure(await lastAssistantText(page));
-        if (failure) {
-          if (failure.code === "credits") state.limitedUntil = Date.now() + LIMIT_COOLDOWN_MS;
-          throw new FlowBrowserError(`ChatGPT image generation failed: ${failure.message}`, failure.code);
-        }
-      }
+    const input = await fileInput(page);
+    await input.setInputFiles(referenceImagePath);
+    // ChatGPT shows a "file added to chat only" toast when the account's upload storage
+    // is full (confirmed live — unrelated to whether the attach itself worked), and that
+    // toast sits ON TOP of the composer. Escape is NOT reliable to dismiss it (measured
+    // live, 2026-10-03: 4 Escape presses in a row, 800ms apart, left it on screen every
+    // time in one run though a single Escape closed it in another — inconsistent, not a
+    // timing issue to just wait out). The notice's own close button (text "Fechar caixa de
+    // diálogo"/"Close dialog" — its FIRST button is "Gerenciar armazenamento"/"Manage
+    // storage", not this one) DOES reliably remove it, but Playwright's normal click
+    // refuses it as "not stable" even though it's visibly static — some animation on this
+    // toast never settles by Playwright's heuristic. force:true (confirmed live) clicks it
+    // immediately regardless.
+    await page.waitForTimeout(1500);
+    const noticeGone = async () => (await page.locator("text=Arquivo adicionado apenas ao chat").count()) === 0;
+    if (!(await noticeGone())) {
+      await page.keyboard.press("Escape").catch(() => {});
+      await page.waitForTimeout(500);
     }
-    throw new FlowBrowserError(`No ChatGPT image appeared within ${Math.round(imageTimeoutMs() / 1000)}s.`, "timeout");
+    if (!(await noticeGone())) {
+      await page
+        .locator('div:has-text("Arquivo adicionado apenas ao chat") button', { hasText: /close dialog|fechar caixa de diálogo/i })
+        .first()
+        .click({ timeout: 5000, force: true })
+        .catch(() => {});
+    }
+
+    const before = new Set(await assistantImageSrcs(page));
+    const promptText = `Generate an image: the same person shown in the attached reference photo — same face, hairstyle and build — ${prompt}. Keep their identity clearly recognizable from the reference photo.`;
+    return submitAndCapture(runId, page, promptText, before, outPath);
   });
 }

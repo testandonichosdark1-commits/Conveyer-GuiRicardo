@@ -128,6 +128,7 @@ export const SETTING_KEYS = [
   "AUDIO_TARGET_LUFS",         // integrated loudness target for the final master (default -14, the YouTube reference)
   "AVATAR_FREQUENCY_PERCENT",  // 0–100, % of beats where the avatar appears (default 15)
   "AVATAR_SYNC_OFFSET_MS",     // fine-tune avatar lip timing vs narration (ms); + = video later, − = earlier; 0 = off
+  "AVATAR_CONTEXTUAL_BACKGROUND", // "1" (default) = local avatars get a fresh ChatGPT-generated background per beat, matching that beat's narration, instead of always the one fixed reference photo
   "REAL_RATIO_PERCENT",        // 0–100, % of b-roll from real footage vs AI (default 80). Used for "mix" mode.
   "VISUAL_MODE",               // ai | real | mix — default visual source for new videos (default mix)
   "FOOTAGE_SOURCES",           // CSV priority list: pexels,pixabay,openverse,wikimedia
@@ -618,6 +619,7 @@ export const DEFAULTS: Record<SettingKey, string> = {
   AUDIO_TARGET_LUFS: "-14",
   AVATAR_FREQUENCY_PERCENT: "15",
   AVATAR_SYNC_OFFSET_MS: "0",
+  AVATAR_CONTEXTUAL_BACKGROUND: "1",
   REAL_RATIO_PERCENT: "50",
   VISUAL_MODE: "mix",
   FOOTAGE_SOURCES: "youtube,storyblocks,pexels,pixabay,openverse,wikimedia,archive,web,wigolo",

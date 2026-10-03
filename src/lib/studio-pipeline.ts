@@ -1,5 +1,6 @@
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
 import { spawnSync } from "node:child_process";
 import db from "./db";
 import { log } from "./logger";
@@ -18,6 +19,7 @@ import { writeCredits, readCredits, creditFrom, type CreditEntry } from "./servi
 import { generateAvatarClip, type AvatarHandle } from "./services/heygen-video";
 import { generateLocalAvatarClip, type LocalAvatarHandle } from "./services/infinitetalk";
 import { generateSadTalkerClip } from "./services/sadtalker";
+import { generateChatGptImageWithReference } from "./services/chatgpt-browser";
 import { checkAvatarVSupport } from "./services/heygen-avatar";
 import { assembleStudioVideo, sliceAudio, decodeToWav, type RenderBeat } from "./services/studio-assemble";
 import { recordHeygenEngine } from "./services/cost-ledger";
@@ -296,7 +298,7 @@ async function generateAnyAvatarClip(
   avatar: AnyAvatarHandle,
   audioPath: string,
   outPath: string,
-  opts: { title?: string; resolution?: string }
+  opts: { title?: string; resolution?: string; narration?: string }
 ): Promise<string> {
   if (isLocalAvatar(avatar)) {
     // Which MODEL renders a "local_infinitetalk"-provider avatar — AVATAR_LOCAL_MODEL,
@@ -305,10 +307,33 @@ async function generateAnyAvatarClip(
     // minutes); SadTalker is the default because it actually runs. Kept selectable —
     // never deleted — for different/future hardware.
     const localModel = getSetting("AVATAR_LOCAL_MODEL") || "sadtalker";
-    if (localModel === "infinitetalk") {
-      return generateLocalAvatarClip(runId, avatar, audioPath, outPath, { resolution: opts.resolution });
+    const renderWith = (a: LocalAvatarHandle & { dbId: number }) =>
+      localModel === "infinitetalk"
+        ? generateLocalAvatarClip(runId, a, audioPath, outPath, { resolution: opts.resolution })
+        : generateSadTalkerClip(runId, a, audioPath, outPath, { resolution: opts.resolution });
+
+    // Contextual background, on by default: generate a fresh "same person, new setting"
+    // still via ChatGPT (chatgpt-browser.ts's reference-attach path) matching THIS beat's
+    // narration, then animate THAT instead of the one fixed reference photo — so the
+    // avatar's surroundings vary per appearance instead of always being identical. Operator
+    // request (2026-10-03): the old HeyGen flow had no equivalent (HeyGen avatars were
+    // always a fixed studio render), so this is new behavior, not a restored one.
+    const wantsContextualBg = (getSetting("AVATAR_CONTEXTUAL_BACKGROUND") || "1") === "1";
+    if (wantsContextualBg && opts.narration?.trim()) {
+      const tmpScene = path.join(os.tmpdir(), `avatar_scene_${runId.slice(0, 8)}_${Date.now()}.png`);
+      try {
+        log(runId, "info", `Avatar: generating a contextual background via ChatGPT (${opts.title ?? "beat"})`, { stage: "avatar" });
+        const scenePrompt = `in a setting and activity that matches this narration: "${opts.narration.trim().slice(0, 500)}". Documentary photography style, realistic, facing the camera, suitable as a talking-head shot.`;
+        await generateChatGptImageWithReference(runId, avatar.refImagePath, scenePrompt, tmpScene);
+        const result = await renderWith({ ...avatar, refImagePath: tmpScene });
+        return result;
+      } catch (e) {
+        log(runId, "warn", `Avatar: contextual background failed (${(e as Error).message.slice(0, 160)}) — using the fixed reference photo instead`, { stage: "avatar" });
+      } finally {
+        try { fs.unlinkSync(tmpScene); } catch {}
+      }
     }
-    return generateSadTalkerClip(runId, avatar, audioPath, outPath, { resolution: opts.resolution });
+    return renderWith(avatar);
   }
   return generateAvatarClip(runId, avatar, audioPath, outPath, opts);
 }
@@ -599,7 +624,7 @@ export async function runStudioPipeline(
             sliceAudio(voiceoverWav, beat.startMs, beat.endMs, beatAudio);
             const clip = path.join(avatarDir, `beat_${String(beat.index).padStart(4, "0")}.mp4`);
             await limitAvatar(() =>
-              generateAnyAvatarClip(runId, avatar, beatAudio, clip, { title: `beat ${beat.index}`, resolution: cfg.format })
+              generateAnyAvatarClip(runId, avatar, beatAudio, clip, { title: `beat ${beat.index}`, resolution: cfg.format, narration: beat.text })
             );
             // Cost Monitoring — HeyGen billed per generated clip-second (this beat slice),
             // at the rate of the engine this avatar actually renders with. A local-GPU
@@ -967,7 +992,7 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
               const beatAudio = path.join(avatarDir, `beat_${pad}.mp3`);
               sliceAudio(voiceoverWav, beat.startMs, beat.endMs, beatAudio);
               await limitAvatar(() =>
-                generateAnyAvatarClip(runId, avatar, beatAudio, clip, { title: `beat ${beat.index}`, resolution: cfg.format })
+                generateAnyAvatarClip(runId, avatar, beatAudio, clip, { title: `beat ${beat.index}`, resolution: cfg.format, narration: beat.text })
               );
               if (!isLocalAvatar(avatar)) {
                 recordHeygenEngine(runId, Math.max(0, (beat.endMs - beat.startMs) / 1000), billingEngine(avatar));
