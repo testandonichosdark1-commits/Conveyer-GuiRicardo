@@ -1,4 +1,5 @@
 "use client";
+import { useState } from "react";
 import { useT } from "../../_i18n";
 import { SettingsField } from "./SettingsField";
 import type { Val, Set } from "./useSettings";
@@ -15,6 +16,20 @@ import type { Val, Set } from "./useSettings";
 export function LocalGpuBlock({ val, set }: { val: Val; set: Set }) {
   const tr = useT();
   const comfyUrl = (val("COMFYUI_URL") || "").trim();
+  const [checking, setChecking] = useState(false);
+  const [health, setHealth] = useState<{ ok: boolean; detail: string } | null>(null);
+
+  async function checkComfyUi() {
+    setChecking(true);
+    try {
+      const res = await fetch("/api/local/health");
+      setHealth(await res.json());
+    } catch (e) {
+      setHealth({ ok: false, detail: (e as Error).message });
+    } finally {
+      setChecking(false);
+    }
+  }
 
   return (
     <div style={{ display: "grid", gap: 16, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
@@ -61,6 +76,17 @@ export function LocalGpuBlock({ val, set }: { val: Val; set: Set }) {
           )}
         </div>
       )}
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <button type="button" className="btn" disabled={checking} onClick={checkComfyUi}>
+          {checking ? tr("Vérification…", "Checking…") : tr("Tester la connexion ComfyUI", "Test ComfyUI connection")}
+        </button>
+        {health && (
+          <span className="faint" style={{ fontSize: 12.5, color: health.ok ? "var(--success)" : "var(--danger)" }}>
+            {health.ok ? "🟢" : "🔴"} {health.detail}
+          </span>
+        )}
+      </div>
 
       <details className="card-inset" style={{ padding: 14 }}>
         <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 13 }}>{tr("Avancé", "Advanced")}</summary>
