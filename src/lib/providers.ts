@@ -20,7 +20,8 @@ export type VoiceProviderId =
   | "hume"
   | "69labs"
   | "heygen"
-  | "minimax";
+  | "minimax"
+  | "azure";
 
 /**
  * Providers with a `/api/voices/*` route backing the "Load voices" picker. The value
@@ -69,6 +70,15 @@ export const VOICE_PROVIDERS: VoiceProviderMeta[] = [
   { id: "69labs", label: "69labs", selectLabel: "69labs (ElevenLabs / EdgeTTS / clone)", apiKey: "LABS69_API_KEY", voiceIdKey: "TTS_VOICE_ID" },
   { id: "heygen", label: "HeyGen", selectLabel: "HeyGen", apiKey: "HEYGEN_API_KEY", voiceIdKey: "HEYGEN_VOICE_ID", voicesEndpoint: "heygen" },
   { id: "minimax", label: "MiniMax", selectLabel: "MiniMax", apiKey: "MINIMAX_API_KEY", voiceIdKey: "MINIMAX_VOICE_ID", extraKeys: [{ key: "MINIMAX_GROUP_ID", label: "MiniMax — Group ID" }] },
+  // Azure AI Speech, incl. the MAI-Voice-2.1 / MAI-Voice-2.1-Flash family
+  // (https://learn.microsoft.com/azure/ai-services/speech-service/mai-voices). The voice
+  // id is the FULL SSML voice name including the model suffix, e.g.
+  // "en-US-Harper:MAI-Voice-2.1-Flash" or "pt-BR-ThalitaNeural" for an ordinary Azure
+  // neural voice — there's no separate MAI-specific endpoint, so one field covers both.
+  // Region is a second required value (the resource's deployment region, e.g. "eastus")
+  // and is part of the REST URL itself, not a header — hence extraKeys rather than a
+  // second apiKey-shaped field.
+  { id: "azure", label: "Azure AI Speech", selectLabel: "Azure AI Speech (incl. MAI-Voice)", apiKey: "AZURE_SPEECH_KEY", voiceIdKey: "AZURE_SPEECH_VOICE", extraKeys: [{ key: "AZURE_SPEECH_REGION", label: "Azure Speech — Region" }] },
 ];
 
 /**

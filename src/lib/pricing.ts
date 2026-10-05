@@ -395,6 +395,7 @@ export const RATE_KINDS = [
   "openai:tts",
   "minimax:tts",
   "genaipro:tts",
+  "azure:tts",
   // Real-footage / search spend that was invisible on the Costs page.
   "storyblocks:download",
   "googlecse:query",
@@ -620,6 +621,13 @@ const RATE_SPECS: Record<RateKind, RateSpec> = {
     rate: () => num("COST_GENAIPRO_TTS_USD_PER_1K_CHARS", 0),
     settingKey: "COST_GENAIPRO_TTS_USD_PER_1K_CHARS",
     label: "GenAIPro TTS",
+  },
+  "azure:tts": {
+    unit: "chars",
+    per: 1000,
+    rate: () => num("COST_AZURE_TTS_USD_PER_1K_CHARS", 0),
+    settingKey: "COST_AZURE_TTS_USD_PER_1K_CHARS",
+    label: "Azure Speech TTS",
   },
   "storyblocks:download": {
     unit: "downloads",

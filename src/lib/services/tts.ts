@@ -83,6 +83,11 @@ async function dispatchTts(
     await fishAudioTts(runId, text, outPath, options.voiceOverride, options.speedOverride);
   } else if (provider === "hume") {
     await humeTts(runId, text, outPath, options.voiceOverride, options.speedOverride);
+  } else if (provider === "azure") {
+    await azureTts(runId, text, outPath, options.voiceOverride);
+    // Azure Speech bills per character synthesized, same unit recordTtsChars already
+    // tracks for every other character-billed provider.
+    recordTtsChars(runId, text.length, "azure:tts");
   } else {
     throw new Error(`Unknown TTS provider: ${provider}`);
   }
@@ -1525,6 +1530,62 @@ async function humeTts(
   log(runId, "debug", `Hume TTS (${buf.length} bytes, voice=${voiceId.slice(0, 8)}…, version=${version || "default"})`, {
     stage: "tts",
   });
+}
+
+function escapeSsmlText(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+
+/**
+ * Azure AI Speech REST TTS — covers every neural voice Azure offers, including the
+ * MAI-Voice-2.1 / MAI-Voice-2.1-Flash family
+ * (https://learn.microsoft.com/azure/ai-services/speech-service/mai-voices). There is no
+ * separate MAI endpoint: it's the SAME `cognitiveservices/v1` synthesis call every Azure
+ * neural voice uses, selected purely by voice NAME — a MAI voice's name carries the model
+ * suffix, e.g. `en-US-Harper:MAI-Voice-2.1-Flash`, an ordinary neural voice has none, e.g.
+ * `pt-BR-ThalitaNeural`. AZURE_SPEECH_VOICE therefore holds the full name as-is; this
+ * function never parses or validates it beyond embedding it in the SSML `voice` element.
+ *
+ * Region is NOT a header — it's part of the host itself
+ * (`https://<region>.tts.speech.microsoft.com/...`), so a wrong/missing region fails as a
+ * DNS/connection error rather than an auth error; the thrown message says so explicitly to
+ * avoid that reading as "bad API key."
+ */
+async function azureTts(runId: string, text: string, outPath: string, voiceOverride?: string | null) {
+  const apiKey = getSetting("AZURE_SPEECH_KEY");
+  if (!apiKey) throw new Error("AZURE_SPEECH_KEY is not set — paste it in /settings");
+  const region = getSetting("AZURE_SPEECH_REGION").trim();
+  if (!region) throw new Error("AZURE_SPEECH_REGION is not set — e.g. \"eastus\" (the Speech resource's deployment region, not a free-text label)");
+  const voice =
+    voiceOverride && voiceOverride.trim().length > 0 ? voiceOverride.trim() : getSetting("AZURE_SPEECH_VOICE").trim();
+  if (!voice) throw new Error("No Azure Speech voice set — set AZURE_SPEECH_VOICE in /settings, e.g. \"en-US-Harper:MAI-Voice-2.1-Flash\"");
+
+  // Lang is read from the voice name's own locale prefix ("en-US-Harper:..." -> "en-US")
+  // rather than a separate setting — one more field to keep in sync for a value Azure
+  // already encodes in the voice name itself.
+  const langMatch = /^([a-z]{2,3}-[A-Za-z]{2,4})-/.exec(voice);
+  const lang = langMatch ? langMatch[1] : "en-US";
+
+  const ssml = `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="${lang}"><voice name="${escapeSsmlText(voice)}">${escapeSsmlText(text)}</voice></speak>`;
+
+  const resp = await fetch(`https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/ssml+xml",
+      "X-Microsoft-OutputFormat": "audio-24khz-160kbitrate-mono-mp3",
+      "Ocp-Apim-Subscription-Key": apiKey,
+    },
+    body: ssml,
+  });
+
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Azure Speech TTS ${resp.status} (region "${region}", voice "${voice}"): ${body.slice(0, 300)}`);
+  }
+  const buf = Buffer.from(await resp.arrayBuffer());
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, buf);
+  log(runId, "debug", `Azure Speech TTS (${voice})`, { stage: "tts" });
 }
 
 async function openaiTts(text: string, outPath: string) {

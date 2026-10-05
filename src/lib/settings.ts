@@ -22,6 +22,9 @@ export const SETTING_KEYS = [
   "MINIMAX_GROUP_ID",        // MiniMax Group ID (required in URL query param)
   "MINIMAX_VOICE_ID",        // MiniMax voice_id (cloned voice or stock voice)
   "MINIMAX_MODEL",           // MiniMax model — speech-02-hd / speech-02-turbo
+  "AZURE_SPEECH_KEY",        // Azure AI Speech resource key (Ocp-Apim-Subscription-Key)
+  "AZURE_SPEECH_REGION",     // Azure Speech resource region, e.g. eastus — part of the REST URL itself
+  "AZURE_SPEECH_VOICE",      // full SSML voice name, e.g. en-US-Harper:MAI-Voice-2.1-Flash or pt-BR-ThalitaNeural
   "REPLICATE_API_TOKEN",     // Replicate (Flux / Kling)
   "ANTHROPIC_API_KEY",       // Claude (alternative to Gemini)
   "OPENAI_API_KEY",          // OpenAI TTS / image backup
@@ -350,6 +353,7 @@ export const SETTING_KEYS = [
   "COST_OPENAI_TTS_USD_PER_1K_CHARS",
   "COST_MINIMAX_TTS_USD_PER_1K_CHARS",
   "COST_GENAIPRO_TTS_USD_PER_1K_CHARS",
+  "COST_AZURE_TTS_USD_PER_1K_CHARS",
   // Storyblocks — the resolve-file step is the BILLED one (the search is free), and it
   // was unmetered AND missing from the Costs page's provider table entirely.
   "COST_STORYBLOCKS_USD_PER_DOWNLOAD",
@@ -495,6 +499,9 @@ export const DEFAULTS: Record<SettingKey, string> = {
   MINIMAX_GROUP_ID: "",
   MINIMAX_VOICE_ID: "",
   MINIMAX_MODEL: "speech-02-hd",
+  AZURE_SPEECH_KEY: "",
+  AZURE_SPEECH_REGION: "",
+  AZURE_SPEECH_VOICE: "",
   REPLICATE_API_TOKEN: "",
   ANTHROPIC_API_KEY: "",
   OPENAI_API_KEY: "",
@@ -819,6 +826,7 @@ export const DEFAULTS: Record<SettingKey, string> = {
   COST_OPENAI_TTS_USD_PER_1K_CHARS: "0",
   COST_MINIMAX_TTS_USD_PER_1K_CHARS: "0",
   COST_GENAIPRO_TTS_USD_PER_1K_CHARS: "0",
+  COST_AZURE_TTS_USD_PER_1K_CHARS: "0",
   COST_STORYBLOCKS_USD_PER_DOWNLOAD: "0",
   COST_GOOGLE_CSE_USD_PER_QUERY: "0",
   // Groq whisper-large-v3 published list price: $0.111 per hour of audio. Unlike the

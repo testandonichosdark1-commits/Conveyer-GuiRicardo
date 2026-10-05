@@ -65,6 +65,7 @@ export const COST_PROVIDERS: CostProviderMeta[] = [
   // not neutral: it renders a real cost invisible.
   { id: "storyblocks", label: "Storyblocks", apiKeySetting: "STORYBLOCKS_API_KEYS", billingType: "payg" },
   { id: "openai", label: "OpenAI", apiKeySetting: "OPENAI_API_KEY", billingType: "payg" },
+  { id: "azure", label: "Azure AI Speech", apiKeySetting: "AZURE_SPEECH_KEY", billingType: "payg" },
   // Google Custom Search: free for the first 100 queries/day, billed above that.
   { id: "googlecse", label: "Google Custom Search", apiKeySetting: "GOOGLE_CSE_KEY", billingType: "payg" },
   { id: "pexels", label: "Pexels", apiKeySetting: "PEXELS_API_KEY", billingType: "free" },

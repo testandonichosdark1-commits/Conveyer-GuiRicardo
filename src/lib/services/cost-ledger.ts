@@ -306,7 +306,7 @@ export function monthlyUnitsByProvider(sinceIso: string, untilIso: string): { pr
  * All five bill per character of synthesized text, so they share one recorder; the
  * `rateKind` is what separates them for pricing and for the per-provider breakdown.
  */
-export type TtsRateKind = Extract<RateKind, "heygen:tts" | "69labs:tts" | "openai:tts" | "minimax:tts" | "genaipro:tts">;
+export type TtsRateKind = Extract<RateKind, "heygen:tts" | "69labs:tts" | "openai:tts" | "minimax:tts" | "genaipro:tts" | "azure:tts">;
 
 export function recordTtsChars(runId: string, chars: number, rateKind: TtsRateKind): void {
   const p = priceTtsChars(chars, rateKind);
