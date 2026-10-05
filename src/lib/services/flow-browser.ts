@@ -321,25 +321,34 @@ function looksLikeLogin(url: string): boolean {
   return /accounts\.google\.|\/signin|ServiceLogin/i.test(url);
 }
 
-/** The text check is a broad substring match across the whole page, not a dedicated
- *  login-page selector — and Google's own account-switcher menu (which can open briefly
- *  during routine UI flows, e.g. a model-switch chip) routinely contains an item like
- *  "Fazer login com outra conta" / "Sign in with another account", which matches it
- *  without the session actually being logged out. Live-reported 2026-10-05: a run failed
- *  twice with "Google session expired during generation" at the exact same beat, right
- *  after an automatic nano-banana-pro → nano-banana-2 model switch (usage limit) — and a
- *  read-only screenshot taken moments later showed the account fully logged in, no such
- *  text anywhere on the page. The URL check is unambiguous (a real navigation to Google's
- *  login domain) and needs no debounce; only the text check is re-confirmed after a short
- *  wait, so a one-frame menu flash isn't mistaken for a real logout. A genuine logout
- *  stays visible, so this costs ~1.5s on that path and nothing on the common case. */
+/** FIRST attempt at this fix (2026-10-05, now known incomplete) debounced only the text
+ *  check and treated a URL match as unambiguous, needing no confirmation. That was wrong:
+ *  the SAME failure ("Google session expired", beat 157, ~10s after an automatic
+ *  nano-banana-pro → nano-banana-2 model switch) reproduced AFTER that fix shipped. A
+ *  screenshot of the automation's own browser taken right after showed the account fully
+ *  logged in and the grid full of correctly-generated images for that exact beat — Flow
+ *  was never actually logged out. The real culprit is plausibly a brief, silent OAuth
+ *  session-refresh hop through accounts.google.com that Google can perform in-tab without
+ *  ever actually signing the user out — which the URL check, fired with NO debounce, reads
+ *  as a login page. Both signals are now sampled together and must still be positive after
+ *  a short wait before this returns true — a real logout stays logged-out on the recheck;
+ *  a transient redirect or menu flash clears. Costs ~2s only on the (rare) positive path. */
 async function pageHasLoginPrompt(page: Page): Promise<boolean> {
-  if (looksLikeLogin(page.url())) return true;
-  const textVisible = () => page.getByText(/Sign in|Fazer login|Iniciar sessão/i).first().isVisible().catch(() => false);
-  if (!(await textVisible())) return false;
-  await page.waitForTimeout(1500);
-  if (looksLikeLogin(page.url())) return true;
-  return textVisible();
+  const positiveNow = async (): Promise<boolean> => {
+    if (looksLikeLogin(page.url())) return true;
+    return page.getByText(/Sign in|Fazer login|Iniciar sessão/i).first().isVisible().catch(() => false);
+  };
+  if (!(await positiveNow())) return false;
+  // Exact duration of Google's transient redirect/menu flash isn't known — polling for a
+  // NEGATIVE sample over a few seconds, rather than trusting one fixed-delay recheck, means
+  // this doesn't depend on guessing that duration correctly. A real logout stays positive
+  // on every sample (this still returns true, ~4s slower); anything that clears at any
+  // point in the window was never a real logout.
+  for (let i = 0; i < 4; i++) {
+    await page.waitForTimeout(1000);
+    if (!(await positiveNow())) return false;
+  }
+  return true;
 }
 
 async function gotoFlow(page: Page): Promise<void> {
