@@ -232,7 +232,13 @@ export const AI_PROVIDERS: AiProviderMeta[] = [
       key: "FLOW_IMAGE_MODEL",
       models: [
         { id: "nano-banana-pro", label: "Nano Banana Pro", recommended: true },
-        { id: "nano-banana-2", label: "Nano Banana 2" },
+        // Google replaced the "Nano Banana 2" menu entry with "Nano Banana 2.1" live
+        // (observed 2026-10-06 — a run crashed trying to confirm the old id, and the
+        // error's own "Saw:" dump listed "Nano Banana 2.1" instead). Kept "nano-banana-2"
+        // selectable rather than deleted, since a different account/region could still show
+        // the old name — the id this app should actually fall back to now is the new one.
+        { id: "nano-banana-2.1", label: "Nano Banana 2.1" },
+        { id: "nano-banana-2", label: "Nano Banana 2 (retired by Google — kept for installs that still see it)" },
         { id: "nano-banana", label: "Nano Banana" },
       ],
     },
