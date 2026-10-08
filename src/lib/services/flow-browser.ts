@@ -333,10 +333,21 @@ function looksLikeLogin(url: string): boolean {
  *  as a login page. Both signals are now sampled together and must still be positive after
  *  a short wait before this returns true — a real logout stays logged-out on the recheck;
  *  a transient redirect or menu flash clears. Costs ~2s only on the (rare) positive path. */
+/** THIRD incident (2026-10-08, run eb7d7432, beat 195) — the widened recheck window above
+ *  did not fix it, because it was never a timing issue. Live inspection of the automation's
+ *  own tab (`isVisible()`, the exact check this function uses) caught the real cause: every
+ *  completed Flow tile carries an auto-generated caption in a hover footer (e.g. beat 195's
+ *  own prompt, a road sign, produced the caption "Metal road sign indicating elevation"),
+ *  and the OLD regex `/Sign in|.../i` had no word boundaries — it matched "sign in" as a
+ *  bare substring of "sign-**in**dicating" / "sign **in**dicates" / "sign **in** mountains".
+ *  That is why this reproduced deterministically for beat 195 specifically (its own prompt
+ *  is literally about a "sign") while every sibling beat generated in the same run was fine:
+ *  it never depended on the account's real session state at all. Word boundaries make "sign
+ *  in" only match as its own two-word phrase. */
 async function pageHasLoginPrompt(page: Page): Promise<boolean> {
   const positiveNow = async (): Promise<boolean> => {
     if (looksLikeLogin(page.url())) return true;
-    return page.getByText(/Sign in|Fazer login|Iniciar sessão/i).first().isVisible().catch(() => false);
+    return page.getByText(/\bsign in\b|\bfazer login\b|\biniciar sessão\b/i).first().isVisible().catch(() => false);
   };
   if (!(await positiveNow())) return false;
   // Exact duration of Google's transient redirect/menu flash isn't known — polling for a
