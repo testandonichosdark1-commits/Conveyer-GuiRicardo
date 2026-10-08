@@ -342,10 +342,18 @@ async function pageHasLoginPrompt(page: Page): Promise<boolean> {
   // Exact duration of Google's transient redirect/menu flash isn't known — polling for a
   // NEGATIVE sample over a few seconds, rather than trusting one fixed-delay recheck, means
   // this doesn't depend on guessing that duration correctly. A real logout stays positive
-  // on every sample (this still returns true, ~4s slower); anything that clears at any
+  // on every sample (this still returns true, ~12s slower); anything that clears at any
   // point in the window was never a real logout.
-  for (let i = 0; i < 4; i++) {
-    await page.waitForTimeout(1000);
+  //
+  // SECOND incident (2026-10-08, run eb7d7432): the original 4×1s window still reproduced
+  // it — 4 beats failed inside 16s, consistent with several concurrent beats polling the
+  // SAME shared page while it sat mid-refresh, not with a real logout (the live automation
+  // window, checked right after, was fully logged in with the project grid intact and no
+  // visible prompt). A silent OAuth re-auth hop can plausibly outlast 4s under load, so the
+  // window is widened to 8×1.5s. Not a proven root cause — just a wider margin against the
+  // same class of flash, still free on the common (negative) path.
+  for (let i = 0; i < 8; i++) {
+    await page.waitForTimeout(1500);
     if (!(await positiveNow())) return false;
   }
   return true;
