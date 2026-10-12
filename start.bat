@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title Faceless Video Generator
+title Faceless - Flow
 
 where node >nul 2>nul
 if errorlevel 1 (
@@ -24,12 +24,12 @@ if not exist "node_modules" (
 echo.
 echo ============================================
 echo   Faceless Video Generator — starting dev server
-echo   Browser will open at http://localhost:3000
+echo   Browser will open at http://localhost:3002
 echo   To stop: close this window or press Ctrl+C
 echo ============================================
 echo.
 
 REM Wait 3 seconds, then open the browser in the background
-start "" cmd /c "timeout /t 3 /nobreak >nul && start http://localhost:3000"
+start "" cmd /c "timeout /t 3 /nobreak >nul && start http://localhost:3002"
 
 call npm run dev

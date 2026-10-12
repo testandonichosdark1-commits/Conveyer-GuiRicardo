@@ -5,11 +5,11 @@
   "description": "Local pipeline platform for avatar-fronted documentary YouTube videos — HeyGen photo avatar + ElevenLabs voiceover, illustrated with real internet footage / AI b-roll (Ken Burns on stills).",
   "scripts": {
     "predev": "node scripts/wigolo.mjs ensure",
-    "dev": "next dev",
+    "dev": "next dev -p 3002",
     "wigolo:stop": "node scripts/wigolo.mjs stop",
     "build": "next build",
     "prestart": "node scripts/wigolo.mjs ensure",
-    "start": "next start",
+    "start": "next start -p 3002",
     "test": "vitest run",
     "resume:studio": "tsx scripts/resume-studio.ts",
     "wigolo:queries": "tsx scripts/wigolo-plan-queries.ts",

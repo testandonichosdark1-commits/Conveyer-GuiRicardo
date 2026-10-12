@@ -121,7 +121,37 @@ function recycleEveryN(): number {
   return Number.isFinite(n) ? Math.round(n) : 20;
 }
 
+/**
+ * A MINIMIZED Flow window stops rendering: `document.visibilityState` is "hidden" and
+ * requestAnimationFrame never fires, so Flow's Angular popovers never finish opening and
+ * every click waits for a "stable" element that never comes. Observed live (2026-10-06):
+ * the operator minimized the window and every Flow beat for 2h45m failed with "Could not
+ * switch Google Flow to Image mode". Restoring the window over CDP fixes it instantly, so
+ * do that before every generation. (A window merely COVERED by another one is handled by
+ * the --disable-backgrounding-occluded-windows launch flag in ensureNormalChrome.)
+ * Best-effort: never throws.
+ */
+export async function ensureFlowWindowVisible(page: Page, runId: string): Promise<void> {
+  try {
+    const session = await page.context().newCDPSession(page);
+    try {
+      const { windowId, bounds } = await session.send("Browser.getWindowForTarget");
+      if (bounds.windowState === "minimized") {
+        await session.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } });
+        await page.waitForTimeout(1000);
+        log(runId, "info", "Google Flow: the Chrome window was minimized — restored it (a minimized window stops rendering)", { stage: "visual" });
+      }
+    } finally {
+      await session.detach().catch(() => undefined);
+    }
+  } catch {
+    // CDP Browser domain unavailable — nothing to do; the normal failure path still applies.
+  }
+}
+
 export async function maybeRecycleFlowTab(page: Page, runId: string): Promise<void> {
+  // Runs before every generation (image and video) — the natural place for this check too.
+  await ensureFlowWindowVisible(page, runId);
   const every = recycleEveryN();
   if (every <= 0) return;
   state.generationsSinceReload = (state.generationsSinceReload ?? 0) + 1;
@@ -214,6 +244,15 @@ async function ensureNormalChrome(endpoint: string, dir: string): Promise<void> 
     `--user-data-dir=${dir}`,
     "--no-first-run",
     "--no-default-browser-check",
+    // Keep rendering when the window is covered by another window or in the background.
+    // Without these, Windows' occlusion detection marks a fully covered Flow window
+    // `visibilityState: "hidden"`, requestAnimationFrame stops, Flow's popovers never
+    // finish opening, and every beat fails "Could not switch Google Flow to Image mode"
+    // — observed live 2026-10-07 with the window maximized behind another app. These are
+    // ordinary user flags (not the automation flag Google's sign-in blocks).
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
     projectUrl(),
   ], { detached: true, stdio: "ignore" });
   child.unref();

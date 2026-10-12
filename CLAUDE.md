@@ -31,7 +31,8 @@ ElevenLabs, footage-source and Ken Burns API details.
 - **Next.js 16** (App Router, Turbopack) · **React 19** · **TypeScript** · **Tailwind 4**
 - **better-sqlite3** — local DB at `~/.faceless-studio/studio.db` (override `FACELESS_STUDIO_DATA_DIR`)
 - **fluent-ffmpeg** / system FFmpeg — voiceover concat, Ken Burns, beat compositing
-- Node ≥ 20. Dev server: `npm run dev` on port 3000.
+- Node ≥ 20. Dev server: `npm run dev` on port 3002 (this `Faceless-Flow` branch; the
+  `App-3.0-Veo3` install it was copied from runs on 3001, so both can run side by side).
 
 ---
 

@@ -30,12 +30,12 @@ fi
 echo ""
 echo "============================================"
 echo "  Faceless Video Generator — starting dev server"
-echo "  Browser will open at http://localhost:3000"
+echo "  Browser will open at http://localhost:3002"
 echo "  To stop: close this window or press Ctrl+C"
 echo "============================================"
 echo ""
 
 # Open default browser after a short delay, in the background
-( sleep 3 && open "http://localhost:3000" ) &
+( sleep 3 && open "http://localhost:3002" ) &
 
 npm run dev
