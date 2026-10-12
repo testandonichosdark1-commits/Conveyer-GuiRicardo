@@ -32,6 +32,30 @@ export interface CreditEntry {
   license?: string | null;
   /** Set when this beat shows another beat's visual (the no-black-screens carry-over). */
   reusedFromBeat?: number;
+  /** The stock clip's dedupe key ("pexels:123", "wigolo:<file>", …) so a Resume can tell
+   *  which clips the rest of the video already uses. */
+  dedupeId?: string;
+}
+
+/**
+ * The stock/YouTube clips already on screen in this run, as `usedIds` keys. Resume starts with
+ * an empty used-set, so without this a regenerated beat could pick a clip another beat already
+ * shows — seen in run f1abab6b (beats 62/244/308 repeated beats 0/232/2). Entries written before
+ * `dedupeId` existed are mapped from their page URL where the provider's id is in it.
+ */
+export function usedIdsFromCredits(entries: Iterable<CreditEntry>): string[] {
+  const ids: string[] = [];
+  for (const e of entries) {
+    if (e.dedupeId) ids.push(e.dedupeId);
+    const url = e.sourceUrl ?? "";
+    const yt = url.match(/(?:youtube\.com\/watch\?(?:.*&)?v=|youtu\.be\/)([\w-]{6,})/);
+    if (yt) ids.push(`youtube:${yt[1]}`);
+    const px = url.match(/pexels\.com\/video\/(?:[^/]*-)?(\d+)\/?$/);
+    if (px) ids.push(`pexels:${px[1]}`);
+    const pb = url.match(/pixabay\.com\/.*-(\d+)\/?$/);
+    if (pb) ids.push(`pixabay:${pb[1]}`, `pixabay-img:${pb[1]}`);
+  }
+  return ids;
 }
 
 interface CreditsFile {
@@ -75,10 +99,13 @@ export function creditFrom(
   res: { kind: "video" | "image" | "ai"; provider: string; attribution?: { author?: string | null; sourceUrl?: string; license?: string | null; url?: string } }
 ): CreditEntry {
   const a = res.attribution;
+  // The real-footage path passes the whole provider hit as `attribution`, dedupeId included.
+  const dedupeId = (a as { dedupeId?: unknown } | undefined)?.dedupeId;
   return {
     beat,
     kind: res.kind,
     provider: res.provider,
+    ...(typeof dedupeId === "string" && dedupeId ? { dedupeId } : {}),
     ...(a?.sourceUrl ? { sourceUrl: a.sourceUrl } : {}),
     ...(a?.url ? { fileUrl: a.url } : {}),
     ...(a?.author ? { author: a.author } : {}),

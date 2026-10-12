@@ -14,7 +14,7 @@ import { synthesizeVoiceover } from "./services/elevenlabs-voiceover";
 import { voiceoverFromFile } from "./services/voiceover-file";
 import { planBeats, type Beat, type VideoStructure } from "./services/studio-plan";
 import { acquireVisual, createTopicPool } from "./services/visual-source";
-import { writeCredits, readCredits, creditFrom, type CreditEntry } from "./services/credits";
+import { writeCredits, readCredits, creditFrom, usedIdsFromCredits, type CreditEntry } from "./services/credits";
 import { generateAvatarClip, type AvatarHandle } from "./services/heygen-video";
 import { checkAvatarVSupport } from "./services/heygen-avatar";
 import { assembleStudioVideo, sliceAudio, decodeToWav, type RenderBeat } from "./services/studio-assemble";
@@ -874,6 +874,8 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
     // where it came from, so rebuilding this map from scratch would blank out provenance
     // for exactly the beats the resume did the least work on.
     const credits = readCredits(runDir);
+    // Clips already on screen elsewhere in this video stay off-limits to regenerated beats.
+    for (const id of usedIdsFromCredits(credits.values())) usedIds.add(id);
     // Same accounting as the main path — a resumed run that drops the avatar must not
     // claim success either. Counted before the loop rewrites a failed beat to "broll".
     const avatarPlanned = beats.filter((b) => b.layout === "avatar" || b.layout === "split").length;

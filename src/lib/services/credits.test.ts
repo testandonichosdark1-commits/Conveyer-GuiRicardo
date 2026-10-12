@@ -115,3 +115,28 @@ describe("readCredits", () => {
     expect(back.get(1)?.provider).toBe("pexels");
   });
 });
+
+describe("usedIdsFromCredits", () => {
+  it("returns the dedupe keys of clips already in the video, including entries written before dedupeId existed", async () => {
+    const { usedIdsFromCredits } = await import("./credits");
+    const ids = usedIdsFromCredits([
+      { beat: 0, kind: "image", provider: "wigolo", dedupeId: "wigolo:https://cdn.example/furnace.jpg" },
+      { beat: 2, kind: "video", provider: "pexels", sourceUrl: "https://www.pexels.com/video/radiator-thermostat-6489135/" },
+      { beat: 8, kind: "video", provider: "youtube", sourceUrl: "https://www.youtube.com/watch?v=-EdtaqqXm64" },
+      { beat: 9, kind: "video", provider: "pixabay", sourceUrl: "https://pixabay.com/videos/fire-wood-12345/" },
+      { beat: 1, kind: "ai", provider: "flow:nano-banana-2.1" },
+    ]);
+    expect(ids).toEqual(expect.arrayContaining([
+      "wigolo:https://cdn.example/furnace.jpg",
+      "pexels:6489135",
+      "youtube:-EdtaqqXm64",
+      "pixabay:12345",
+    ]));
+  });
+
+  it("creditFrom keeps the hit's dedupeId so a later Resume can avoid the clip", async () => {
+    const { creditFrom } = await import("./credits");
+    const hit = { sourceUrl: "https://www.pexels.com/video/x-1/", dedupeId: "pexels:1" };
+    expect(creditFrom(4, { kind: "video", provider: "pexels", attribution: hit }).dedupeId).toBe("pexels:1");
+  });
+});
