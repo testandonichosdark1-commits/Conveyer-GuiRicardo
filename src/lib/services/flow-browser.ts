@@ -2034,6 +2034,74 @@ export function chooseBestCapturedImage(images: CapturedImage[], aspect = "16:9"
   })[0] ?? null;
 }
 
+/**
+ * Every Flow image this install has accepted as a beat's result — by tile media id and by
+ * content hash — so the same picture can never be handed to two beats. Persisted under DATA_DIR
+ * (a restart must not forget what the project grid already holds).
+ *
+ * Why it exists (run f1abab6b, 2026-10-12): beats 19 and 23 came out as exact copies of beats
+ * 3 and 9 — generated earlier in the SAME Flow window. Capture used to take any full-size image
+ * the page downloaded after submit; Flow re-fetches older tiles when it re-lays the grid, and if
+ * one of those arrived first and the page then went quiet for 4 s, the OLD picture was accepted.
+ */
+interface DeliveredImages {
+  ids: Set<string>;
+  hashes: Set<string>;
+}
+let deliveredCache: DeliveredImages | null = null;
+const deliveredFile = (): string => path.join(DATA_DIR, "flow-delivered-images.json");
+
+function deliveredImages(): DeliveredImages {
+  if (!deliveredCache) {
+    try {
+      const j = JSON.parse(fs.readFileSync(deliveredFile(), "utf8")) as { ids?: string[]; hashes?: string[] };
+      deliveredCache = { ids: new Set(j.ids ?? []), hashes: new Set(j.hashes ?? []) };
+    } catch {
+      deliveredCache = { ids: new Set(), hashes: new Set() };
+    }
+  }
+  return deliveredCache;
+}
+
+function rememberDeliveredImage(mediaId: string | null, buf: Buffer): void {
+  const d = deliveredImages();
+  if (mediaId) d.ids.add(mediaId);
+  d.hashes.add(sha256(buf));
+  const recent = (s: Set<string>) => [...s].slice(-20_000);
+  try {
+    fs.writeFileSync(deliveredFile(), JSON.stringify({ ids: recent(d.ids), hashes: recent(d.hashes) }));
+  } catch {
+    // Best-effort persistence; the in-memory set still protects this session.
+  }
+}
+
+/** Was this exact picture already used for some beat? Exported for tests. */
+export function isDeliveredImage(buf: Buffer): boolean {
+  return deliveredImages().hashes.has(sha256(buf));
+}
+
+/**
+ * The tile this generation produced: present now, absent from the pre-submit snapshot, and never
+ * delivered before. A lane runs ONE generation at a time in its OWN project, so a genuinely new
+ * tile is unambiguous; with several (e.g. Flow set to x2) the caption that best matches the prompt
+ * wins. Exported for tests.
+ */
+export function pickNewFlowTile<T extends { mediaId: string; caption: string; src: string }>(
+  tiles: T[],
+  baselineIds: Set<string>,
+  prompt: string
+): T | null {
+  const delivered = deliveredImages().ids;
+  // An UPLOADED file (the character reference) is a tile too, captioned with its file name —
+  // e.g. "character-reference-78e3edc9.jpg" — and it lands ~15 s after the upload, i.e. after the
+  // pre-submit snapshot. Run f1abab6b delivered the raw reference photo as beats 141 and 152 that
+  // way. A generated tile's caption is a description, never a file name.
+  const isUpload = (t: T) => /\.(jpe?g|png|webp|gif|heic)$/i.test(t.caption.trim());
+  const fresh = tiles.filter((t) => !baselineIds.has(t.mediaId) && !delivered.has(t.mediaId) && !isUpload(t));
+  if (!fresh.length) return null;
+  return fresh.map((t) => ({ t, s: t.caption ? captionMatchScore(t.caption, prompt) : 0 })).sort((a, b) => b.s - a.s)[0].t;
+}
+
 async function tryDownloadFromUi(page: Page, outPath: string, referenceImagePath?: string): Promise<boolean> {
   const largeImages = page.locator("img");
   let bestIndex = -1;
@@ -2214,24 +2282,40 @@ async function attemptFlowImage(
     input = await setupComposer();
   }
   const timeoutMs = flowImageTimeoutMs();
-  const candidates: CapturedImage[] = [];
+  const ref = options?.referenceImagePath;
+  // Full-size images the page downloads AFTER submit, keyed by URL without its signed query.
+  // Used to (a) supply the new tile's bytes without a second download and (b) as a slow
+  // fallback if the tile grid ever stops exposing media ids. Never "first image wins" again —
+  // see DeliveredImages for the incident that rule caused.
+  const bare = (u: string) => u.split("?")[0];
+  const captured = new Map<string, CapturedImage>();
   const tasks = new Set<Promise<void>>();
-  let lastCaptureAt = 0;
+  let submitted = false;
   const onResponse = (response: Response) => {
     const task = captureResponse(response).then(async (image) => {
-      if (!image) return;
-      // Reject the attached reference photo itself (Flow can echo it back over the
-      // network, e.g. to render its attachment chip). Filtered HERE, not just at
-      // final selection, so a quiet echo-only capture never satisfies the "a result
-      // arrived" wait-loop condition below and cuts generation short before the real
-      // image shows up.
-      if (await looksLikeReferenceEcho(image.buffer, options?.referenceImagePath)) return;
-      candidates.push(image);
-      lastCaptureAt = Date.now();
+      if (!image || !submitted) return;
+      if (isDeliveredImage(image.buffer)) return; // an older beat's picture being re-fetched
+      // Reject the attached reference photo itself (Flow can echo it back over the network,
+      // e.g. to render its attachment chip).
+      if (await looksLikeReferenceEcho(image.buffer, ref)) return;
+      captured.set(bare(image.url), image);
     }).finally(() => tasks.delete(task));
     tasks.add(task);
   };
   page.on("response", onResponse);
+
+  /** The bytes if they are a fresh, full-size, non-reference picture; null otherwise. */
+  const usable = async (buf: Buffer | null | undefined): Promise<Buffer | null> => {
+    if (!buf || isDeliveredImage(buf) || (await looksLikeReferenceEcho(buf, ref))) return null;
+    const meta = await sharp(buf).metadata().catch(() => null);
+    return meta && (meta.width ?? 0) >= 512 && (meta.height ?? 0) >= 512 ? buf : null;
+  };
+  const save = async (buf: Buffer, mediaId: string | null): Promise<string> => {
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    await sharp(buf).png().toFile(outPath);
+    rememberDeliveredImage(mediaId, buf);
+    return outPath;
+  };
 
   try {
     await input.fill(prompt.slice(0, 12_000));
@@ -2242,13 +2326,44 @@ async function attemptFlowImage(
         "credits"
       );
     }
+    // Every tile already in this lane's project before the click — none of them can be ours.
+    const baselineIds = new Set((await currentFlowImageTiles(page)).map((t) => t.mediaId));
+    submitted = true;
     await submitPrompt(page, input);
     const deadline = Date.now() + timeoutMs;
     let nextFailureCheck = Date.now() + 4_000;
+    let networkOnlySince = 0;
+    const rejectedIds = new Set<string>();
     while (Date.now() < deadline) {
       if (runId) checkCancelled(runId);
       if (await pageHasLoginPrompt(page)) throw new FlowBrowserError("Google session expired during generation.", "login");
-      if (candidates.length && Date.now() - lastCaptureAt >= 4_000) break;
+
+      // Primary signal: the NEW tile in this project, fetched straight from its own src.
+      const tiles = (await currentFlowImageTiles(page)).filter((t) => !rejectedIds.has(t.mediaId));
+      const tile = pickNewFlowTile(tiles, baselineIds, prompt);
+      if (tile) {
+        await Promise.allSettled([...tasks]);
+        const buf = captured.get(bare(tile.src))?.buffer ?? (await fetchFlowImageSrc(page, tile.src));
+        const ok = await usable(buf);
+        if (ok) return await save(ok, tile.mediaId);
+        rejectedIds.add(tile.mediaId);
+      }
+
+      // Fallback only if the grid never shows the new tile: a full-size, never-used picture
+      // that arrived after submit, accepted after 30 s of waiting for the tile.
+      if (captured.size) {
+        networkOnlySince ||= Date.now();
+        if (Date.now() - networkOnlySince >= 30_000) {
+          await Promise.allSettled([...tasks]);
+          const best = chooseBestCapturedImage([...captured.values()], aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
+          const ok = best ? await usable(best.buffer) : null;
+          if (ok) {
+            log(runId, "warn", `Google Flow${laneTag()}: the new tile never appeared in the grid — using the image downloaded after submit`, { stage: "visual" });
+            return await save(ok, null);
+          }
+        }
+      }
+
       if (Date.now() >= nextFailureCheck) {
         const failure = await detectFlowFailure(page, "image", failureBaseline);
         if (failure) throw failure;
@@ -2256,16 +2371,8 @@ async function attemptFlowImage(
       }
       await page.waitForTimeout(500);
     }
-    await Promise.allSettled([...tasks]);
-    const best = chooseBestCapturedImage(candidates, aspect || getSetting("FLOW_ASPECT_RATIO") || "16:9");
-    fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    if (best) {
-      await sharp(best.buffer).png().toFile(outPath);
-      return outPath;
-    }
-    if (await tryDownloadFromUi(page, outPath, options?.referenceImagePath)) return outPath;
     throw new FlowBrowserError(
-      `No full-size Flow image was captured within ${Math.round(timeoutMs / 1000)}s. The UI may have changed.`,
+      `No new Flow image appeared within ${Math.round(timeoutMs / 1000)}s. The UI may have changed.`,
       "timeout"
     );
   } finally {
