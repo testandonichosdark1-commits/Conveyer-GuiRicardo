@@ -103,6 +103,24 @@ export function TopNav() {
         <span style={{ fontWeight: 700, fontSize: 15, color: "var(--fg)", letterSpacing: "-0.01em" }}>
           Faceless Video Generator
         </span>
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "3px 9px 3px 7px",
+            border: "1px solid var(--border)",
+            borderRadius: 999,
+            fontWeight: 600,
+            fontSize: 13,
+            color: "var(--fg)",
+          }}
+        >
+          {/* Google Flow's own favicon: white mark on the dark theme, black on the light one. */}
+          <img src="/google-flow-icon-white.png" alt="" className="brand-flow-icon brand-flow-icon--on-dark" />
+          <img src="/google-flow-icon-black.png" alt="" className="brand-flow-icon brand-flow-icon--on-light" />
+          Flow
+        </span>
       </Link>
 
       {/* Desktop pill nav (≥1024px). Hidden below 1024 via .topnav-links. */}

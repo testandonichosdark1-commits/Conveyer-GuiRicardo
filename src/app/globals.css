@@ -391,6 +391,21 @@ html[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
   background: #b4b4bc;
 }
 
+/* Google Flow mark in the top-nav brand: swap the white/black favicon with the theme. */
+.brand-flow-icon {
+  height: 13px;
+  width: auto;
+}
+.brand-flow-icon--on-light {
+  display: none;
+}
+html[data-theme="light"] .brand-flow-icon--on-dark {
+  display: none;
+}
+html[data-theme="light"] .brand-flow-icon--on-light {
+  display: inline-block;
+}
+
 /* ── Costs runs table: wider-than-dashboard breakout (desktop only) ──
    The dashboard cards/filters/description stay in the 1000px content container;
    the table breaks out to a wider, viewport-centered container so more columns are
