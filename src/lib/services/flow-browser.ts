@@ -565,10 +565,25 @@ function looksLikeLogin(url: string): boolean {
  *  is literally about a "sign") while every sibling beat generated in the same run was fine:
  *  it never depended on the account's real session state at all. Word boundaries make "sign
  *  in" only match as its own two-word phrase. */
-async function pageHasLoginPrompt(page: Page): Promise<boolean> {
+export async function pageHasLoginPrompt(page: Page): Promise<boolean> {
+  // FOURTH incident (2026-10-12, run f1abab6b, beat 29): word boundaries were not enough. The
+  // beat's own prompt — "Lawrence Berkeley National Laboratory sign in front of a … facility" —
+  // is rendered on the page (composer / tile caption) and contains "sign in" as two real words,
+  // so every attempt and every Resume died with "Google session expired" at that same beat while
+  // the account was logged in. A real sign-in prompt is a CONTROL whose whole label is the phrase
+  // ("Sign in" / "Fazer login"), never a phrase inside longer text — so only that counts now.
+  const LOGIN_LABEL = /^\s*(sign in|fazer login|iniciar sessão)\s*$/i;
   const positiveNow = async (): Promise<boolean> => {
     if (looksLikeLogin(page.url())) return true;
-    return page.getByText(/\bsign in\b|\bfazer login\b|\biniciar sessão\b/i).first().isVisible().catch(() => false);
+    const controls = [
+      page.getByRole("button", { name: LOGIN_LABEL }),
+      page.getByRole("link", { name: LOGIN_LABEL }),
+      page.getByText(LOGIN_LABEL),
+    ];
+    for (const c of controls) {
+      if (await c.first().isVisible().catch(() => false)) return true;
+    }
+    return false;
   };
   if (!(await positiveNow())) return false;
   // Exact duration of Google's transient redirect/menu flash isn't known — polling for a
