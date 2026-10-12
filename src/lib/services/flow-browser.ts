@@ -2,10 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn, spawnSync } from "node:child_process";
 import sharp from "sharp";
 import { chromium, type BrowserContext, type Locator, type Page, type Response } from "playwright";
-import { getSetting } from "../settings";
+import { getSetting, type SettingKey } from "../settings";
 import { DATA_DIR } from "../run-paths";
 import { checkCancelled } from "../cancellation";
 import { pLimit } from "../plimit";
@@ -72,7 +73,7 @@ export interface CapturedImage {
 interface FlowBrowserState {
   context: BrowserContext | null;
   page: Page | null;
-  launching: Promise<{ context: BrowserContext; page: Page }> | null;
+  launching: Promise<BrowserContext> | null;
   queue: Promise<void>;
   /** model -> epoch ms until which Flow said its usage limit is hit (survives hot reload). */
   limitedModels?: Map<string, number>;
@@ -80,6 +81,39 @@ interface FlowBrowserState {
    *  last reload, preventive or reactive. Global, not per-run: the tab itself outlives any
    *  one run. See `maybeRecycleFlowTab`. */
   generationsSinceReload?: number;
+  /** One lane per configured Flow project (FLOW_PROJECT_URL, _2, _3). See "Lanes" below. */
+  lanes?: FlowLane[];
+  /** Callers waiting for any lane to free up, woken FIFO by releaseLane(). */
+  laneWaiters?: Array<() => void>;
+}
+
+/**
+ * A lane = one Flow PROJECT driven in its OWN Chrome window, with its own one-at-a-time
+ * queue. Up to three lanes run side by side (FLOW_PROJECT_URL, FLOW_PROJECT_URL_2,
+ * FLOW_PROJECT_URL_3), so three beats can be generating on Flow at once instead of one.
+ *
+ * Why separate PROJECTS and separate WINDOWS, not three tabs on one project:
+ *  - Every capture/failure check here reads "what is NEW in this page's project grid" (failure
+ *    baseline, new <video> src, network responses of THIS page). Two lanes on the SAME project
+ *    would see each other's tiles appear and could take the other beat's image or video — so a
+ *    duplicate URL is ignored, never given a second lane.
+ *  - A background TAB is `visibilityState: "hidden"` and stops rendering (no requestAnimationFrame),
+ *    which is exactly the "Could not switch Google Flow to Image mode" failure seen live. Each lane's
+ *    page is the only tab of its own window; with --disable-backgrounding-occluded-windows every
+ *    window keeps rendering even when covered.
+ * Account-wide state (usage limit per model: `limitedModels`) stays shared — all lanes use the
+ * same Google account, so Pro hitting its limit in one lane means it is limited in all of them.
+ */
+export interface FlowLane {
+  /** 0-based; lane 0 = FLOW_PROJECT_URL (the original single-lane behaviour). */
+  index: number;
+  page: Page | null;
+  busy: boolean;
+  generationsSinceReload: number;
+  /** Consecutive lane-local failures (ui/config/timeout/capture) — see noteLaneResult. */
+  failStreak: number;
+  /** Epoch ms until which this lane is skipped because it kept failing. */
+  disabledUntil: number;
 }
 
 declare global {
@@ -96,7 +130,13 @@ const state: FlowBrowserState = globalThis.__facelessFlowBrowserState ?? {
 };
 state.limitedModels ??= new Map<string, number>();
 state.generationsSinceReload ??= 0;
+state.lanes ??= [];
+state.laneWaiters ??= [];
 globalThis.__facelessFlowBrowserState = state;
+
+/** The lane the current async chain is running in (set by enqueue). Undefined outside a lane
+ *  — e.g. a unit test calling a helper directly — which every reader treats as lane 0. */
+const laneStore = new AsyncLocalStorage<FlowLane>();
 
 /**
  * Preventive tab recycling — a MIDDLE GROUND between "never reload" (how a 174-beat run
@@ -144,6 +184,13 @@ export async function ensureFlowWindowVisible(page: Page, runId: string): Promis
     } finally {
       await session.detach().catch(() => undefined);
     }
+    // Still hidden with the window restored = this page is a BACKGROUND TAB (someone opened
+    // another tab in this lane's window). Make it the active tab again, or it never renders.
+    if ((await page.evaluate(() => document.visibilityState).catch(() => "visible")) === "hidden") {
+      await page.bringToFront().catch(() => undefined);
+      await page.waitForTimeout(500);
+      log(runId, "info", "Google Flow: the Flow tab was in the background — brought it to the front", { stage: "visual" });
+    }
   } catch {
     // CDP Browser domain unavailable — nothing to do; the normal failure path still applies.
   }
@@ -154,10 +201,12 @@ export async function maybeRecycleFlowTab(page: Page, runId: string): Promise<vo
   await ensureFlowWindowVisible(page, runId);
   const every = recycleEveryN();
   if (every <= 0) return;
-  state.generationsSinceReload = (state.generationsSinceReload ?? 0) + 1;
-  if (state.generationsSinceReload < every) return;
-  state.generationsSinceReload = 0;
-  log(runId, "info", `Google Flow: recycling the tab after ${every} generations (preventive reload)`, { stage: "visual" });
+  // Each lane's tab ages on its own; outside a lane (tests) the legacy global counter is used.
+  const counter = laneStore.getStore() ?? state;
+  counter.generationsSinceReload = (counter.generationsSinceReload ?? 0) + 1;
+  if (counter.generationsSinceReload < every) return;
+  counter.generationsSinceReload = 0;
+  log(runId, "info", `Google Flow${laneTag()}: recycling the tab after ${every} generations (preventive reload)`, { stage: "visual" });
   await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 }).catch(() => undefined);
   await page.waitForTimeout(1500);
 }
@@ -264,19 +313,73 @@ async function ensureNormalChrome(endpoint: string, dir: string): Promise<void> 
   throw new FlowBrowserError("Chrome opened, but the local Flow connection was not ready on time. Close that Chrome window and try again.", "config");
 }
 
-function projectUrl(): string {
-  const configured = getSetting("FLOW_PROJECT_URL").trim();
-  if (!configured) throw new FlowBrowserError("FLOW_PROJECT_URL is empty. Open a Flow project and save its URL in Settings.", "config");
+export const FLOW_PROJECT_URL_KEYS = ["FLOW_PROJECT_URL", "FLOW_PROJECT_URL_2", "FLOW_PROJECT_URL_3"] as const;
+
+/** Parse one configured project URL; null if it is not a Google Flow URL. */
+function parseFlowUrl(raw: string): string | null {
   let parsed: URL;
   try {
-    parsed = new URL(configured);
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  return /(^|\.)google$|(^|\.)google\.com$|(^|\.)labs\.google$/i.test(parsed.hostname) ? parsed.toString() : null;
+}
+
+/** Same project = same path, whatever the query string/trailing slash. Two lanes on one project
+ *  would read each other's new tiles as their own result (see FlowLane), so this decides dupes. */
+function flowProjectKey(url: string): string {
+  const u = new URL(url);
+  return `${u.hostname}${u.pathname.replace(/\/+$/, "")}`.toLowerCase();
+}
+
+/**
+ * The project URL of every usable lane, in lane order. Lane 0 (FLOW_PROJECT_URL) is required and
+ * fails exactly as before; links 2 and 3 are optional — blank, invalid or a DUPLICATE project is
+ * skipped (never fatal: a typo in link 3 must not stop a run that link 1 can serve).
+ */
+export function flowProjectUrls(read: (key: SettingKey) => string = getSetting): string[] {
+  const primary = read("FLOW_PROJECT_URL").trim();
+  if (!primary) throw new FlowBrowserError("FLOW_PROJECT_URL is empty. Open a Flow project and save its URL in Settings.", "config");
+  try {
+    new URL(primary);
   } catch {
     throw new FlowBrowserError("FLOW_PROJECT_URL is not a valid URL.", "config");
   }
-  if (!/(^|\.)google$|(^|\.)google\.com$|(^|\.)labs\.google$/i.test(parsed.hostname)) {
-    throw new FlowBrowserError("FLOW_PROJECT_URL must point to Google Flow (labs.google).", "config");
+  const first = parseFlowUrl(primary);
+  if (!first) throw new FlowBrowserError("FLOW_PROJECT_URL must point to Google Flow (labs.google).", "config");
+  const urls = [first];
+  const seen = new Set([flowProjectKey(first)]);
+  for (const key of FLOW_PROJECT_URL_KEYS.slice(1)) {
+    const extra = parseFlowUrl(read(key).trim());
+    if (!extra || seen.has(flowProjectKey(extra))) continue;
+    seen.add(flowProjectKey(extra));
+    urls.push(extra);
   }
-  return parsed.toString();
+  return urls;
+}
+
+/** How many Flow lanes (parallel windows) the current settings give. */
+export function flowLaneCount(): number {
+  try {
+    return flowProjectUrls().length;
+  } catch {
+    return 1;
+  }
+}
+
+/** The project URL of the lane this call runs in (lane 0 outside any lane). */
+function projectUrl(): string {
+  const urls = flowProjectUrls();
+  return urls[laneStore.getStore()?.index ?? 0] ?? urls[0];
+}
+
+/** " [window 2/3]" inside a lane when more than one lane exists, "" otherwise — keeps the
+ *  single-lane log lines byte-identical to before. */
+function laneTag(): string {
+  const lane = laneStore.getStore();
+  const total = state.lanes?.length ?? 0;
+  return lane && total > 1 ? ` [window ${lane.index + 1}/${total}]` : "";
 }
 
 /** `page.isClosed()` stays false for a page whose tab CRASHED without being closed — the
@@ -302,10 +405,93 @@ function isDeadPageError(e: unknown): boolean {
   return /Frame has been detached|Target (page, context or browser )?has been closed|Target closed|Session closed/i.test(msg);
 }
 
-async function launchBrowser(): Promise<{ context: BrowserContext; page: Page }> {
-  if (state.context?.browser()?.isConnected() && pageIsAlive(state.page)) {
-    return { context: state.context, page: state.page! };
+/** Find (or open) the page a lane drives. Lane 0 keeps the original single-lane rule — reuse
+ *  any open Flow tab — so an existing setup behaves exactly as before; lanes 2 and 3 only
+ *  ever reuse a tab already showing THEIR project, else get a brand-new window. A page held by
+ *  another lane is never taken. */
+async function lanePage(lane: FlowLane): Promise<Page> {
+  const context = await launchBrowser();
+  if (pageIsAlive(lane.page) && lane.page!.context() === context) return lane.page!;
+  const url = projectUrl();
+  const key = flowProjectKey(url);
+  const held = new Set((state.lanes ?? []).filter((l) => l !== lane && pageIsAlive(l.page)).map((l) => l.page));
+  const free = context.pages().filter((p) => pageIsAlive(p) && !held.has(p));
+  const sameProject = (p: Page) => {
+    try {
+      return flowProjectKey(p.url()) === key;
+    } catch {
+      return false;
+    }
+  };
+  let page = free.find(sameProject) ?? null;
+  if (!page && lane.index === 0) {
+    // The original single-lane pick: any Flow tab, else the first tab — except, with several
+    // lanes, a tab already showing ANOTHER lane's project (that one belongs to that lane).
+    const otherProjects = new Set(flowProjectUrls().slice(1).map(flowProjectKey));
+    const notOtherLane = (p: Page) => {
+      try {
+        return !otherProjects.has(flowProjectKey(p.url()));
+      } catch {
+        return true;
+      }
+    };
+    const candidates = free.filter(notOtherLane);
+    page = candidates.find((p) => /labs\.google|flow\.google/.test(p.url())) ?? ((state.lanes?.length ?? 1) <= 1 ? candidates[0] : undefined) ?? null;
   }
+  if (!page) page = await openPageInNewWindow(context, url, lane.index);
+  lane.page = page;
+  if (lane.index === 0) state.page = page;
+  return page;
+}
+
+/**
+ * Open `url` in a NEW Chrome window (not a tab: a background tab stops rendering — see FlowLane)
+ * and return its Playwright page. Windows are cascaded by `slot` so they don't stack exactly.
+ * Exported for sibling browser providers (Google Vids) for the same reason.
+ */
+export async function openPageInNewWindow(context: BrowserContext, url: string, slot = 0): Promise<Page> {
+  const browser = context.browser();
+  if (!browser) throw new FlowBrowserError("Flow Chrome is not connected.", "config");
+  const cdp = await browser.newBrowserCDPSession();
+  try {
+    const { targetId } = (await cdp.send("Target.createTarget", { url, newWindow: true })) as { targetId: string };
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      for (const p of context.pages()) {
+        if (!pageIsAlive(p)) continue;
+        const s = await context.newCDPSession(p).catch(() => null);
+        if (!s) continue;
+        const info = (await s.send("Target.getTargetInfo").catch(() => null)) as { targetInfo?: { targetId?: string } } | null;
+        await s.detach().catch(() => undefined);
+        if (info?.targetInfo?.targetId === targetId) {
+          const w = (await cdp.send("Browser.getWindowForTarget", { targetId }).catch(() => null)) as { windowId?: number } | null;
+          if (w?.windowId) {
+            // Below ~1300px wide Flow keeps the compact composer (the model chip this file drives).
+            // Chrome rejects size/position combined with a windowState in one call, so: state first.
+            await cdp.send("Browser.setWindowBounds", { windowId: w.windowId, bounds: { windowState: "normal" } }).catch(() => undefined);
+            await cdp
+              .send("Browser.setWindowBounds", {
+                windowId: w.windowId,
+                bounds: { left: 40 + slot * 60, top: 40 + slot * 60, width: 1280, height: 860 },
+              })
+              .catch(() => undefined);
+          }
+          await p.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => undefined);
+          return p;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    throw new FlowBrowserError("Chrome opened a new Flow window, but it never became controllable. Close the extra window and retry.", "ui");
+  } finally {
+    await cdp.detach().catch(() => undefined);
+  }
+}
+
+/** The one CDP connection to the operator's Flow Chrome, shared by every lane (and by Vids).
+ *  Only the CONNECTION lives here; which page each lane drives is lanePage()'s job. */
+async function launchBrowser(): Promise<BrowserContext> {
+  if (state.context?.browser()?.isConnected()) return state.context;
   if (state.launching) return state.launching;
 
   state.launching = (async () => {
@@ -323,17 +509,13 @@ async function launchBrowser(): Promise<{ context: BrowserContext; page: Page }>
       const browser = await chromium.connectOverCDP(endpoint, { noDefaults: true });
       const context = browser.contexts()[0];
       if (!context) throw new Error("Chrome exposed no browser context");
-      // Exclude a crashed-but-not-closed page from candidacy — reselecting it here would
-      // just hand the same dead reference straight back out.
-      const pages = context.pages().filter(pageIsAlive);
-      const page = pages.find((p) => /labs\.google/.test(p.url())) ?? pages[0] ?? await context.newPage();
       state.context = context;
-      state.page = page;
       context.on("close", () => {
         state.context = null;
         state.page = null;
+        for (const lane of state.lanes ?? []) lane.page = null;
       });
-      return { context, page };
+      return context;
     } catch (error) {
       const msg = (error as Error).message;
       throw new FlowBrowserError(
@@ -353,7 +535,7 @@ async function launchBrowser(): Promise<{ context: BrowserContext; page: Page }>
  * second Chrome, so one login and one profile serve both.
  */
 export async function flowChromeContext(): Promise<BrowserContext> {
-  return (await launchBrowser()).context;
+  return launchBrowser();
 }
 
 function looksLikeLogin(url: string): boolean {
@@ -429,33 +611,53 @@ async function gotoFlow(page: Page): Promise<void> {
  * the dead reference is discarded and a fresh page is acquired once before giving up.
  */
 async function openFlowPage(): Promise<Page> {
-  const { page } = await launchBrowser();
+  const lane = laneStore.getStore() ?? syncLanes()[0];
+  const page = await lanePage(lane);
   try {
     await gotoFlow(page);
     return page;
   } catch (e) {
     if (!isDeadPageError(e)) throw e;
-    state.page = null;
-    const { page: fresh } = await launchBrowser();
+    lane.page = null;
+    if (lane.index === 0) state.page = null;
+    const fresh = await lanePage(lane);
     await gotoFlow(fresh);
     return fresh;
   }
 }
 
-/** Opens the persistent Flow browser without spending credits. Used by Settings for first login. */
+/** Opens the persistent Flow browser without spending credits. Used by Settings for first login.
+ *  With several project links configured, opens and checks EVERY lane's window, one by one. */
 export async function openFlowSession(): Promise<FlowSessionStatus> {
-  return enqueue(async () => {
-    const page = await openFlowPage();
-    const loggedIn = !(await pageHasLoginPrompt(page));
+  const total = syncLanes().length;
+  const results: { url: string; loggedIn: boolean }[] = [];
+  for (let i = 0; i < total; i++) {
+    results.push(
+      await enqueue(async () => {
+        const page = await openFlowPage();
+        return { url: page.url(), loggedIn: !(await pageHasLoginPrompt(page)) };
+      }, "", i)
+    );
+  }
+  const loggedIn = results.every((r) => r.loggedIn);
+  if (total === 1) {
     return {
       ready: loggedIn,
       loggedIn,
-      url: page.url(),
+      url: results[0].url,
       message: loggedIn
         ? "Normal Chrome is connected to Google Flow. Session is ready; no image or video was generated."
         : "Normal Chrome opened. Complete Google sign-in in that window, open the Flow project, then test again.",
     };
-  });
+  }
+  return {
+    ready: loggedIn,
+    loggedIn,
+    url: results[0].url,
+    message: loggedIn
+      ? `Normal Chrome is connected to Google Flow in ${total} windows (one per project link) — they will generate at the same time. Session is ready; no image or video was generated.`
+      : `Chrome opened ${total} Flow windows, but window(s) ${results.map((r, i) => (r.loggedIn ? null : i + 1)).filter(Boolean).join(", ")} ask for sign-in. Complete Google sign-in there, then test again.`,
+  };
 }
 
 /** Read-only health check. It never launches Chrome and never spends credits. */
@@ -470,17 +672,101 @@ export function flowSessionStatus(): FlowSessionStatus {
   };
 }
 
-async function enqueue<T>(task: () => Promise<T>): Promise<T> {
-  const previous = state.queue.catch(() => undefined);
-  let release!: () => void;
-  state.queue = new Promise<void>((resolve) => { release = resolve; });
-  await previous;
-  try {
-    return await task();
-  } finally {
-    release();
+/** Make `state.lanes` match the configured project links (1–3). Lanes beyond the new count are
+ *  dropped only once idle, so a settings change never yanks a page out from under a generation. */
+function syncLanes(): FlowLane[] {
+  const lanes = state.lanes ?? (state.lanes = []);
+  const want = flowLaneCount();
+  while (lanes.length < want) {
+    lanes.push({ index: lanes.length, page: null, busy: false, generationsSinceReload: 0, failStreak: 0, disabledUntil: 0 });
+  }
+  while (lanes.length > want && !lanes[lanes.length - 1].busy) lanes.pop();
+  return lanes;
+}
+
+/** A lane that fails this many times IN A ROW (on its own — UI/config/timeout/capture, never an
+ *  account-wide credits/login or a content policy refusal) is set aside for LANE_COOLDOWN_MS while
+ *  another lane is healthy, so one bad link (deleted project, broken window) can't drag the run. */
+const LANE_FAILS_BEFORE_COOLDOWN = 3;
+const LANE_COOLDOWN_MS = 10 * 60_000;
+
+function noteLaneResult(lane: FlowLane, error: unknown, runId: string): void {
+  if (error === undefined) {
+    lane.failStreak = 0;
+    return;
+  }
+  const laneLocal =
+    (error instanceof FlowBrowserError && ["ui", "config", "timeout", "capture"].includes(error.code)) || isDeadPageError(error);
+  if (!laneLocal) return;
+  lane.failStreak++;
+  const lanes = state.lanes ?? [];
+  const othersHealthy = lanes.some((l) => l !== lane && l.disabledUntil <= Date.now());
+  if (lane.failStreak >= LANE_FAILS_BEFORE_COOLDOWN && othersHealthy) {
+    lane.failStreak = 0;
+    lane.disabledUntil = Date.now() + LANE_COOLDOWN_MS;
+    const msg = `Google Flow: window ${lane.index + 1} failed ${LANE_FAILS_BEFORE_COOLDOWN} times in a row — pausing it for ${LANE_COOLDOWN_MS / 60_000} min; the other window(s) keep generating. Check that project link.`;
+    if (runId) log(runId, "warn", msg, { stage: "visual" });
+    else console.warn(msg);
   }
 }
+
+/** Take a free lane (or, with `only`, that specific lane), waiting FIFO while all are busy.
+ *  Lanes cooling down after repeated failures are skipped unless every lane is cooling down. */
+async function acquireLane(only?: number): Promise<FlowLane> {
+  for (;;) {
+    const lanes = syncLanes();
+    let pool: FlowLane[];
+    if (only !== undefined) {
+      pool = lanes.filter((l) => l.index === only);
+      if (!pool.length) throw new FlowBrowserError(`Flow window ${only + 1} is not configured.`, "config");
+    } else {
+      const healthy = lanes.filter((l) => l.disabledUntil <= Date.now());
+      pool = healthy.length ? healthy : lanes;
+    }
+    const free = pool.find((l) => !l.busy);
+    if (free) {
+      free.busy = true;
+      return free;
+    }
+    await new Promise<void>((resolve) => (state.laneWaiters ?? (state.laneWaiters = [])).push(resolve));
+  }
+}
+
+function releaseLane(lane: FlowLane): void {
+  lane.busy = false;
+  // Wake every waiter: each re-checks for a lane it may use (one may be waiting for THIS lane
+  // specifically, another for any healthy one); the losers simply queue again.
+  const waiters = state.laneWaiters?.splice(0) ?? [];
+  for (const wake of waiters) wake();
+}
+
+/**
+ * Run `task` on ONE Flow lane, exclusively — the per-window equivalent of the old process-wide
+ * queue. With a single project link this is exactly the old behaviour (one lane, strictly one
+ * task at a time). With 2–3 links, up to that many tasks run at once, each in its own window,
+ * and everything inside `task` (openFlowPage, projectUrl, the tab-recycle counter) automatically
+ * resolves to that lane via `laneStore`.
+ */
+async function enqueue<T>(task: () => Promise<T>, runId = "", only?: number): Promise<T> {
+  const lane = await acquireLane(only);
+  try {
+    const result = await laneStore.run(lane, task);
+    noteLaneResult(lane, undefined, runId);
+    return result;
+  } catch (e) {
+    noteLaneResult(lane, e, runId);
+    throw e;
+  } finally {
+    releaseLane(lane);
+  }
+}
+
+/** Test seam: the lane scheduler, plus which lane the current call runs in. Not for app code. */
+export const __laneTesting = {
+  enqueue,
+  currentLaneIndex: (): number | undefined => laneStore.getStore()?.index,
+  lanes: (): FlowLane[] => state.lanes ?? [],
+};
 
 async function firstVisible(candidates: Locator[]): Promise<Locator | null> {
   for (const group of candidates) {
@@ -1868,6 +2154,7 @@ async function attemptFlowImage(
 ): Promise<string> {
   if (runId) checkCancelled(runId);
   const page = await openFlowPage();
+  if (laneTag()) log(runId, "debug", `Google Flow${laneTag()}: generating this image (${model})`, { stage: "visual" });
   if (await pageHasLoginPrompt(page)) {
     throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
   }
@@ -2162,6 +2449,7 @@ async function attemptFlowImageConcurrent(
   const submitted: SubmittedFlowImage = await enqueue(async () => {
     if (runId) checkCancelled(runId);
     const page = await openFlowPage();
+    if (laneTag()) log(runId, "debug", `Google Flow${laneTag()}: generating this image`, { stage: "visual" });
     if (await pageHasLoginPrompt(page)) {
       throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
     }
@@ -2198,7 +2486,7 @@ async function attemptFlowImageConcurrent(
     // Nothing to wait for here anymore (see the section comment for why v1's in-lock wait
     // was wrong) — release the lock immediately so the next beat can submit.
     return { page, failureBaseline };
-  });
+  }, runId);
 
   return imageWaitLimit(async () => {
     const { page, failureBaseline } = submitted;
@@ -2337,7 +2625,7 @@ export async function generateFlowImage(
         throw e2;
       }
     }
-  });
+  }, runId);
 }
 
 /**
@@ -2637,6 +2925,7 @@ export async function generateFlowVideo(
     if (runId) checkCancelled(runId);
     const D = withPresubmitDeadline;
     const page = await D("open Flow", () => openFlowPage());
+    if (laneTag()) log(runId, "debug", `Google Flow${laneTag()}: generating this video`, { stage: "visual" });
     if (await pageHasLoginPrompt(page)) {
       throw new FlowBrowserError("Google login is required. Open Settings → Google Flow → Open Flow / login.", "login");
     }
@@ -2776,5 +3065,5 @@ export async function generateFlowVideo(
     } finally {
       page.off("response", onResponse);
     }
-  });
+  }, runId);
 }

@@ -642,6 +642,39 @@ having grabbed a reference the instant a placeholder appeared:
 small run (10–15 beats) first and check every resulting image against its own beat's prompt
 — cheap to eyeball in full, and exactly how v1's bug was actually caught.
 
+### Parallel lanes — up to 3 Flow projects at once (`FLOW_PROJECT_URL_2` / `_3`, 2026-10-12)
+
+The replacement for raising `FLOW_IMAGE_CONCURRENCY`: parallelism comes from **more Flow
+projects, each in its own Chrome window**, not from several prompts in one project. Settings →
+Google Flow has "link 2" / "link 3" next to the project URL; each configured link is a **lane**.
+
+- **One lane = one project + one window + one strictly serial queue.** `enqueue()` is now a lane
+  scheduler: it takes the first free lane (FIFO wait when all are busy) and runs the task inside
+  `laneStore` (AsyncLocalStorage), so `openFlowPage()`, `projectUrl()` and the tab-recycle counter
+  resolve to THAT lane with no signature changes anywhere below. Everything inside a lane is
+  byte-identical to the single-lane code: one composer, one prompt, one capture at a time.
+- **Why separate projects:** every capture/failure check reads "what is NEW in this page's
+  project grid" (failure baseline, new `<video>` src) — two lanes on one project could take each
+  other's result. `flowProjectUrls()` therefore drops a duplicate project (compared by host+path,
+  ignoring query/trailing slash) and skips a blank/invalid extra link instead of failing the run.
+  Link 1 keeps its original fail-loud validation.
+- **Why separate windows, not tabs:** a background tab is `visibilityState: "hidden"` and stops
+  rendering — the same freeze as a minimized window. `openPageInNewWindow()` creates each lane's
+  page via `Target.createTarget({newWindow:true})` (≤1280px wide to keep the compact composer);
+  Vids uses the same helper so its tab can't hide a Flow window. `ensureFlowWindowVisible` also
+  `bringToFront()`s a lane page that is still hidden after un-minimizing (someone opened a tab in it).
+- **Shared on purpose:** `limitedModels` (usage limit is per Google ACCOUNT, all lanes use one) and
+  the CDP connection (`launchBrowser()` now returns only the context; `lanePage()` picks pages).
+- **Lane health:** 3 consecutive lane-local failures (`ui`/`config`/`timeout`/`capture`, or a dead
+  page) set that lane aside for 10 min while another lane is healthy (`noteLaneResult`). Credits,
+  login and policy failures never count — they are account- or content-wide.
+- **`visualConcurrency()`** adds one beat in flight per extra lane when `AI_PROVIDER=flow_browser`
+  (3 + 2 = 5 with three links) — at 3 beats, mostly real footage, extra windows would sit idle.
+- With ONE link nothing changes: one lane, strictly one task at a time (pinned in `flow-lanes.test.ts`
+  together with dedupe, max-N-in-flight / never-two-per-lane, and the cooldown rules).
+- Verified live 2026-10-12: three links open three separate windows, all `visible` and rendering;
+  a lane window closed by hand is recreated on the next session/generation.
+
 ### Self-healing for "random-looking" Flow UI failures (2026-09-27)
 
 Diagnosed against a real 174-beat run: three DIFFERENT UI-detection errors fired within 33

@@ -25,7 +25,7 @@ import { beginRun, endRun } from "./run-lifecycle";
 import { noteCreditExhausted } from "./services/credit-exhaustion";
 import { joinDegraded, type DegradeCode } from "./degraded";
 import { beginStoryblocksRun } from "./services/storyblocks";
-import { FlowBrowserError } from "./services/flow-browser";
+import { FlowBrowserError, flowLaneCount } from "./services/flow-browser";
 
 /**
  * How many beats are acquired at once (VISUAL_CONCURRENCY, default 3). With Google Flow as the AI
@@ -35,7 +35,12 @@ import { FlowBrowserError } from "./services/flow-browser";
  * 157-beat run take ~2.7 h, since half the beats (Pexels/YouTube) never needed Flow at all.
  */
 function visualConcurrency(): number {
-  return Math.max(1, Number(getSetting("VISUAL_CONCURRENCY") || "3"));
+  const configured = Math.max(1, Number(getSetting("VISUAL_CONCURRENCY") || "3"));
+  // Extra Flow windows (FLOW_PROJECT_URL_2/_3) only shorten a run if enough beats are in flight
+  // to feed them — at 3 beats at a time, mostly real footage, the extra windows would sit idle.
+  // One more beat in flight per extra window; a single window keeps the configured value.
+  if (getSetting("AI_PROVIDER") !== "flow_browser") return configured;
+  return configured + (flowLaneCount() - 1);
 }
 
 /**

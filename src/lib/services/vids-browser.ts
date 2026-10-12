@@ -5,7 +5,7 @@ import path from "node:path";
 import type { Page } from "playwright";
 import { getSetting } from "../settings";
 import { checkCancelled } from "../cancellation";
-import { FlowBrowserError, flowChromeContext, pageIsAlive, validateFlowVideoFile } from "./flow-browser";
+import { FlowBrowserError, flowChromeContext, openPageInNewWindow, pageIsAlive, validateFlowVideoFile } from "./flow-browser";
 
 /**
  * Google Vids as an AI b-roll provider (Nano Banana stills + Omni video), driven through the
@@ -95,7 +95,9 @@ async function vidsPage(): Promise<Page> {
     if (!url) {
       throw new FlowBrowserError("Open a Google Vids project in the Flow Chrome window (docs.google.com/videos/d/…) or set VIDS_PROJECT_URL.", "config");
     }
-    page = await context.newPage();
+    // Its own window, never a tab: a tab added to a Flow window would hide (and freeze) that
+    // window's Flow page — background tabs stop rendering.
+    page = await openPageInNewWindow(context, url, 3);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
     await page.waitForTimeout(3000);
   }

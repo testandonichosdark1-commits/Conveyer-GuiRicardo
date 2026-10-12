@@ -164,6 +164,8 @@ export const SETTING_KEYS = [
   // ── AI provider (Flow browser, kie.ai nano-banana/Veo, or 69labs Grok) ─────
   "AI_PROVIDER",               // flow_browser | kie | 69labs | ... — engine for AI b-roll
   "FLOW_PROJECT_URL",          // Exact Google Flow project URL opened by the browser worker
+  "FLOW_PROJECT_URL_2",        // Optional 2nd Flow project — its own Chrome window, generates in parallel (blank = off)
+  "FLOW_PROJECT_URL_3",        // Optional 3rd Flow project — same, a third parallel window (blank = off)
   "FLOW_BROWSER_PROFILE_DIR",  // Persistent Chrome profile. Empty = DATA_DIR/flow-browser-profile
   "FLOW_BROWSER_CHANNEL",      // Playwright browser channel. Default chrome (uses installed Google Chrome)
   "FLOW_BROWSER_EXECUTABLE",   // Optional absolute browser executable path (advanced)
@@ -650,6 +652,8 @@ export const DEFAULTS: Record<SettingKey, string> = {
   // AI provider
   AI_PROVIDER: "kie",
   FLOW_PROJECT_URL: "https://labs.google/fx/tools/flow",
+  FLOW_PROJECT_URL_2: "",
+  FLOW_PROJECT_URL_3: "",
   FLOW_BROWSER_PROFILE_DIR: "",
   FLOW_BROWSER_CHANNEL: "chrome",
   FLOW_BROWSER_EXECUTABLE: "",
