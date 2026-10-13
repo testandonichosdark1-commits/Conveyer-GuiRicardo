@@ -1241,7 +1241,9 @@ const FLOW_LABEL_DECORATION = /\b(new|beta|preview)\b/g;
 
 /** One cleaned/normalized line, ready for exact comparison against a wanted model id. */
 function cleanModelLabelLine(line: string): string {
-  const cleaned = line.replace(/[()[\]]/g, " ").replace(/[^a-zA-Z0-9.\s-]/g, " ");
+  // Material-icon ligatures leak into innerText as snake_case words — "volume_up Veo 3.1 - Fast",
+  // "arrow_drop_down", "crop_16_9" (live, 2026-10-13). They are never part of a model name.
+  const cleaned = line.replace(/\b[a-z]+(?:_[a-z0-9]+)+\b/g, " ").replace(/[()[\]]/g, " ").replace(/[^a-zA-Z0-9.\s-]/g, " ");
   return normalizeFlowModelLabel(cleaned).replace(FLOW_LABEL_DECORATION, " ").replace(/\s+/g, " ").trim();
 }
 
@@ -1320,7 +1322,10 @@ async function ensureVeoModel(page: Page): Promise<void> {
   // Same composer-chip mechanism as the image models. Verified live for Nano Banana only;
   // the Veo popover is assumed to have the same shape. If it doesn't, this returns
   // "failed"/"no-chip" and the legacy routine below still runs exactly as before.
-  const via = await selectModelViaComposer(page, wanted, /Veo/i, seenLabels);
+  // The video family select names whatever video model is active, and Flow now offers a non-Veo
+  // one too (live 2026-10-13: "Omni 1.1 Flash", "Veo 3.1 - Lite", "Veo 3.1 - Fast"). Matching the
+  // select only by "Veo" missed it entirely whenever Omni was the active model.
+  const via = await selectModelViaComposer(page, wanted, /Veo|Omni/i, seenLabels);
   if (via === "ok") return;
 
   const pattern = new RegExp(wanted.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s*[-\\s]?\\s*"), "i");
@@ -2841,6 +2846,25 @@ export function isVideoResponseCandidate(contentType: string, url: string): bool
  * submitting a prompt so a later check can tell a genuinely NEW result apart from one
  * already sitting in this (shared, reused) project's grid. Exported for tests.
  */
+/** One key per VIDEO tile in grid order — its thumbnail URL without the signed query (the
+ *  thumbnail is either `flow-content.google/image/<id>` or an opaque `flow.google.com/asb/…`
+ *  after a reload, so no id can be parsed out; within one generation, with no reload, the URL
+ *  is stable). A tile whose <video> is already mounted keys on the video src instead. The clip
+ *  itself mounts only while the tile is hovered. Index i matches
+ *  `flow-grid-tile-container:has(flow-video-tile)`.nth(i). Exported for tests. */
+export async function currentFlowVideoTileKeys(page: Page): Promise<string[]> {
+  return page
+    .locator("flow-grid-tile-container:has(flow-video-tile)")
+    .evaluateAll((els: Element[]) =>
+      els.map((el) => {
+        const v = el.querySelector("video") as HTMLVideoElement | null;
+        const i = el.querySelector("flow-video-tile img") as HTMLImageElement | null;
+        return ((v && (v.currentSrc || v.src)) || (i && (i.currentSrc || i.src)) || "").split("?")[0];
+      })
+    )
+    .catch(() => []);
+}
+
 export async function currentFlowVideoSrcs(page: Page): Promise<string[]> {
   return page
     .locator("video")
@@ -3094,6 +3118,8 @@ export async function generateFlowVideo(
       // it, a video already sitting in this shared/reused project's grid could be mistaken
       // for this beat's own result the instant the wait loop starts.
       const videoSrcBaseline = new Set(await currentFlowVideoSrcs(page));
+      const videoTileBaseline = new Set(await currentFlowVideoTileKeys(page));
+      const hoveredTiles = new Map<string, number>();
       if (await flowInsufficientCreditsWarning(page)) {
         throw new FlowBrowserError(
           "Google Flow will not submit this video: the account has insufficient credits for it (Flow shows \"Alerta de créditos insuficientes\").",
@@ -3124,6 +3150,18 @@ export async function generateFlowVideo(
         if (newSrcs.some((s) => !videoSrcBaseline.has(s))) {
           newVideoElementSeen = true;
           break;
+        }
+        // Flow now renders a finished video as a THUMBNAIL tile with no <video> element until
+        // the pointer is over it (live 2026-10-13: a Veo clip sat finished for the full 600 s
+        // timeout this way). Hover the new tile so its <video> mounts; the check above then
+        // sees the new src on the next pass. Re-hover at most every 10 s while it renders.
+        const tileKeys = await currentFlowVideoTileKeys(page);
+        for (let i = 0; i < tileKeys.length; i++) {
+          const key = tileKeys[i];
+          if (!key || videoTileBaseline.has(key) || Date.now() - (hoveredTiles.get(key) ?? 0) < 10_000) continue;
+          hoveredTiles.set(key, Date.now());
+          await page.locator("flow-grid-tile-container:has(flow-video-tile)").nth(i).hover({ timeout: 5_000 }).catch(() => undefined);
+          await page.waitForTimeout(1_500);
         }
         if (Date.now() >= nextFailureCheck) {
           const failure = await detectFlowFailure(page, "video", failureBaseline);
