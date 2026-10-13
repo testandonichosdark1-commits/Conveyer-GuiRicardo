@@ -5,6 +5,9 @@ import { useT } from "../../_i18n";
 import { SettingsField } from "./SettingsField";
 import type { Val, Set } from "./useSettings";
 
+/** Optional extra Flow projects — each one is another window generating in parallel. */
+const EXTRA_LINKS = ["FLOW_PROJECT_URL_2", "FLOW_PROJECT_URL_3", "FLOW_PROJECT_URL_4", "FLOW_PROJECT_URL_5", "FLOW_PROJECT_URL_6"] as const;
+
 export function FlowBrowserBlock({ val, set }: { val: Val; set: Set }) {
   const tr = useT();
   const [busy, setBusy] = useState(false);
@@ -19,11 +22,7 @@ export function FlowBrowserBlock({ val, set }: { val: Val; set: Set }) {
       const saveResponse = await fetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          FLOW_PROJECT_URL: val("FLOW_PROJECT_URL"),
-          FLOW_PROJECT_URL_2: val("FLOW_PROJECT_URL_2"),
-          FLOW_PROJECT_URL_3: val("FLOW_PROJECT_URL_3"),
-        }),
+        body: JSON.stringify(Object.fromEntries(["FLOW_PROJECT_URL", ...EXTRA_LINKS].map((k) => [k, val(k)]))),
       });
       if (!saveResponse.ok) {
         const saved = await saveResponse.json().catch(() => ({}));
@@ -48,8 +47,8 @@ export function FlowBrowserBlock({ val, set }: { val: Val; set: Set }) {
         </div>
         <div className="faint" style={{ fontSize: 12, marginTop: 3, lineHeight: 1.5 }}>
           {tr(
-            "Ouvre le Chrome normal et s'y connecte localement, une image à la fois par projet Flow (jusqu'à 3 projets en parallèle), avec une session Google persistante. Le premier login est manuel; les exécutions suivantes sont automatiques. Flow peut changer son interface ou demander une nouvelle vérification.",
-            "Opens normal Chrome and connects to it locally, one image at a time per Flow project (up to 3 projects in parallel), with a persistent Google session. The first login is manual; later runs are automatic. Flow may change its UI or request verification again."
+            "Ouvre le Chrome normal et s'y connecte localement, une image à la fois par projet Flow (jusqu'à 6 projets en parallèle), avec une session Google persistante. Le premier login est manuel; les exécutions suivantes sont automatiques. Flow peut changer son interface ou demander une nouvelle vérification.",
+            "Opens normal Chrome and connects to it locally, one image at a time per Flow project (up to 6 projects in parallel), with a persistent Google session. The first login is manual; later runs are automatic. Flow may change its UI or request verification again."
           )}
         </div>
       </div>
@@ -62,25 +61,21 @@ export function FlowBrowserBlock({ val, set }: { val: Val; set: Set }) {
         placeholder="https://labs.google/fx/tools/flow/project/..."
       />
       <div className="grid-2" style={{ gap: 12 }}>
-        <SettingsField
-          label={tr("URL du projet Flow — lien 2 (optionnel)", "Flow project URL — link 2 (optional)")}
-          settingKey="FLOW_PROJECT_URL_2"
-          val={val}
-          set={set}
-          placeholder="https://labs.google/fx/tools/flow/project/..."
-        />
-        <SettingsField
-          label={tr("URL du projet Flow — lien 3 (optionnel)", "Flow project URL — link 3 (optional)")}
-          settingKey="FLOW_PROJECT_URL_3"
-          val={val}
-          set={set}
-          placeholder="https://labs.google/fx/tools/flow/project/..."
-        />
+        {EXTRA_LINKS.map((key, i) => (
+          <SettingsField
+            key={key}
+            label={tr(`URL du projet Flow — lien ${i + 2} (optionnel)`, `Flow project URL — link ${i + 2} (optional)`)}
+            settingKey={key}
+            val={val}
+            set={set}
+            placeholder="https://labs.google/fx/tools/flow/project/..."
+          />
+        ))}
       </div>
       <div className="faint" style={{ fontSize: 11, marginTop: -6, lineHeight: 1.5 }}>
         {tr(
-          "Chaque lien ouvre sa propre fenêtre Chrome et génère EN MÊME TEMPS que les autres (jusqu'à 3 images/vidéos à la fois). Utilisez un projet Flow DIFFÉRENT par lien — un lien en double est ignoré. Même compte Google : la limite d'utilisation (ex. Nano Banana Pro) est partagée.",
-          "Each link opens its own Chrome window and generates AT THE SAME TIME as the others (up to 3 images/videos at once). Use a DIFFERENT Flow project per link — a duplicate link is ignored. Same Google account: the usage limit (e.g. Nano Banana Pro) is shared."
+          "Chaque lien ouvre sa propre fenêtre Chrome et génère EN MÊME TEMPS que les autres (jusqu'à 6 images/vidéos à la fois). Utilisez un projet Flow DIFFÉRENT par lien — un lien en double est ignoré. Même compte Google : la limite d'utilisation (ex. Nano Banana Pro) est partagée.",
+          "Each link opens its own Chrome window and generates AT THE SAME TIME as the others (up to 6 images/videos at once). Use a DIFFERENT Flow project per link — a duplicate link is ignored. Same Google account: the usage limit (e.g. Nano Banana Pro) is shared."
         )}
       </div>
 

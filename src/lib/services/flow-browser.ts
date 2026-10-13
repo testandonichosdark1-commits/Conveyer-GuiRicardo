@@ -89,8 +89,8 @@ interface FlowBrowserState {
 
 /**
  * A lane = one Flow PROJECT driven in its OWN Chrome window, with its own one-at-a-time
- * queue. Up to three lanes run side by side (FLOW_PROJECT_URL, FLOW_PROJECT_URL_2,
- * FLOW_PROJECT_URL_3), so three beats can be generating on Flow at once instead of one.
+ * queue. Up to six lanes run side by side (FLOW_PROJECT_URL, FLOW_PROJECT_URL_2 … _6), so up
+ * to six beats can be generating on Flow at once instead of one.
  *
  * Why separate PROJECTS and separate WINDOWS, not three tabs on one project:
  *  - Every capture/failure check here reads "what is NEW in this page's project grid" (failure
@@ -313,7 +313,14 @@ async function ensureNormalChrome(endpoint: string, dir: string): Promise<void> 
   throw new FlowBrowserError("Chrome opened, but the local Flow connection was not ready on time. Close that Chrome window and try again.", "config");
 }
 
-export const FLOW_PROJECT_URL_KEYS = ["FLOW_PROJECT_URL", "FLOW_PROJECT_URL_2", "FLOW_PROJECT_URL_3"] as const;
+export const FLOW_PROJECT_URL_KEYS = [
+  "FLOW_PROJECT_URL",
+  "FLOW_PROJECT_URL_2",
+  "FLOW_PROJECT_URL_3",
+  "FLOW_PROJECT_URL_4",
+  "FLOW_PROJECT_URL_5",
+  "FLOW_PROJECT_URL_6",
+] as const;
 
 /** Parse one configured project URL; null if it is not a Google Flow URL. */
 function parseFlowUrl(raw: string): string | null {
@@ -335,7 +342,7 @@ function flowProjectKey(url: string): string {
 
 /**
  * The project URL of every usable lane, in lane order. Lane 0 (FLOW_PROJECT_URL) is required and
- * fails exactly as before; links 2 and 3 are optional — blank, invalid or a DUPLICATE project is
+ * fails exactly as before; links 2–6 are optional — blank, invalid or a DUPLICATE project is
  * skipped (never fatal: a typo in link 3 must not stop a run that link 1 can serve).
  */
 export function flowProjectUrls(read: (key: SettingKey) => string = getSetting): string[] {
@@ -687,7 +694,7 @@ export function flowSessionStatus(): FlowSessionStatus {
   };
 }
 
-/** Make `state.lanes` match the configured project links (1–3). Lanes beyond the new count are
+/** Make `state.lanes` match the configured project links (1–6). Lanes beyond the new count are
  *  dropped only once idle, so a settings change never yanks a page out from under a generation. */
 function syncLanes(): FlowLane[] {
   const lanes = state.lanes ?? (state.lanes = []);
@@ -758,7 +765,7 @@ function releaseLane(lane: FlowLane): void {
 /**
  * Run `task` on ONE Flow lane, exclusively — the per-window equivalent of the old process-wide
  * queue. With a single project link this is exactly the old behaviour (one lane, strictly one
- * task at a time). With 2–3 links, up to that many tasks run at once, each in its own window,
+ * task at a time). With 2–6 links, up to that many tasks run at once, each in its own window,
  * and everything inside `task` (openFlowPage, projectUrl, the tab-recycle counter) automatically
  * resolves to that lane via `laneStore`.
  */

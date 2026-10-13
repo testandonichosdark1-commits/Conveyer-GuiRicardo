@@ -97,7 +97,7 @@ async function vidsPage(): Promise<Page> {
     }
     // Its own window, never a tab: a tab added to a Flow window would hide (and freeze) that
     // window's Flow page — background tabs stop rendering.
-    page = await openPageInNewWindow(context, url, 3);
+    page = await openPageInNewWindow(context, url, 6);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
     await page.waitForTimeout(3000);
   }

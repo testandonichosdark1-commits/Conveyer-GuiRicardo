@@ -20,12 +20,16 @@ let mod: Mod;
 const P1 = "https://labs.google/fx/tools/flow/project/aaa";
 const P2 = "https://labs.google/fx/tools/flow/project/bbb";
 const P3 = "https://labs.google/fx/tools/flow/project/ccc";
+const P = (n: number) => `https://labs.google/fx/tools/flow/project/extra${n}`;
 
-async function fresh(urls: [string, string?, string?]): Promise<void> {
+async function fresh(urls: string[]): Promise<void> {
   for (const k of Object.keys(settings)) delete settings[k];
   settings.FLOW_PROJECT_URL = urls[0];
   settings.FLOW_PROJECT_URL_2 = urls[1] ?? "";
   settings.FLOW_PROJECT_URL_3 = urls[2] ?? "";
+  settings.FLOW_PROJECT_URL_4 = urls[3] ?? "";
+  settings.FLOW_PROJECT_URL_5 = urls[4] ?? "";
+  settings.FLOW_PROJECT_URL_6 = urls[5] ?? "";
   delete (globalThis as Record<string, unknown>).__facelessFlowBrowserState;
   vi.resetModules();
   mod = await import("./flow-browser");
@@ -96,6 +100,35 @@ describe("lane scheduler", () => {
     const lanesUsed = await Promise.all(all);
     expect(peak).toBe(3);
     expect(new Set(lanesUsed)).toEqual(new Set([0, 1, 2]));
+  });
+
+  it("runs up to 6 tasks at once with 6 links, never two in one lane", async () => {
+    await fresh([P1, P2, P3, P(4), P(5), P(6)]);
+    expect(mod.flowLaneCount()).toBe(6);
+    const { enqueue, currentLaneIndex } = mod.__laneTesting;
+    const busy = new Set<number>();
+    let peak = 0;
+    const gates: Array<() => void> = [];
+    const all = Array.from({ length: 10 }, () =>
+      enqueue(async () => {
+        const lane = currentLaneIndex()!;
+        expect(busy.has(lane)).toBe(false);
+        busy.add(lane);
+        peak = Math.max(peak, busy.size);
+        await new Promise<void>((r) => gates.push(r));
+        busy.delete(lane);
+        return lane;
+      })
+    );
+    await tick();
+    expect(busy.size).toBe(6);
+    while (gates.length) {
+      gates.shift()!();
+      await tick();
+    }
+    const used = await Promise.all(all);
+    expect(peak).toBe(6);
+    expect(new Set(used).size).toBe(6);
   });
 
   it("with one link stays strictly one at a time (the old behaviour)", async () => {

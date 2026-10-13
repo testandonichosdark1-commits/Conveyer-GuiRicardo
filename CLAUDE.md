@@ -642,11 +642,11 @@ having grabbed a reference the instant a placeholder appeared:
 small run (10–15 beats) first and check every resulting image against its own beat's prompt
 — cheap to eyeball in full, and exactly how v1's bug was actually caught.
 
-### Parallel lanes — up to 3 Flow projects at once (`FLOW_PROJECT_URL_2` / `_3`, 2026-10-12)
+### Parallel lanes — up to 6 Flow projects at once (`FLOW_PROJECT_URL_2` … `_6`, 2026-10-12)
 
 The replacement for raising `FLOW_IMAGE_CONCURRENCY`: parallelism comes from **more Flow
 projects, each in its own Chrome window**, not from several prompts in one project. Settings →
-Google Flow has "link 2" / "link 3" next to the project URL; each configured link is a **lane**.
+Google Flow has "link 2" … "link 6" next to the project URL; each configured link is a **lane**.
 
 - **One lane = one project + one window + one strictly serial queue.** `enqueue()` is now a lane
   scheduler: it takes the first free lane (FIFO wait when all are busy) and runs the task inside
@@ -669,7 +669,7 @@ Google Flow has "link 2" / "link 3" next to the project URL; each configured lin
   page) set that lane aside for 10 min while another lane is healthy (`noteLaneResult`). Credits,
   login and policy failures never count — they are account- or content-wide.
 - **`visualConcurrency()`** adds one beat in flight per extra lane when `AI_PROVIDER=flow_browser`
-  (3 + 2 = 5 with three links) — at 3 beats, mostly real footage, extra windows would sit idle.
+  (3 + 2 = 5 with three links, 3 + 5 = 8 with six) — at 3 beats, mostly real footage, extra windows would sit idle.
 - With ONE link nothing changes: one lane, strictly one task at a time (pinned in `flow-lanes.test.ts`
   together with dedupe, max-N-in-flight / never-two-per-lane, and the cooldown rules).
 - Verified live 2026-10-12: three links open three separate windows, all `visible` and rendering;
