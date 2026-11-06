@@ -1,0 +1,93 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../theme.css">
+<style>
+  .block { position: absolute; left: 330px; top: 0; height: 1080px; display: flex; flex-direction: column; justify-content: center; }
+  .rule { position: absolute; width: 4px; background: var(--parchment); transform-origin: 50% 0; }
+  body.bg-parchment .rule { background: var(--text-dark); }
+  .row { position: relative; align-self: flex-start; margin: 10px 0; }
+  .bar { position: absolute; inset: 0; background: var(--parchment); }
+  .row.gold .bar { background: var(--gold-line); }
+  body.bg-parchment .row:not(.gold) .bar { background: #fbf6ea; }
+  .row.plain .bar { display: none; }
+  .txt {
+    position: relative; padding: 0.04em 0.22em 0.02em;
+    font-family: var(--f-title); font-weight: 700; text-transform: uppercase;
+    line-height: 1.08; letter-spacing: 0.01em; white-space: nowrap; color: var(--text-dark);
+  }
+  .row.plain .txt { color: var(--ink); padding-left: 0; }
+  .strike { position: absolute; left: 0; top: 50%; margin-top: -3px; background: var(--ink); transform-origin: 0 50%; }
+  .row:not(.plain) .strike { background: var(--text-dark); }
+  .edge-rule { position: absolute; left: 120px; right: 120px; height: 2px; background: var(--faint); opacity: 0.6; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script src="../runtime.js"></script>
+<script>
+/*
+ * impact_bars — a short punchline in stacked bars (refs 02:30, 06:42, 07:21). Each line wipes
+ * in on its cueWord (else spread over the first 60%); a `strike` line is crossed out when the
+ * next one lands, the "X became Y" beat of 07:21.
+ */
+window.__template = {
+  async setup(stage, data, ctx) {
+    const { el, animate, scheduleEntries } = GR;
+    const D = ctx.durationMs;
+
+    if (data.label) {
+      const top = el("div", "edge-rule", stage); top.style.top = "130px";
+      const bot = el("div", "edge-rule", stage); bot.style.top = "950px";
+      const label = el("div", "abs tag-label", stage, data.label);
+      label.style.left = "120px"; label.style.top = "92px";
+      [top, bot, label].forEach((n) => animate(n, [{ opacity: 0 }, { opacity: 1 }], { start: 0, duration: 500 }));
+    }
+
+    const block = el("div", "block", stage);
+    const rows = data.lines.map((ln, i) => {
+      const row = el("div", "row" + (ln.gold ? " gold" : "") + (ln.plain ? " plain" : ""), block);
+      row.style.marginLeft = (i * 46) + "px";
+      const bar = el("div", "bar", row);
+      const txt = el("div", "txt", row, ln.text);
+      return { row, bar, txt, ln };
+    });
+
+    // One font size for every line: the largest that keeps the widest line and the stack on screen.
+    let px = 124;
+    // measure the rows themselves: the block is a fixed 1080px flex box, so its own height never changes
+    const stackH = () => { const a = rows[0].row, b = rows[rows.length - 1].row; return b.offsetTop + b.offsetHeight - a.offsetTop; };
+    const fits = () => rows.every((r, i) => r.row.offsetWidth + i * 46 <= 1300) && stackH() <= 700;
+    const apply = () => rows.forEach((r) => (r.txt.style.fontSize = px + "px"));
+    apply();
+    while (px > 54 && !fits()) { px -= 2; apply(); }
+
+    const rule = el("div", "rule", stage);
+    const first = rows[0].row, last = rows[rows.length - 1].row;
+    rule.style.left = "290px";
+    rule.style.top = (first.offsetTop - 6) + "px";
+    rule.style.height = (last.offsetTop + last.offsetHeight - first.offsetTop + 12) + "px";
+    animate(rule, [{ transform: "scaleY(0)" }, { transform: "scaleY(1)" }], { start: 0, duration: 500 });
+
+    const times = scheduleEntries(data.lines, ctx.words, D, { windowStartMs: 250 });
+    rows.forEach((r, i) => {
+      const t = times[i];
+      animate(r.bar, [{ clipPath: "inset(0 100% 0 0)" }, { clipPath: "inset(0 0% 0 0)" }], { start: t, duration: 420 });
+      animate(r.txt, [{ opacity: 0, transform: "translateY(22%)" }, { opacity: 1, transform: "translateY(0)" }], { start: t + 120, duration: 420 });
+      if (r.ln.strike) {
+        const s = el("div", "strike", r.row);
+        s.style.width = r.row.offsetWidth + "px";
+        s.style.height = Math.max(4, Math.round(px * 0.085)) + "px";
+        const at = i + 1 < times.length ? Math.max(times[i + 1], t + 600) : Math.min(D * 0.75, t + 1500);
+        animate(s, [{ transform: "scaleX(0)" }, { transform: "scaleX(1)" }], { start: at, duration: 380 });
+        // on the row, not the text: the text already has an opacity animation, and a second
+        // one would hold opacity 1 from t=0 (its backwards fill) and erase the entry fade
+        animate(r.row, [{ opacity: 1 }, { opacity: 0.6 }], { start: at + 200, duration: 300 });
+      }
+    });
+  },
+};
+</script>
+</body>
+</html>

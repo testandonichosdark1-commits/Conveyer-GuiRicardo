@@ -18,6 +18,7 @@ export type VoiceProviderId =
   | "ai33"
   | "fishaudio"
   | "hume"
+  | "voicebox"
   | "69labs"
   | "heygen"
   | "minimax";
@@ -27,7 +28,7 @@ export type VoiceProviderId =
  * IS the route segment, so adding a provider means adding a route with the same name —
  * no separate slug→URL mapping to keep in sync.
  */
-export type VoicesEndpoint = "elevenlabs" | "heygen" | "fishaudio" | "hume" | "ai84" | "ai33";
+export type VoicesEndpoint = "elevenlabs" | "heygen" | "fishaudio" | "hume" | "ai84" | "ai33" | "voicebox";
 
 export interface VoiceProviderMeta {
   id: VoiceProviderId;
@@ -35,7 +36,7 @@ export interface VoiceProviderMeta {
   label: string;
   /** Option text in the provider <select>. */
   selectLabel: string;
-  /** Setting key holding this provider's API key. */
+  /** Setting key holding this provider's API key. Empty for a local provider with no credential (Voicebox). */
   apiKey: string;
   /** Setting key holding this provider's narration voice id. */
   voiceIdKey: string;
@@ -66,6 +67,10 @@ export const VOICE_PROVIDERS: VoiceProviderMeta[] = [
   // (HUME_AI) and the account's own voices (CUSTOM_VOICE) — no provider field is stored,
   // because a voice referenced by `id` needs none (only the listing call does).
   { id: "hume", label: "Hume AI", selectLabel: "Hume AI (Octave)", apiKey: "HUME_API_KEY", voiceIdKey: "HUME_VOICE_ID", voicesEndpoint: "hume" },
+  // Voicebox runs LOCALLY on the operator's machine (github.com/jamiepine/voicebox): no
+  // account, no key, no cost. Its "voice id" is a Voicebox profile id; the server address
+  // is the only extra setting (blank = http://127.0.0.1:17493).
+  { id: "voicebox", label: "Voicebox", selectLabel: "Voicebox (local, free)", apiKey: "", voiceIdKey: "VOICEBOX_VOICE_ID", voicesEndpoint: "voicebox", extraKeys: [{ key: "VOICEBOX_URL", label: "Voicebox — server URL (blank = http://127.0.0.1:17493)" }] },
   { id: "69labs", label: "69labs", selectLabel: "69labs (ElevenLabs / EdgeTTS / clone)", apiKey: "LABS69_API_KEY", voiceIdKey: "TTS_VOICE_ID" },
   { id: "heygen", label: "HeyGen", selectLabel: "HeyGen", apiKey: "HEYGEN_API_KEY", voiceIdKey: "HEYGEN_VOICE_ID", voicesEndpoint: "heygen" },
   { id: "minimax", label: "MiniMax", selectLabel: "MiniMax", apiKey: "MINIMAX_API_KEY", voiceIdKey: "MINIMAX_VOICE_ID", extraKeys: [{ key: "MINIMAX_GROUP_ID", label: "MiniMax — Group ID" }] },
@@ -169,7 +174,7 @@ export function providerVoiceLabel(id: string | null | undefined): string {
   return `${voiceProviderMeta(id).label} Voice ID`;
 }
 
-export type AiProviderId = "kie" | "69labs" | "magnific" | "runware" | "higgsfield" | "flow_browser" | "manual";
+export type AiProviderId = "kie" | "69labs" | "magnific" | "runware" | "higgsfield" | "flow_browser" | "manual" | "ltx";
 export type AiMedia = "image" | "video";
 
 /** One selectable generation model. `id` is the exact provider string persisted to the setting. */
@@ -220,9 +225,15 @@ export const AI_PROVIDERS: AiProviderMeta[] = [
     selectLabel: "Google Flow (browser — experimental)",
     image: {
       key: "FLOW_IMAGE_MODEL",
+      // Google renamed the "2" tier to "2.1" and added a cheaper "2 Lite" alongside it
+      // (observed live 2026-10-07; the old "nano-banana-2" menu entry no longer exists at
+      // all, so a setting still pointing at it now fails ensureImageModel's exact-match
+      // confirmation outright). The "Custom…" escape (ProviderModelFields) covers the next
+      // rename; this catalog only needs to track the CURRENTLY live tiers.
       models: [
         { id: "nano-banana-pro", label: "Nano Banana Pro", recommended: true },
-        { id: "nano-banana-2", label: "Nano Banana 2" },
+        { id: "nano-banana-2.1", label: "Nano Banana 2.1" },
+        { id: "nano-banana-2-lite", label: "Nano Banana 2 Lite" },
         { id: "nano-banana", label: "Nano Banana" },
       ],
     },
@@ -345,6 +356,7 @@ export const AI_PROVIDERS: AiProviderMeta[] = [
     id: "manual",
     selectLabel: "Manual (paste prompts yourself)",
   },
+  { id: "ltx", selectLabel: "LTX-2.5 / Runpod (cenas com autorização)" },
 ];
 
 export function aiProviderMeta(id: string | null | undefined): AiProviderMeta {

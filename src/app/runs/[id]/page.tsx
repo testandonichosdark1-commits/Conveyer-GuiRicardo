@@ -1,5 +1,7 @@
 "use client";
 import { useEffect, useMemo, useRef, useState, use } from "react";
+import GptLtxBatch from "./GptLtxBatch";
+import VisualProviderToggle from "./VisualProviderToggle";
 import { parseDegraded, DEGRADE_TEXT } from "@/lib/degraded";
 
 interface LogEntry {
@@ -13,6 +15,7 @@ interface LogEntry {
 interface Run {
   id: string;
   title: string | null;
+  config_json?: string;
   status: "pending" | "running" | "done" | "error" | "cancelled" | "interrupted";
   /** Finished, but not as asked — a comma-joined list of codes; decode with parseDegraded. */
   degraded?: string | null;
@@ -56,6 +59,15 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
   const [drive, setDrive] = useState<DriveStatus | null>(null);
   const [uploadingDrive, setUploadingDrive] = useState(false);
   const [resuming, setResuming] = useState(false);
+  // Stable across the GPT/Flow toggle below: gptLtxEnabled is stamped once and never
+  // cleared, so this stays true even after a run is switched to "flow" — unlike reading
+  // aiProvider === "ltx" directly, which would hide this panel the moment someone toggles.
+  const gptLtxRun = useMemo(() => {
+    try {
+      const cfg = JSON.parse(run?.config_json || "{}");
+      return cfg.gptLtxEnabled === true || cfg.aiProvider === "ltx" || cfg.aiProvider === "flow";
+    } catch { return false; }
+  }, [run?.config_json]);
   // Incremental log streaming state (survives polls, resets on remount/refresh):
   //   lastSeenId — highest log id already in `logs`; sent as ?sinceId so each poll
   //                fetches only NEW rows (append, never re-download the history).
@@ -146,6 +158,12 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
   // visual/avatar-stage line means work has started on it — a beat generates many such
   // lines while it's being worked on (searches, scoring, retries), so "seen at least
   // once" lags only slightly behind "fully done", close enough for a rough ETA.
+  // Matches BOTH "Beat N: ..." (the normal English visual/avatar lines) and "Cena N: ..."
+  // (the LTX-provider lines, e.g. "Cena 159: imagem GPT gerada") — a beat the planner
+  // routed straight to AI never produces a "Beat N" line at all, only "Cena N" ones, so
+  // matching "Beat" alone left those beats permanently "untouched": the fraction got
+  // stuck below 1 even after the run finished and moved into assembly, which made the
+  // elapsed/fraction ETA grow without bound instead of settling.
   const { totalBeats, touchedBeats } = useMemo(() => {
     const planned = new Set<number>();
     const touched = new Set<number>();
@@ -153,7 +171,7 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
       const m = /^Beat (\d+): planner /.exec(l.message);
       if (m) planned.add(Number(m[1]));
       else if (l.stage === "visual" || l.stage === "avatar_video") {
-        const t = /^Beat (\d+)/.exec(l.message);
+        const t = /^(?:Beat|Cena) (\d+)/.exec(l.message);
         if (t) touched.add(Number(t[1]));
       }
     }
@@ -348,6 +366,8 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
               paid for are not regenerated.
             </p>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {logs.some((entry) => entry.message.includes("aguardando LTX")) &&
+                <a className="btn-secondary" href="/tools/ltx-scene-test">Preparar cenas LTX</a>}
               <button className="btn" onClick={resume} disabled={resuming}>
                 {resuming ? "Working…" : "Resume run"}
               </button>
@@ -363,6 +383,9 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
             </div>
           </div>
         )}
+
+      {gptLtxRun && <VisualProviderToggle runId={id} />}
+      {gptLtxRun && logs.some(entry => entry.message.includes("aguardando LTX")) && <GptLtxBatch runId={id} />}
 
       {/* ─── Final video ────────────────────────────────────────────────── */}
       {assets?.finalExists && (

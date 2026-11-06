@@ -15,6 +15,14 @@ import { pickTaskId, readTaskState, describeUnparsed } from "./ai33-response";
 import { noteCreditExhausted } from "./credit-exhaustion";
 import { AI33_DEFAULT_BASE } from "./ai33-voices";
 import {
+  voiceboxBaseUrl,
+  voiceboxErrorDetail,
+  voiceboxLanguage,
+  voiceboxUnreachable,
+  readVoiceboxJob,
+  type VoiceboxProfile,
+} from "./voicebox";
+import {
   buildAi84ElevenCreate,
   buildAi84MinimaxCreate,
   type Ai84CreateRequest,
@@ -83,6 +91,9 @@ async function dispatchTts(
     await fishAudioTts(runId, text, outPath, options.voiceOverride, options.speedOverride);
   } else if (provider === "hume") {
     await humeTts(runId, text, outPath, options.voiceOverride, options.speedOverride);
+  } else if (provider === "voicebox") {
+    // Local and free — nothing billed, so nothing metered.
+    await voiceboxTts(runId, text, outPath, options.voiceOverride);
   } else {
     throw new Error(`Unknown TTS provider: ${provider}`);
   }
@@ -1525,6 +1536,110 @@ async function humeTts(
   log(runId, "debug", `Hume TTS (${buf.length} bytes, voice=${voiceId.slice(0, 8)}…, version=${version || "default"})`, {
     stage: "tts",
   });
+}
+
+/**
+ * Voicebox — the operator's own LOCAL voice-cloning server (see services/voicebox.ts for
+ * the contract). Async: `POST /generate` queues the job and returns at once, so we poll
+ * `/history/{id}` and then download `/audio/{id}`.
+ *
+ * Voicebox returns WAV, and every caller here expects an MP3 at `outPath` (the chunk concat
+ * in synthesizeFullScript stream-copies, and the master is always voiceover.mp3), so the WAV
+ * is transcoded with the same libmp3lame 192k/44.1 kHz the upload path uses.
+ *
+ * Free: nothing is billed, so nothing is metered. Audio only — word timings come from the
+ * shared Groq Whisper pass, like every other non-ElevenLabs provider.
+ */
+async function voiceboxTts(runId: string, text: string, outPath: string, voiceOverride?: string | null) {
+  const base = voiceboxBaseUrl();
+  const profileId =
+    voiceOverride && voiceOverride.trim().length > 0 ? voiceOverride.trim() : getSetting("VOICEBOX_VOICE_ID");
+  if (!profileId)
+    throw new Error(
+      "No Voicebox voice available — set VOICEBOX_VOICE_ID in /settings (use “Load voices”), or add a voice_id to the channel profile"
+    );
+
+  const call = async (p: string, init?: RequestInit, timeoutMs = 30_000): Promise<Response> => {
+    try {
+      return await fetch(`${base}${p}`, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (e) {
+      throw new Error(voiceboxUnreachable(base, e));
+    }
+  };
+
+  // The profile carries the language (and the engine Voicebox will pick). Looking it up
+  // first also turns a deleted profile into a clear message instead of a bare 404.
+  const pr = await call(`/profiles/${encodeURIComponent(profileId)}`);
+  if (pr.status === 404)
+    throw new Error(
+      `Voicebox has no voice profile "${profileId}" — it may have been deleted. Pick one again with “Load voices” in /settings.`
+    );
+  if (!pr.ok) throw new Error(`Voicebox ${pr.status}: ${voiceboxErrorDetail(await pr.text())}`);
+  const profile = (await pr.json()) as VoiceboxProfile;
+  const language = voiceboxLanguage(profile.language);
+
+  const cr = await call("/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile_id: profileId, text, language }),
+  });
+  if (!cr.ok) throw new Error(`Voicebox rejected the generation (${cr.status}: ${voiceboxErrorDetail(await cr.text())})`);
+  const created = (await cr.json()) as { id?: string };
+  const genId = created.id;
+  if (!genId) throw new Error("Voicebox returned no generation id");
+  log(runId, "info", `Voicebox generation ${genId.slice(0, 8)}… queued (voice=${profile.name ?? profileId}, ${language})`, {
+    stage: "tts",
+  });
+
+  // Local GPU/CPU synthesis can be slow — and the first call may also load the model — so
+  // the deadline is generous. A transient poll failure is "still running", never run death.
+  const DEADLINE_MS = 45 * 60_000;
+  const started = Date.now();
+  let lastStatus = "";
+  for (;;) {
+    if (Date.now() - started > DEADLINE_MS)
+      throw new Error(`Voicebox generation ${genId} did not finish within ${DEADLINE_MS / 60_000} min (last status: ${lastStatus || "unknown"})`);
+    await new Promise((r) => setTimeout(r, 2000));
+    let row: { status?: string; error?: string | null };
+    try {
+      const hr = await call(`/history/${encodeURIComponent(genId)}`);
+      if (!hr.ok) continue;
+      row = (await hr.json()) as typeof row;
+    } catch {
+      continue;
+    }
+    const s = readVoiceboxJob(row);
+    if (s.state === "done") break;
+    if (s.state === "failed") throw new Error(`Voicebox generation failed: ${s.error}`);
+    if (s.status !== lastStatus) {
+      lastStatus = s.status;
+      log(runId, "debug", `Voicebox generation ${genId.slice(0, 8)}… ${s.status}`, { stage: "tts" });
+    }
+  }
+
+  const ar = await call(`/audio/${encodeURIComponent(genId)}`, undefined, 120_000);
+  if (!ar.ok) throw new Error(`Voicebox audio download failed (${ar.status}: ${voiceboxErrorDetail(await ar.text())})`);
+  const ct = (ar.headers.get("content-type") ?? "").toLowerCase();
+  if (ct.includes("json") || ct.startsWith("text/"))
+    throw new Error(`Voicebox returned ${ct} instead of audio: ${(await ar.text()).slice(0, 300)}`);
+  const buf = Buffer.from(await ar.arrayBuffer());
+  if (buf.length === 0) throw new Error("Voicebox returned an empty audio file (0 bytes)");
+
+  const rawPath = `${outPath}.voicebox-src`;
+  fs.writeFileSync(rawPath, buf);
+  try {
+    const { spawnSync } = await import("node:child_process");
+    const r = spawnSync(
+      resolveFfmpeg(),
+      ["-y", "-i", rawPath, "-vn", "-codec:a", "libmp3lame", "-b:a", "192k", "-ar", "44100", outPath],
+      { stdio: "pipe" }
+    );
+    if (r.status !== 0)
+      throw new Error(`Voicebox audio could not be transcoded to MP3 (ffmpeg rc=${r.status}): ${r.stderr?.toString().slice(-300)}`);
+  } finally {
+    try { fs.unlinkSync(rawPath); } catch {}
+  }
+  log(runId, "debug", `Voicebox TTS (${buf.length} bytes, voice=${profileId.slice(0, 8)}…)`, { stage: "tts" });
 }
 
 async function openaiTts(text: string, outPath: string) {

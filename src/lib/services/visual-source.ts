@@ -4,10 +4,11 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import sharp from "sharp";
 import { getSetting } from "../settings";
+import { resolveCharacterReference } from "../character-reference";
 import { pLimit } from "../plimit";
 import { resolveFfmpeg } from "../ffmpeg-bin";
 import { log } from "../logger";
-import { checkCancelled } from "../cancellation";
+import { checkCancelled, CancelledError } from "../cancellation";
 import { animateStill } from "./still-animator";
 import { animateScene } from "./img2vid";
 import { labs69Image } from "./image-gen";
@@ -42,6 +43,9 @@ import {
 import type { Scene } from "./scene-split";
 import type { Beat } from "./studio-plan";
 import { DATA_DIR, getRunDir } from "../run-paths";
+import { acquireLtxScene, ltxSceneRequest, LtxGenerationPendingError, readLtxInputImage } from "./ltx/pipeline";
+import { generateLtxImageAutomatically } from "./ltx/auto-image";
+import { readLtxNotebookSession, generateLtxClipViaNotebook } from "./ltx/notebook";
 import { ManualGenerationPendingError, appendManualPrompt, findManualFile } from "./manual-pending";
 
 // Provider-level circuit breaker. Profile-level credential/config failures are handled inside
@@ -353,16 +357,132 @@ async function wikimediaSearch(query: string): Promise<ProviderHit[]> {
   return hits;
 }
 
+// ── Museum / library archives (archive look) ─────────────────────────────────────────
+// Public-domain stills from institutional open-access APIs — no key needed. They exist for the
+// historical-documentary look: period paintings, court photographs, engravings, documents.
+// Each returns [] on any non-OK response, like the other free sources.
+
+/** The Metropolitan Museum of Art Open Access — search, then fetch the top objects. */
+export async function metSearch(query: string): Promise<ProviderHit[]> {
+  // v1/search now answers 410 Gone and names v1.1 as its replacement (checked live 2026-11-06);
+  // the reply shape ({total, objectIDs}) is unchanged and v1/objects/{id} still serves the rest.
+  const url = new URL("https://collectionapi.metmuseum.org/public/collection/v1.1/search");
+  url.searchParams.set("hasImages", "true");
+  url.searchParams.set("q", query.slice(0, 120));
+  url.searchParams.set("limit", "12");
+  const resp = await fetch(url, { headers: { "User-Agent": UA } });
+  if (!resp.ok) throw new Error(`Met ${resp.status}`);
+  const data = (await resp.json()) as { objectIDs?: number[] | null };
+  const ids = (data.objectIDs ?? []).slice(0, 12);
+  const objs = await Promise.all(
+    ids.map(async (id) => {
+      try {
+        const r = await fetch(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${id}`, { headers: { "User-Agent": UA } });
+        if (!r.ok) return null;
+        return (await r.json()) as {
+          objectID?: number; isPublicDomain?: boolean; primaryImage?: string; primaryImageSmall?: string;
+          title?: string; artistDisplayName?: string; objectURL?: string;
+        };
+      } catch {
+        return null;
+      }
+    })
+  );
+  const hits: ProviderHit[] = [];
+  for (const o of objs) {
+    if (!o || !o.isPublicDomain || !o.primaryImage) continue;
+    hits.push({
+      kind: "image",
+      url: o.primaryImage,
+      dedupeId: `met:${o.objectID}`,
+      thumbUrl: o.primaryImageSmall || o.primaryImage,
+      author: [o.title, o.artistDisplayName].filter(Boolean).join(" — ").slice(0, 160) || null,
+      sourceUrl: o.objectURL,
+      license: "Public Domain (The Met Open Access)",
+    });
+  }
+  return hits;
+}
+
+/** Art Institute of Chicago — public-domain artworks, images served over IIIF. */
+export async function articSearch(query: string): Promise<ProviderHit[]> {
+  const url = new URL("https://api.artic.edu/api/v1/artworks/search");
+  url.searchParams.set("q", query.slice(0, 120));
+  url.searchParams.set("limit", "20");
+  url.searchParams.set("fields", "id,title,image_id,artist_title,is_public_domain");
+  url.searchParams.set("query[term][is_public_domain]", "true");
+  const resp = await fetch(url, { headers: { "User-Agent": UA, "AIC-User-Agent": UA } });
+  if (!resp.ok) throw new Error(`Art Institute ${resp.status}`);
+  const data = (await resp.json()) as {
+    data?: { id: number; title?: string; image_id?: string | null; artist_title?: string | null; is_public_domain?: boolean }[];
+    config?: { iiif_url?: string };
+  };
+  const iiif = data.config?.iiif_url || "https://www.artic.edu/iiif/2";
+  return (data.data ?? [])
+    .filter((a) => a.image_id && a.is_public_domain !== false)
+    .map((a): ProviderHit => ({
+      kind: "image",
+      url: `${iiif}/${a.image_id}/full/1686,/0/default.jpg`,
+      dedupeId: `artic:${a.id}`,
+      thumbUrl: `${iiif}/${a.image_id}/full/400,/0/default.jpg`,
+      author: [a.title, a.artist_title].filter(Boolean).join(" — ").slice(0, 160) || null,
+      sourceUrl: `https://www.artic.edu/artworks/${a.id}`,
+      license: "Public Domain (Art Institute of Chicago)",
+    }));
+}
+
+/** Library of Congress — Prints & Photographs (historical photos, many no-known-restrictions). */
+export async function locSearch(query: string): Promise<ProviderHit[]> {
+  const url = new URL("https://www.loc.gov/photos/");
+  url.searchParams.set("q", query.slice(0, 120));
+  url.searchParams.set("fo", "json");
+  url.searchParams.set("c", "20");
+  const resp = await fetch(url, { headers: { "User-Agent": UA } });
+  if (!resp.ok) throw new Error(`Library of Congress ${resp.status}`);
+  const data = (await resp.json()) as { results?: { id?: string; title?: string; url?: string; image_url?: string[] }[] };
+  const hits: ProviderHit[] = [];
+  for (const r of data.results ?? []) {
+    const imgs = (r.image_url ?? []).map((u) => u.split("#")[0]).filter((u) => /^https?:\/\//.test(u));
+    if (imgs.length === 0) continue;
+    // image_url lists the same picture smallest → largest.
+    const full = imgs[imgs.length - 1];
+    hits.push({
+      kind: "image",
+      url: full,
+      dedupeId: `loc:${r.id ?? full}`,
+      thumbUrl: imgs[Math.min(1, imgs.length - 1)],
+      author: r.title?.slice(0, 160) ?? null,
+      sourceUrl: r.url,
+      license: "Library of Congress (check rights statement)",
+    });
+  }
+  return hits;
+}
+
 const PROVIDERS: Record<string, (q: string, runId: string, minDurSec?: number) => Promise<ProviderHit[]>> = {
   pexels: (q, runId, minDurSec) => pexelsSearch(q, runId, minDurSec),
   pixabay: async (q, _runId, minDurSec) => [...(await safe(pixabayVideoSearch(q, minDurSec))), ...(await safe(pixabayImageSearch(q)))],
   openverse: (q) => openverseSearch(q),
   wikimedia: (q) => wikimediaSearch(q),
+  met: (q) => metSearch(q),
+  artic: (q) => articSearch(q),
+  loc: (q) => locSearch(q),
   archive: (q) => archiveSearch(q),
   storyblocks: (q, runId, minDurSec) => storyblocksProvider(q, runId, minDurSec),
   web: (q, runId) => googleCseSearch(q, runId),
   wigolo: (q, runId) => wigoloSearch(q, runId),
 };
+
+/**
+ * Still photos only, from the FREE photo sources (wigolo, Openverse, Pixabay images when a
+ * key is set) — for product-cutout.ts, which needs a product shot to cut out, not footage.
+ * Independent of FOOTAGE_SOURCES on purpose: that setting governs what fills b-roll beats,
+ * and never reaching a paid source here is the point.
+ */
+export async function searchStillPhotos(query: string, runId: string): Promise<ProviderHit[]> {
+  const lists = await Promise.all([safe(wigoloSearch(query, runId)), safe(openverseSearch(query)), safe(pixabayImageSearch(query))]);
+  return lists.flat().filter((h) => h.kind === "image");
+}
 
 /**
  * Storyblocks — the only PAID source here, so it behaves differently in one way that
@@ -1631,6 +1751,11 @@ const PROVIDER_WEIGHT: Record<string, number> = {
   pixabay: 2,
   youtube: 1,
   wikimedia: -1,
+  // Museum / library archives — the same tier as Wikimedia (public-domain stills). Listed so they
+  // never default to 0 and outrank Wikimedia purely by omission.
+  met: -1,
+  artic: -1,
+  loc: -1,
   openverse: -2,
   web: -3,
   // Same tier as `web` — the same kind of source (unlicensed open-web stills). The entry is
@@ -1657,6 +1782,11 @@ const PREFILTER_PROVIDER_WEIGHT: Record<string, number> = {
   pixabay: 2,
   youtube: 1,
   wikimedia: -1,
+  // Museum / library archives — the same tier as Wikimedia (public-domain stills). Listed so they
+  // never default to 0 and outrank Wikimedia purely by omission.
+  met: -1,
+  artic: -1,
+  loc: -1,
   openverse: -2,
   web: -3,
   // Mirrors PROVIDER_WEIGHT above — see the note there for why omission is not neutral.
@@ -2152,7 +2282,7 @@ async function materialize(
   }
   const tmpImg = path.join(os.tmpdir(), `kb_${runId.slice(0, 8)}_${beat.index}${path.extname(new URL(hit.url).pathname) || ".jpg"}`);
   await downloadToFile(hit.url, tmpImg, { "User-Agent": UA });
-  await animateStill({ imagePath: tmpImg, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
+  await animateStill({ imagePath: tmpImg, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
   try {
     fs.unlinkSync(tmpImg);
   } catch {}
@@ -3435,7 +3565,7 @@ async function acquireAi(
   const flowFallbackChain = selectedFlowBrowser && (flowFallbackSetting === "chain" || flowFallbackVids);
   const flowFallbackToKie = selectedFlowBrowser && (flowFallbackSetting === "kie" || flowFallbackChain);
   const style = (aiStyle ?? getSetting("AI_IMAGE_STYLE")) || "";
-  const configuredCharacterRef = (getSetting("AI_CHARACTER_REFERENCE_PATH") || "").trim();
+  const configuredCharacterRef = resolveCharacterReference(getSetting("AI_CHARACTER_REFERENCE_PATH"));
   const providerSupportsCharacterRef = provider === "kie" || provider === "flow_browser";
   const useCharacterRef = providerSupportsCharacterRef && !!configuredCharacterRef && beatWantsCharacterReference(beat);
   const characterReferencePath = useCharacterRef && fs.existsSync(configuredCharacterRef) ? configuredCharacterRef : "";
@@ -3528,6 +3658,74 @@ async function acquireAi(
   // whose vendor charges extra for that) pastes prompts by hand instead. See
   // manual-pending.ts's doc comment for the full contract; studio-pipeline.ts is what turns
   // ManualGenerationPendingError into a run-wide pause rather than a per-beat failure.
+  if (provider === "ltx") {
+    const { media } = resolveAiMedia(beat, mediaOverride);
+    const runDir = getRunDir(runId);
+    const request = { index: beat.index, prompt: buildPrompt("").slice(0, 6000),
+      imageDescription: [base, contextAnchor].filter(Boolean).join(", ").slice(0, 6000),
+      media, durationSec: beatDurSec, resolution: resolution || "1920x1080" };
+
+    if (media === "video") {
+      // A Runpod round always needs an explicit, budget-capped authorization — see
+      // /tools/ltx-scene-test and workers/ltx-pod. A connected Colab/Kaggle notebook is the
+      // one exception: it runs on the operator's own notebook quota, so a pending scene is
+      // generated there inline (start frame via GPT first). Any failure, including a local
+      // processing error after a clip is already on disk, still pauses the run rather than
+      // silently reusing a neighbour — Resume or the manual MP4 import picks it up.
+      let generatedHere = false;
+      try {
+        let source: string;
+        try {
+          source = await acquireLtxScene(runDir, request);
+        } catch (error) {
+          const notebook = error instanceof LtxGenerationPendingError ? await readLtxNotebookSession() : null;
+          if (!notebook) throw error;
+          const fingerprint = ltxSceneRequest(request).fingerprint;
+          if (!(await readLtxInputImage(runDir, beat.index, fingerprint))) {
+            log(runId, "info", `Cena ${beat.index}: gerando quadro inicial (GPT) para o LTX`, { stage: "visual" });
+            await generateLtxImageAutomatically(runDir, runId, beat.index, fingerprint, request.imageDescription || request.prompt);
+          }
+          log(runId, "info", `Cena ${beat.index}: gerando clipe LTX no notebook (${notebook.gpu})`, { stage: "visual" });
+          try {
+            await generateLtxClipViaNotebook(runDir, beat.index, fingerprint, { session: notebook });
+          } catch (notebookError) {
+            const cause = (notebookError as Error).cause;
+            const detail = cause instanceof Error ? cause.message : (notebookError as Error).message;
+            log(runId, "warn", `Cena ${beat.index}: notebook LTX falhou — ${detail.slice(0, 300)}`, { stage: "visual" });
+            throw new LtxGenerationPendingError(beat.index);
+          }
+          generatedHere = true;
+          source = await acquireLtxScene(runDir, request);
+        }
+        fs.copyFileSync(source, outPath);
+      } catch (error) {
+        if (error instanceof CancelledError || error instanceof LtxGenerationPendingError) throw error;
+        log(runId, "warn", `Cena ${beat.index}: não foi possível preparar o arquivo LTX local (${(error as Error).message.slice(0, 200)}). Retome após conferir a cena.`, { stage: "visual" });
+        throw new LtxGenerationPendingError(beat.index);
+      }
+      log(runId, "info", generatedHere ? `Cena ${beat.index}: clipe LTX gerado no notebook` : `Cena ${beat.index}: LTX reaproveitado localmente`, { stage: "visual" });
+      return { path: outPath, kind: "ai", provider: generatedHere ? "ltx:notebook" : "ltx:video" };
+    }
+
+    // Images: generated automatically through the exclusive Codex account, inline, no
+    // manual batch/approval — a still only spends the operator's own Codex plan quota, not
+    // GPU dollars, so there is nothing here that needs a human in the loop. Any failure
+    // (generation or local processing) is an ORDINARY beat failure: it falls through to
+    // the normal neighbour-reuse path below, never a run-wide pause.
+    let source: string;
+    try {
+      source = await acquireLtxScene(runDir, request);
+    } catch (error) {
+      if (error instanceof CancelledError || !(error instanceof LtxGenerationPendingError)) throw error;
+      const fingerprint = ltxSceneRequest(request).fingerprint;
+      await generateLtxImageAutomatically(runDir, runId, beat.index, fingerprint, request.imageDescription || request.prompt);
+      source = await acquireLtxScene(runDir, request);
+    }
+    await animateStill({ imagePath: source, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
+    log(runId, "info", `Cena ${beat.index}: imagem GPT gerada`, { stage: "visual" });
+    return { path: outPath, kind: "ai", provider: "ltx:image" };
+  }
+
   if (provider === "manual") {
     const { media, reason } = resolveAiMedia(beat, mediaOverride);
     log(runId, "debug", `Beat ${beat.index}: Manual media = ${media} (reason=${reason})`, { stage: "visual" });
@@ -3540,7 +3738,7 @@ async function acquireAi(
         return { path: outPath, kind: "ai", provider: "manual:video" };
       }
       const score = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, existing);
-      await animateStill({ imagePath: existing, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
+      await animateStill({ imagePath: existing, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
       log(runId, "info", `Beat ${beat.index}: using manually generated image (${path.basename(existing)}) + Ken Burns — match ${score}%`, { stage: "visual" });
       return { path: outPath, kind: "ai", provider: "manual:image" };
     }
@@ -3600,7 +3798,7 @@ async function acquireAi(
       }
     }
     if (best) {
-      await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
+      await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
       try { fs.unlinkSync(best.path); } catch {}
       log(runId, "info", `Beat ${beat.index}: AI still via Magnific/Mystic + Ken Burns — match ${best.score}%`, { stage: "visual" });
       return { path: outPath, kind: "ai", provider: "magnific:mystic" };
@@ -3654,7 +3852,7 @@ async function acquireAi(
       }
     }
     if (best) {
-      await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
+      await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
       try { fs.unlinkSync(best.path); } catch {}
       log(runId, "info", `Beat ${beat.index}: AI still via Higgsfield/Soul + Ken Burns — match ${best.score}%`, { stage: "visual" });
       return { path: outPath, kind: "ai", provider: "higgsfield:soul" };
@@ -3751,7 +3949,7 @@ async function acquireAi(
         const vScore = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, vidsTmp);
         vidsConsecutiveFailures.delete(runId);
         if (vScore >= threshold) {
-          await animateStill({ imagePath: vidsTmp, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
+          await animateStill({ imagePath: vidsTmp, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
           try { fs.unlinkSync(vidsTmp); } catch {}
           log(runId, "info", `Beat ${beat.index}: AI still via Google Vids/Nano Banana (${shot.width}x${shot.height}) + Ken Burns — match ${vScore}%`, { stage: "visual" });
           return { path: outPath, kind: "ai", provider: "vids:nano-banana" };
@@ -3883,7 +4081,7 @@ async function acquireAi(
       }
       }
       if (best) {
-        await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
+        await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
         try { fs.unlinkSync(best.path); } catch {}
         // Reflects whichever model actually produced this image — the configured
         // FLOW_IMAGE_MODEL, or FLOW_IMAGE_MODEL_FALLBACK if the primary hit a limit and
@@ -3907,7 +4105,7 @@ async function acquireAi(
           const vScore = maxAttempts === 1 ? 100 : await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, vidsTmp);
           vidsConsecutiveFailures.delete(runId);
           if (vScore >= threshold) {
-            await animateStill({ imagePath: vidsTmp, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
+            await animateStill({ imagePath: vidsTmp, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
             try { fs.unlinkSync(vidsTmp); } catch {}
             log(runId, "info", `Beat ${beat.index}: AI still via Google Vids/Nano Banana (${shot.width}x${shot.height}) + Ken Burns — match ${vScore}% (Flow fallback)`, { stage: "visual" });
             return { path: outPath, kind: "ai", provider: "vids:nano-banana" };
@@ -3988,7 +4186,7 @@ async function acquireAi(
           });
           const cfScore = await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, cfImg);
           if (cfScore >= threshold) {
-            await animateStill({ imagePath: cfImg, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
+            await animateStill({ imagePath: cfImg, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
             try { fs.unlinkSync(cfImg); } catch {}
             log(runId, "info", `Beat ${beat.index}: AI still via Cloudflare/FLUX.2 Klein [${cfGeneration.profileLabel}] + Ken Burns — match ${cfScore}% (later providers avoided)`, { stage: "visual" });
             return { path: outPath, kind: "ai", provider: "cloudflare:flux-2-klein" };
@@ -4027,7 +4225,7 @@ async function acquireAi(
           await generatePollinationsImage(buildPrompt(""), pollImg, aspect);
           const pollScore = await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, pollImg);
           if (pollScore >= threshold) {
-            await animateStill({ imagePath: pollImg, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
+            await animateStill({ imagePath: pollImg, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
             try { fs.unlinkSync(pollImg); } catch {}
             log(runId, "info", `Beat ${beat.index}: AI still via Pollinations/${pollModel} + Ken Burns — match ${pollScore}% (Meta/kie.ai avoided)`, { stage: "visual" });
             return { path: outPath, kind: "ai", provider: `pollinations:${pollModel}` };
@@ -4061,7 +4259,7 @@ async function acquireAi(
           });
           const metaScore = await scoreLocalImage(runId, beat.index, gateQuery, beat.text, videoContext, metaImg);
           if (metaScore >= threshold) {
-            await animateStill({ imagePath: metaImg, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
+            await animateStill({ imagePath: metaImg, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
             try { fs.unlinkSync(metaImg); } catch {}
             log(runId, "info", `Beat ${beat.index}: AI still via Meta Muse/${metaModel} + Ken Burns — match ${metaScore}% (kie.ai avoided)`, { stage: "visual" });
             return { path: outPath, kind: "ai", provider: `meta:${metaModel}` };
@@ -4126,7 +4324,7 @@ async function acquireAi(
       }
     }
     if (best) {
-      await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
+      await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
       try { fs.unlinkSync(best.path); } catch {}
       log(runId, "info", `Beat ${beat.index}: AI still via kie.ai/nano-banana + Ken Burns — match ${best.score}%`, { stage: "visual" });
       return { path: outPath, kind: "ai", provider: "kie:nano-banana" };
@@ -4189,7 +4387,7 @@ async function acquireAi(
         }
       }
       if (best) {
-        await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
+        await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
         try { fs.unlinkSync(best.path); } catch {}
         log(runId, "info", `Beat ${beat.index}: AI still via Runware + Ken Burns — match ${best.score}%`, { stage: "visual" });
         return { path: outPath, kind: "ai", provider: "runware" };
@@ -4241,7 +4439,7 @@ async function acquireAi(
         }
       }
       if (best) {
-        await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution });
+        await animateStill({ imagePath: best.path, outPath, durationSec: beatDurSec, zoomOut: beat.index % 2 === 1, resolution, beatIndex: beat.index });
         try { fs.unlinkSync(best.path); } catch {}
         log(runId, "info", `Beat ${beat.index}: AI still via 69labs + Ken Burns — match ${best.score}%`, { stage: "visual" });
         return { path: outPath, kind: "ai", provider: "69labs:image" };

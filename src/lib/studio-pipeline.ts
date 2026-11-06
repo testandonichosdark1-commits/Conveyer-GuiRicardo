@@ -1,3 +1,4 @@
+import { gptLtxRunConfig, gptLtxOverrides } from "./services/gpt-ltx-config";
 import path from "node:path";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -24,10 +25,16 @@ import { rebuildSceneAssetsFromDisk, syncRunToDrive } from "./services/run-uploa
 import type { HeygenEngine } from "./pricing";
 import { beginRun, endRun, pauseRunForOperator } from "./run-lifecycle";
 import { noteCreditExhausted } from "./services/credit-exhaustion";
+import { LtxGenerationPendingError } from "./services/ltx/pipeline";
 import { ManualGenerationPendingError, manualMediaDir, manualPromptsPath } from "./services/manual-pending";
 import { joinDegraded, type DegradeCode } from "./degraded";
 import { beginStoryblocksRun } from "./services/storyblocks";
 import { FlowBrowserError } from "./services/flow-browser";
+import { renderGraphicBeat } from "./services/graphic-beat";
+import { textGraphicFor } from "./services/graphic-fallback";
+import type { WordTiming } from "./services/elevenlabs-voiceover";
+import { resolveAnchorPlan, renderAnchorBeat } from "./services/anchor-images";
+import { visualWorldPath, readVisualWorld, withWorldAnchor, type VisualWorld } from "./services/visual-world";
 
 /**
  * How many beats are acquired at once (VISUAL_CONCURRENCY, default 3). With Google Flow as the AI
@@ -98,6 +105,11 @@ interface StudioConfig {
    * operator picked AI media = "auto"; undefined = the planner decides per beat, which
    * is what every run created before this feature replays on Resume. */
   aiVideoPercent: number | undefined;
+  /** Live toggle (GptLtxBatch's sibling switch, `/api/runs/[id]/visual-provider`), re-read
+   *  fresh on every readConfig call — not just at creation — so flipping it takes effect
+   *  on the next Resume without snapshotting the OLD choice forever. */
+  aiProvider?: "ltx" | "flow";
+  aiMedia?: "auto";
   aiStyle: string | undefined;
   format: string | undefined;
   visualPrompt: string | undefined;
@@ -120,6 +132,11 @@ interface StudioConfig {
    *  edited AFTER the run was created still apply on Resume — unlike the avatar
    *  snapshot, these are account-config, not a billable choice that must stay pinned. */
   channelId: number | undefined;
+  /** Graphic beats (docs/SPEC-motion-graphics.md), snapshotted by /api/studio only when the
+   *  run's channel (or the global default) turned them on. Undefined → the planner never
+   *  runs the graphic pass and the run is byte-identical to before the feature. When set,
+   *  the avatar is off for the run (spec 3.4: AVATAR_FREQUENCY_PERCENT treated as 0). */
+  graphics: { percent: number; theme?: string } | undefined;
 }
 
 function readConfig(runId: string): StudioConfig {
@@ -139,6 +156,11 @@ function readConfig(runId: string): StudioConfig {
       cfg.aiVideoPercent != null && Number.isFinite(Number(cfg.aiVideoPercent))
         ? Math.max(0, Math.min(100, Number(cfg.aiVideoPercent)))
         : undefined,
+    // Read before the spread below: gptLtxRunConfig only re-derives this for "ltx" (and
+    // sets aiMedia/aiVideoPercent alongside it), so a run toggled to "flow" would
+    // otherwise lose the signal entirely (gptLtxRunConfig returns {} for it).
+    aiProvider: cfg.aiProvider === "ltx" || cfg.aiProvider === "flow" ? cfg.aiProvider : undefined,
+    ...gptLtxRunConfig(cfg),
     aiStyle: typeof cfg.aiStyle === "string" && cfg.aiStyle.trim() ? cfg.aiStyle.trim() : undefined,
     format: typeof cfg.format === "string" && /^\d+\s*[x×]\s*\d+$/i.test(cfg.format) ? cfg.format.trim() : undefined,
     visualPrompt: typeof cfg.visualPrompt === "string" && cfg.visualPrompt.trim() ? cfg.visualPrompt.trim() : undefined,
@@ -151,7 +173,104 @@ function readConfig(runId: string): StudioConfig {
     channelId: Number.isFinite(Number((cfg as { channelId?: unknown }).channelId))
       ? Number((cfg as { channelId?: unknown }).channelId)
       : undefined,
+    graphics: readGraphicsConfig((cfg as { graphics?: unknown }).graphics),
   };
+}
+
+function readGraphicsConfig(raw: unknown): StudioConfig["graphics"] {
+  if (!raw || typeof raw !== "object") return undefined;
+  const g = raw as { percent?: unknown; theme?: unknown };
+  const percent = Number(g.percent);
+  if (!Number.isFinite(percent) || percent <= 0) return undefined;
+  return { percent: Math.min(100, percent), ...(typeof g.theme === "string" && g.theme ? { theme: g.theme } : {}) };
+}
+
+/**
+ * A graphic beat's visual: its rendered motion graphic, or — on ANY render failure — null
+ * with the beat flipped to "broll", so the caller's ordinary b-roll path fills it with the
+ * b-roll fields the planner kept on it. A graphic must never take the run down (spec 3.2).
+ */
+async function graphicVisual(
+  runId: string,
+  beat: Beat,
+  words: WordTiming[],
+  graphicsDir: string,
+  resolution: string | undefined,
+  tally: { rendered: number; fallback: number; reused: number },
+  reuse: boolean
+): Promise<string | null> {
+  if (beat.layout !== "graphic" || !beat.graphic) return null;
+  const out = path.join(graphicsDir, `beat_${String(beat.index).padStart(4, "0")}.mp4`);
+  if (reuse && isReusableClip(out)) {
+    tally.reused++;
+    return out;
+  }
+  try {
+    const p = await renderGraphicBeat(runId, beat, words, out, resolution);
+    tally.rendered++;
+    return p;
+  } catch (e) {
+    if (e instanceof CancelledError) throw e;
+    log(runId, "warn", `Beat ${beat.index} graphic ${beat.graphic.template} failed (${(e as Error).message.slice(0, 160)}) — rendering it as b-roll`, { stage: "visual" });
+    tally.fallback++;
+    beat.layout = "broll";
+    return null;
+  }
+}
+
+/**
+ * Graphics runs only: a b-roll beat that ended with NO visual becomes a text graphic of its
+ * own narration (graphic-fallback.ts) instead of repeating a neighbour's shot. Templates are
+ * chosen in order first, so two adjacent failures never both become kinetic_quote; renders
+ * then run in parallel. A beat whose text graphic also fails is left to the neighbour fill.
+ */
+async function fillFailedBeatsWithGraphics(
+  runId: string,
+  renderBeats: RenderBeat[],
+  words: WordTiming[],
+  graphicsDir: string,
+  cfg: StudioConfig
+): Promise<void> {
+  if (!cfg.graphics) return;
+  const tpl = renderBeats.map((b) => (b.layout === "graphic" ? b.graphic?.template : undefined));
+  const jobs: { b: RenderBeat; spec: NonNullable<Beat["graphic"]> }[] = [];
+  renderBeats.forEach((b, i) => {
+    if (b.visualPath || b.layout !== "broll") return;
+    const spec = textGraphicFor(b.text, [tpl[i - 1], tpl[i + 1]], cfg.graphics!.theme);
+    if (!spec) return;
+    tpl[i] = spec.template;
+    jobs.push({ b, spec });
+  });
+  let done = 0;
+  await Promise.all(jobs.map(async ({ b, spec }) => {
+    const out = path.join(graphicsDir, `beat_${String(b.index).padStart(4, "0")}.mp4`);
+    try {
+      b.visualPath = isReusableClip(out) ? out : await renderGraphicBeat(runId, { ...b, layout: "graphic", graphic: spec }, words, out, cfg.format);
+      b.layout = "graphic";
+      b.graphic = spec;
+      done++;
+    } catch (e) {
+      if (e instanceof CancelledError) throw e;
+      log(runId, "warn", `Beat ${b.index}: text graphic fallback failed (${(e as Error).message.slice(0, 120)}) — will reuse a neighbour`, { stage: "visual" });
+    }
+  }));
+  if (done) log(runId, "info", `${done} beat(s) with no visual shown as a text graphic of their narration (no repeated shot)`, { stage: "visual" });
+}
+
+function readWordsJson(runDir: string): WordTiming[] {
+  try {
+    const w = JSON.parse(fs.readFileSync(path.join(runDir, "words.json"), "utf-8"));
+    return Array.isArray(w) ? w : [];
+  } catch {
+    return [];
+  }
+}
+
+function logGraphicTally(runId: string, t: { rendered: number; fallback: number; reused: number }): void {
+  if (t.rendered + t.fallback + t.reused === 0) return;
+  log(runId, t.fallback ? "warn" : "info",
+    `Graphic beats: ${t.rendered} rendered${t.reused ? ` · ${t.reused} reused from disk` : ""} · ${t.fallback} fell back to b-roll`,
+    { stage: "visual" });
 }
 
 /**
@@ -167,6 +286,7 @@ function readConfig(runId: string): StudioConfig {
 function activateChannelOverrides(cfg: StudioConfig): void {
   const channel = cfg.channelId != null ? getChannel(cfg.channelId) : null;
   const overrides = channelSettingOverrides(channel);
+  Object.assign(overrides, gptLtxOverrides(cfg));
   if (Object.keys(overrides).length) setChannelSettingOverrides(overrides);
   else clearChannelSettingOverrides();
 }
@@ -392,7 +512,8 @@ export async function runStudioPipeline(
     log(
       runId,
       "info",
-      `Pipeline started (v${APP_VERSION}) · mode=${cfg.visualMode} · ${cfg.secondsPerVisual}s/visual · avatar=${avatar ? `${cfg.avatarPercent}%` : "none"} · real=${cfg.realPercent}%${strictReal ? " · real-footage-only (never AI)" : ""}`,
+      `Pipeline started (v${APP_VERSION}) · mode=${cfg.visualMode} · ${cfg.secondsPerVisual}s/visual · avatar=${avatar ? `${cfg.avatarPercent}%` : "none"} · real=${cfg.realPercent}%${strictReal ? " · real-footage-only (never AI)" : ""}` +
+        (cfg.graphics ? ` · graphics=${cfg.graphics.percent}% (avatar off for this run)` : ""),
       { stage: "pipeline" }
     );
 
@@ -438,9 +559,12 @@ export async function runStudioPipeline(
     // 2. Plan beats.
     const planTitleRow = getTitleStmt.get(runId) as { title: string | null } | undefined;
     let detectedStructure: VideoStructure | null = null;
+    let visualWorld: VisualWorld | null = null;
     const beats = await planBeats(voiceover.words, {
       secondsPerVisual: cfg.secondsPerVisual,
-      avatarPercent: cfg.avatarPercent,
+      // spec 3.4: with graphic beats on, the avatar is off for the run
+      avatarPercent: cfg.graphics ? 0 : cfg.avatarPercent,
+      graphics: cfg.graphics,
       realPercent: cfg.realPercent,
       aiVideoPercent: cfg.aiVideoPercent,
       hasAvatar: !!avatar,
@@ -451,7 +575,15 @@ export async function runStudioPipeline(
       // overlays are on (planBeats ignores it otherwise). Falls back to the script text.
       title: planTitleRow?.title ?? undefined,
       onStructure: (s) => { detectedStructure = s; }, // provenance snapshot, persisted below
+      onVisualWorld: (w) => { visualWorld = w; },
     });
+    // Persisted so Resume anchors AI prompts / scoring on the same world (it re-plans nothing).
+    const world = visualWorld as VisualWorld | null;
+    if (world) {
+      try {
+        fs.writeFileSync(visualWorldPath(runDir), JSON.stringify(world, null, 2), "utf-8");
+      } catch { /* the anchor below still applies to this execution */ }
+    }
     if (beats.length === 0) throw new Error("No beats produced from the voiceover.");
 
     // Provenance snapshot (observability only — rendering/resume use beats.json, never this).
@@ -515,7 +647,9 @@ export async function runStudioPipeline(
     // rather than typed. In script mode `script` is non-empty (guarded above), so this
     // resolves to `script` and the expression is byte-identical to what it was.
     const contextSource = script.trim() ? script : voiceover.words.map((w) => w.word).join(" ");
-    const videoContext = contextSource.replace(/\s+/g, " ").trim().slice(0, 400);
+    // With a visual world, its one-line anchor LEADS: the AI-image anchor reads only the first
+    // 160 chars, which otherwise are the script's opening words and may never name the subject.
+    const videoContext = withWorldAnchor(world, contextSource.replace(/\s+/g, " ").trim()).slice(0, 400);
 
     // Observability only (Patch 2.0b): realized visual source per beat, keyed by
     // beat.index. "real" = stock/footage hit (res.kind !== "ai"), "ai" = generated
@@ -528,6 +662,9 @@ export async function runStudioPipeline(
     /** Beats waiting on AI_PROVIDER=manual — never filled from a neighbour, never assembled
      *  into a finished video until the operator supplies them. See manual-pending.ts. */
     const manualPendingBeats: number[] = [];
+    const ltxPendingBeats: number[] = [];
+    const graphicsDir = path.join(runDir, "graphics");
+    const graphicTally = { rendered: 0, fallback: 0, reused: 0 };
 
     /**
      * Avatar beats the plan asked for, counted BEFORE the loop: a beat that fails is
@@ -543,13 +680,31 @@ export async function runStudioPipeline(
     // beats wind down cleanly and no late rejection becomes an unhandledRejection
     // (Promise.all would reject on the first and orphan the siblings). We surface
     // the cancel via the explicit checkCancelled right after.
+    // Protagonist anchor images (channel folder) — empty unless the channel set one.
+    const anchorPlan = resolveAnchorPlan(beats);
+    if (anchorPlan.size > 0) log(runId, "info", `Anchor images: ${anchorPlan.size} beat(s) will show the protagonist's own photos`, { stage: "visual" });
+
     const settledBeats = await Promise.allSettled(
       beats.map(async (beat): Promise<RenderBeat> => {
-        let visualPath: string | null = null;
+        // Graphic beat → its motion graphic; on failure it is now "broll" and falls through.
+        let visualPath: string | null = await graphicVisual(runId, beat, voiceover.words, graphicsDir, cfg.format, graphicTally, false);
         let avatarClipPath: string | null = null;
 
+        // Anchor image for this beat (protagonist's own photo) — before any search/generation.
+        const anchor = beat.layout !== "avatar" && !visualPath ? anchorPlan.get(beat.index) : undefined;
+        if (anchor) {
+          try {
+            const out = path.join(brollDir, `beat_${String(beat.index).padStart(4, "0")}.mp4`);
+            visualPath = await renderAnchorBeat(beat, anchor, out, cfg.format);
+            actualSource.set(beat.index, "real");
+          } catch (e) {
+            log(runId, "warn", `Beat ${beat.index} anchor image failed (${(e as Error).message.slice(0, 120)}) — using the normal visual`, { stage: "visual" });
+            visualPath = null;
+          }
+        }
+
         // B-roll for broll/split beats.
-        if (beat.layout !== "avatar") {
+        if (beat.layout !== "avatar" && !visualPath) {
           try {
             const out = path.join(brollDir, `beat_${String(beat.index).padStart(4, "0")}.mp4`);
             const res = await limitVisual(() => acquireVisual(runId, beat, out, usedIds, { aiStyle: cfg.aiStyle, resolution: cfg.format, videoContext, topicPool, strictReal }));
@@ -561,7 +716,8 @@ export async function runStudioPipeline(
             if (e instanceof FlowBrowserError && !isFlowBeatExhausted(e)) throw e; // strict Flow-only mode fails closed; never reuse an unrelated image
             if (e instanceof ManualGenerationPendingError) {
               manualPendingBeats.push(beat.index);
-              log(runId, "info", `Beat ${beat.index}: waiting for manual AI generation — prompt saved`, { stage: "visual" });
+              if (e instanceof LtxGenerationPendingError) ltxPendingBeats.push(beat.index);
+              log(runId, "info", e instanceof LtxGenerationPendingError ? `Cena ${beat.index}: aguardando LTX autorizado` : `Beat ${beat.index}: waiting for manual AI generation — prompt saved`, { stage: "visual" });
               visualPath = null; // never filled from a neighbour — see the pause check after this loop
             } else {
               log(runId, "warn", `Beat ${beat.index} visual failed (${(e as Error).message.slice(0, 120)}) — will reuse a neighbour`, {
@@ -610,7 +766,8 @@ export async function runStudioPipeline(
                 if (e instanceof FlowBrowserError && !isFlowBeatExhausted(e)) throw e;
                 if (e instanceof ManualGenerationPendingError) {
                   manualPendingBeats.push(beat.index);
-                  log(runId, "info", `Beat ${beat.index}: waiting for manual AI generation — prompt saved`, { stage: "visual" });
+                  if (e instanceof LtxGenerationPendingError) ltxPendingBeats.push(beat.index);
+                  log(runId, "info", e instanceof LtxGenerationPendingError ? `Cena ${beat.index}: aguardando LTX autorizado` : `Beat ${beat.index}: waiting for manual AI generation — prompt saved`, { stage: "visual" });
                 }
                 visualPath = null; // filled from the nearest good visual after all beats resolve
               }
@@ -632,6 +789,7 @@ export async function runStudioPipeline(
       if (s.status === "fulfilled") return s.value;
       throw s.reason;
     });
+    logGraphicTally(runId, graphicTally);
 
     // AI_PROVIDER=manual: stop here, BEFORE neighbour carry-over or assembly, so a beat
     // waiting on the operator's own generation is never silently patched with a duplicate
@@ -645,7 +803,13 @@ export async function runStudioPipeline(
     if (manualPendingBeats.length > 0) {
       pauseRunForOperator(
         runId,
-        `${manualPendingBeats.length} beat(s) aguardando geração manual de IA. Os prompts foram salvos em ` +
+        ltxPendingBeats.length > 0
+          // Images no longer reach this message — they generate automatically, inline,
+          // with no approval step (see visual-source.ts's "ltx" provider branch). Only
+          // video/GPU scenes still pend here, since a GPU round needs explicit,
+          // budget-capped authorization.
+          ? `${ltxPendingBeats.length} cena(s) de vídeo aguardando autorização de GPU. Abra /tools/ltx-scene-test e prepare o vídeo da cena — exige autorização separada com limite de gasto. Depois clique Resume para aproveitar as cenas prontas.`
+          : `${manualPendingBeats.length} beat(s) aguardando geração manual de IA. Os prompts foram salvos em ` +
           `${manualPromptsPath(runDir)} — gere as imagens/vídeos, baixe e salve em ` +
           `${manualMediaDir(runDir)} nomeados como beat_XXXX.<extensão> (ex: beat_0007.png, beat_0012.mp4), ` +
           `depois clique Resume: cada beat já pronto é reaproveitado, só o que falta é regenerado.`,
@@ -654,9 +818,13 @@ export async function runStudioPipeline(
       checkCancelled(runId);
     }
 
+    // Graphics runs: a beat with no visual becomes a text graphic before any neighbour reuse.
+    await fillFailedBeatsWithGraphics(runId, renderBeats, voiceover.words, graphicsDir, cfg);
+
     // 3b. No black screens: any non-avatar beat whose visual failed reuses the
     // NEAREST beat that has a visual (carry-over) instead of a dark placeholder.
-    const goodIdx = renderBeats.map((b, i) => (b.visualPath ? i : -1)).filter((i) => i >= 0);
+    // Never a graphic: it is that beat's words on screen, wrong anywhere else.
+    const goodIdx = renderBeats.map((b, i) => (b.visualPath && b.layout !== "graphic" ? i : -1)).filter((i) => i >= 0);
     let reused = 0;
     for (let i = 0; i < renderBeats.length; i++) {
       const b = renderBeats[i];
@@ -700,7 +868,7 @@ export async function runStudioPipeline(
     // Denominator = the planner's exact non-avatar visual beats. failed_or_reused
     // counts visual beats with no directly-resolved source (retrieval threw → filled
     // from a neighbour). avatar→broll degrades can make actual_* exceed planned_*.
-    const visualBeats = renderBeats.filter((b) => b.layout !== "avatar");
+    const visualBeats = renderBeats.filter((b) => b.layout !== "avatar" && b.layout !== "graphic"); // a graphic has no footage source
     const plannedReal = visualBeats.filter((b) => b.source === "real").length;
     const plannedAi = visualBeats.filter((b) => b.source === "ai").length;
     let actualReal = 0;
@@ -900,7 +1068,7 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
       throw new Error("beats.json is empty or invalid — start a fresh run instead.");
     }
     const titleRow = getTitleStmt.get(runId) as { title: string | null } | undefined;
-    const videoContext = (titleRow?.title || "").replace(/\s+/g, " ").trim().slice(0, 400);
+    const videoContext = withWorldAnchor(readVisualWorld(runDir), (titleRow?.title || "").replace(/\s+/g, " ").trim()).slice(0, 400);
     log(
       runId,
       "info",
@@ -929,15 +1097,34 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
     /** Beats waiting on AI_PROVIDER=manual — see manual-pending.ts and the matching
      *  declaration in runStudioPipeline. */
     const manualPendingBeats: number[] = [];
+    const ltxPendingBeats: number[] = [];
+    const graphicsDir = path.join(runDir, "graphics");
+    const graphicTally = { rendered: 0, fallback: 0, reused: 0 };
+    // Graphic beats cue on word timings; a run from before words.json existed still renders
+    // them, with entries spread evenly instead of on the spoken word.
+    const resumeWords = beats.some((b) => b.layout === "graphic") ? readWordsJson(runDir) : [];
+
+    const anchorPlan = resolveAnchorPlan(beats);
 
     const settled = await Promise.allSettled(
       beats.map(async (beat): Promise<RenderBeat> => {
         const pad = String(beat.index).padStart(4, "0");
-        let visualPath: string | null = null;
+        let visualPath: string | null = await graphicVisual(runId, beat, resumeWords, graphicsDir, cfg.format, graphicTally, true);
         let avatarClipPath: string | null = null;
 
+        // Anchor image — re-rendered only when its clip is not already intact on disk.
+        const anchor = beat.layout !== "avatar" && !visualPath ? anchorPlan.get(beat.index) : undefined;
+        if (anchor && !isReusableClip(path.join(brollDir, `beat_${pad}.mp4`))) {
+          try {
+            visualPath = await renderAnchorBeat(beat, anchor, path.join(brollDir, `beat_${pad}.mp4`), cfg.format);
+          } catch (e) {
+            log(runId, "warn", `Beat ${beat.index} anchor image failed (${(e as Error).message.slice(0, 120)}) — using the normal visual`, { stage: "visual" });
+            visualPath = null;
+          }
+        }
+
         // B-roll for broll/split beats — reuse the on-disk clip if it's intact.
-        if (beat.layout !== "avatar") {
+        if (beat.layout !== "avatar" && !visualPath) {
           const out = path.join(brollDir, `beat_${pad}.mp4`);
           if (isReusableClip(out)) {
             visualPath = out;
@@ -955,7 +1142,8 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
               if (e instanceof FlowBrowserError && !isFlowBeatExhausted(e)) throw e;
               if (e instanceof ManualGenerationPendingError) {
                 manualPendingBeats.push(beat.index);
-                log(runId, "info", `Beat ${beat.index}: waiting for manual AI generation — prompt saved`, { stage: "visual" });
+                if (e instanceof LtxGenerationPendingError) ltxPendingBeats.push(beat.index);
+                log(runId, "info", e instanceof LtxGenerationPendingError ? `Cena ${beat.index}: aguardando LTX autorizado` : `Beat ${beat.index}: waiting for manual AI generation — prompt saved`, { stage: "visual" });
               } else {
                 log(runId, "warn", `Beat ${beat.index} visual failed (${(e as Error).message.slice(0, 120)}) — will reuse a neighbour`, {
                   stage: "visual",
@@ -1008,7 +1196,8 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
                     if (e2 instanceof FlowBrowserError && !isFlowBeatExhausted(e2)) throw e2;
                     if (e2 instanceof ManualGenerationPendingError) {
                       manualPendingBeats.push(beat.index);
-                      log(runId, "info", `Beat ${beat.index}: waiting for manual AI generation — prompt saved`, { stage: "visual" });
+                      if (e2 instanceof LtxGenerationPendingError) ltxPendingBeats.push(beat.index);
+                      log(runId, "info", e2 instanceof LtxGenerationPendingError ? `Cena ${beat.index}: aguardando LTX autorizado` : `Beat ${beat.index}: waiting for manual AI generation — prompt saved`, { stage: "visual" });
                     }
                     visualPath = null;
                   }
@@ -1027,6 +1216,7 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
       if (s.status === "fulfilled") return s.value;
       throw s.reason;
     });
+    logGraphicTally(runId, graphicTally);
 
     // AI_PROVIDER=manual: same pause as the first-run pipeline — see its matching comment.
     // A Resume can still find beats pending manual generation (the operator hasn't supplied
@@ -1034,7 +1224,13 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
     if (manualPendingBeats.length > 0) {
       pauseRunForOperator(
         runId,
-        `${manualPendingBeats.length} beat(s) aguardando geração manual de IA. Os prompts foram salvos em ` +
+        ltxPendingBeats.length > 0
+          // Images no longer reach this message — they generate automatically, inline,
+          // with no approval step (see visual-source.ts's "ltx" provider branch). Only
+          // video/GPU scenes still pend here, since a GPU round needs explicit,
+          // budget-capped authorization.
+          ? `${ltxPendingBeats.length} cena(s) de vídeo aguardando autorização de GPU. Abra /tools/ltx-scene-test e prepare o vídeo da cena — exige autorização separada com limite de gasto. Depois clique Resume para aproveitar as cenas prontas.`
+          : `${manualPendingBeats.length} beat(s) aguardando geração manual de IA. Os prompts foram salvos em ` +
           `${manualPromptsPath(runDir)} — gere as imagens/vídeos, baixe e salve em ` +
           `${manualMediaDir(runDir)} nomeados como beat_XXXX.<extensão> (ex: beat_0007.png, beat_0012.mp4), ` +
           `depois clique Resume: cada beat já pronto é reaproveitado, só o que falta é regenerado.`,
@@ -1043,8 +1239,10 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
       checkCancelled(runId);
     }
 
-    // No black screens — same neighbour carry-over as the first-run pipeline.
-    const goodIdx = renderBeats.map((b, i) => (b.visualPath ? i : -1)).filter((i) => i >= 0);
+    await fillFailedBeatsWithGraphics(runId, renderBeats, resumeWords.length ? resumeWords : readWordsJson(runDir), graphicsDir, cfg);
+
+    // No black screens — same neighbour carry-over as the first-run pipeline (never a graphic).
+    const goodIdx = renderBeats.map((b, i) => (b.visualPath && b.layout !== "graphic" ? i : -1)).filter((i) => i >= 0);
     let reusedNeighbour = 0;
     for (let i = 0; i < renderBeats.length; i++) {
       const b = renderBeats[i];

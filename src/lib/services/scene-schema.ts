@@ -51,7 +51,7 @@ export const sceneV1Schema = z
     durationMs: ms,
     /** Narration spoken during this scene. */
     text: z.string(),
-    layout: z.enum(["avatar", "split", "broll"]),
+    layout: z.enum(["avatar", "split", "broll", "graphic"]),
     source: z.enum(["real", "ai"]),
     visualQuery: z.string(),
     youtubeQuery: z.string().optional(),

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { ensureInit } from "@/lib/init";
-import { listChannels, createChannel, getChannel, toClientChannel, mergeChannelApiKeys, deriveVoiceProvider } from "@/lib/channels";
+import { listChannels, createChannel, getChannel, toClientChannel, mergeChannelApiKeys, deriveVoiceProvider, parseChannelGraphics } from "@/lib/channels";
 
 export const runtime = "nodejs";
 
@@ -36,6 +36,9 @@ export async function POST(req: Request) {
       interval_sec: body.interval_sec != null ? Number(body.interval_sec) : undefined,
       format: body.format != null ? String(body.format) : undefined,
       avatar_id: body.avatar_id != null ? Number(body.avatar_id) : null,
+      graphics: parseChannelGraphics(body.graphics),
+      edit_style: body.edit_style !== undefined ? (body.edit_style == null ? null : String(body.edit_style)) : undefined,
+      anchor_dir: body.anchor_dir !== undefined ? (body.anchor_dir == null ? null : String(body.anchor_dir)) : undefined,
     });
     const created = getChannel(id);
     return NextResponse.json(created ? toClientChannel(created) : null);

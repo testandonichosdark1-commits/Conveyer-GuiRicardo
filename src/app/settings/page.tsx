@@ -39,6 +39,11 @@ export default function ParametresPage() {
       </p>
 
       <div className="card" style={{ display: "grid", gap: 16 }}>
+        {aiProvider === "ltx" && <div role="status">
+          <b>LTX-2.5 no Runpod</b>
+          <p>As cenas aguardam sua imagem inicial e uma geração autorizada. Selecionar LTX não inicia GPU.</p>
+          <Link href="/tools/ltx-scene-test">Abrir cenas LTX</Link>
+        </div>}
         {/* Provider choices */}
         <div className="grid-2" style={{ gap: 16 }}>
           <div>

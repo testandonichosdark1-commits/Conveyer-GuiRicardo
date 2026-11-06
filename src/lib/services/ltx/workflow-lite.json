@@ -1,0 +1,18 @@
+{
+  "ckpt": { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": "ltxv-2b-0.9.8-distilled.safetensors" } },
+  "clip": { "class_type": "CLIPLoader", "inputs": { "clip_name": "t5xxl_fp8_e4m3fn_scaled.safetensors", "type": "ltxv", "device": "default" } },
+  "img": { "class_type": "LoadImage", "inputs": { "image": "entrada.png" } },
+  "pre": { "class_type": "LTXVPreprocess", "inputs": { "image": ["img", 0], "img_compression": 35 } },
+  "pos": { "class_type": "CLIPTextEncode", "inputs": { "text": "", "clip": ["clip", 0] } },
+  "neg": { "class_type": "CLIPTextEncode", "inputs": { "text": "low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly, text, watermark", "clip": ["clip", 0] } },
+  "i2v": { "class_type": "LTXVImgToVideo", "inputs": { "positive": ["pos", 0], "negative": ["neg", 0], "vae": ["ckpt", 2], "image": ["pre", 0], "width": 832, "height": 480, "length": 121, "batch_size": 1, "strength": 1.0 } },
+  "cond": { "class_type": "LTXVConditioning", "inputs": { "positive": ["i2v", 0], "negative": ["i2v", 1], "frame_rate": 24 } },
+  "ks": { "class_type": "KSamplerSelect", "inputs": { "sampler_name": "euler" } },
+  "sg": { "class_type": "ManualSigmas", "inputs": { "sigmas": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0" } },
+  "n1": { "class_type": "RandomNoise", "inputs": { "noise_seed": 123456789 } },
+  "g": { "class_type": "CFGGuider", "inputs": { "model": ["ckpt", 0], "positive": ["cond", 0], "negative": ["cond", 1], "cfg": 1 } },
+  "samp": { "class_type": "SamplerCustomAdvanced", "inputs": { "noise": ["n1", 0], "guider": ["g", 0], "sampler": ["ks", 0], "sigmas": ["sg", 0], "latent_image": ["i2v", 2] } },
+  "dec": { "class_type": "VAEDecodeTiled", "inputs": { "samples": ["samp", 0], "vae": ["ckpt", 2], "tile_size": 512, "overlap": 64, "temporal_size": 64, "temporal_overlap": 8 } },
+  "cv": { "class_type": "CreateVideo", "inputs": { "images": ["dec", 0], "fps": 24 } },
+  "save": { "class_type": "SaveVideo", "inputs": { "video": ["cv", 0], "filename_prefix": "ltx_clipe", "format": "auto", "codec": "auto" } }
+}

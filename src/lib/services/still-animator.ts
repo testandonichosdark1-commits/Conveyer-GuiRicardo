@@ -29,6 +29,9 @@ export interface AnimateStillInput {
   zoomOut: boolean;
   /** "WxH" output size; undefined falls back to VIDEO_RESOLUTION exactly as kenBurns does. */
   resolution?: string;
+  /** The beat's index — lets KEN_BURNS_MOTION=varied pick this beat's move. Omitted = the
+   *  original zoomOut-only behaviour, byte-identical call. */
+  beatIndex?: number;
 }
 
 export type StillAnimatorId = "kenburns";
@@ -36,8 +39,9 @@ export type StillAnimatorId = "kenburns";
 type StillAnimator = (input: AnimateStillInput) => Promise<void>;
 
 const ANIMATORS: Record<StillAnimatorId, StillAnimator> = {
-  kenburns: async ({ imagePath, outPath, durationSec, zoomOut, resolution }) => {
-    kenBurns(imagePath, outPath, durationSec, zoomOut, resolution);
+  kenburns: async ({ imagePath, outPath, durationSec, zoomOut, resolution, beatIndex }) => {
+    if (beatIndex === undefined) kenBurns(imagePath, outPath, durationSec, zoomOut, resolution);
+    else kenBurns(imagePath, outPath, durationSec, zoomOut, resolution, beatIndex);
   },
 };
 

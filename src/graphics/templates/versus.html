@@ -1,0 +1,116 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../theme.css">
+<style>
+  .head { position: absolute; left: 0; width: 1920px; top: 70px; text-align: center; }
+  .head .mono-small { font-size: 16px; }
+  .head .t { font-family: var(--f-title); font-weight: 600; font-size: 42px; text-transform: uppercase; color: var(--ink); margin-top: 8px; letter-spacing: 0.02em; }
+  .divider { position: absolute; left: 959px; top: 190px; width: 2px; height: 820px; background: var(--faint); transform-origin: 50% 0; }
+  .side { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; }
+  .info { position: absolute; top: 640px; width: 620px; }
+  .info.r { text-align: right; }
+  .name { font-family: var(--f-title); font-weight: 600; font-size: 44px; text-transform: uppercase; color: var(--ink); line-height: 1.05; }
+  .info .mono-small { margin-top: 8px; font-size: 15px; }
+  .bullets { margin-top: 26px; }
+  .b { font-family: var(--f-mono); font-weight: 500; font-size: 18px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin: 12px 0; display: flex; gap: 14px; align-items: center; }
+  .info.r .b { justify-content: flex-end; }
+  .b::before { content: ""; width: 9px; height: 9px; background: var(--gold-line); transform: rotate(45deg); flex: none; }
+  .info.r .b::before { order: 2; }
+  .bad .b::before { background: var(--stamp-red); }
+  .vs {
+    position: absolute; left: 912px; top: 382px; width: 96px; height: 96px; border-radius: 50%; box-sizing: border-box;
+    border: 3px solid var(--gold-line); background: #1b1814; display: flex; align-items: center; justify-content: center;
+    font-family: var(--f-title); font-weight: 600; font-size: 36px; color: var(--gold-text);
+    box-shadow: 0 0 0 10px rgba(201,162,39,0.10);
+  }
+  body.bg-parchment .vs { background: var(--text-dark); }
+  .ribbon {
+    position: absolute; top: 392px; height: 78px; display: flex; align-items: center; justify-content: center;
+    background: var(--parchment); color: var(--text-dark); padding: 0 70px;
+    font-family: var(--f-title); font-weight: 600; font-size: 32px; text-transform: uppercase; letter-spacing: 0.04em;
+    clip-path: polygon(0 0, 100% 0, calc(100% - 26px) 50%, 100% 100%, 0 100%, 26px 50%);
+    box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+  }
+  body.bg-parchment .ribbon { background: var(--text-dark); color: var(--parchment); }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script src="../runtime.js"></script>
+<script>
+/*
+ * versus — two columns, a divider and a VS seal (refs 06:27, 09:12, 13:06). Left side arrives,
+ * the seal, then the right side; finally a ribbon names the winner over the seal and the loser
+ * fades back.
+ */
+window.__template = {
+  async setup(stage, data, ctx) {
+    const { el, animate, cueStart } = GR;
+    const D = ctx.durationMs;
+
+    if (data.title || data.overline) {
+      const head = el("div", "head", stage);
+      if (data.overline) el("div", "mono-small", head, data.overline);
+      if (data.title) el("div", "t", head, data.title);
+      animate(head, [{ opacity: 0, transform: "translateY(-10px)" }, { opacity: 1, transform: "translateY(0)" }], { start: 0, duration: 500 });
+    }
+    const div = el("div", "divider", stage);
+    animate(div, [{ transform: "scaleY(0)" }, { transform: "scaleY(1)" }], { start: 150, duration: 700 });
+
+    const tLeft = 500;
+    const tRight = Math.max(tLeft + 1300, D * 0.33);
+    const tVs = (tLeft + tRight) / 2;
+
+    async function side(s, isRight, t0) {
+      const wrap = el("div", "side" + (s.bad ? " bad" : ""), stage);
+      if (s.image) {
+        const prod = await GR.product(wrap, s.image, { cx: isRight ? 1440 : 480, cy: 430, w: 520, h: 300 }, { shadowGap: 30, float: 6 });
+        animate(prod.entry, [{ opacity: 0, transform: "translateY(20px)" }, { opacity: 1, transform: "translateY(0)" }], { start: t0, duration: 600 });
+        animate(prod.shadow, [{ opacity: 0 }, { opacity: 1 }], { start: t0, duration: 600 });
+      }
+      const info = el("div", "info" + (isRight ? " r" : ""), wrap);
+      info.style.left = (isRight ? 1920 - 200 - 620 : 200) + "px";
+      const name = el("div", "name", info, s.name);
+      const sub = s.sub ? el("div", "mono-small", info, s.sub) : null;
+      animate(name, [{ opacity: 0, transform: "translateX(" + (isRight ? 20 : -20) + "px)" }, { opacity: 1, transform: "translateX(0)" }], { start: t0 + 200, duration: 500 });
+      if (sub) animate(sub, [{ opacity: 0 }, { opacity: 1 }], { start: t0 + 350, duration: 500 });
+      const ul = el("div", "bullets", info);
+      (s.bullets || []).forEach((b, i) => {
+        const li = el("div", "b", ul, b);
+        animate(li, [{ opacity: 0, transform: "translateX(" + (isRight ? 16 : -16) + "px)" }, { opacity: 1, transform: "translateX(0)" }], { start: t0 + 550 + i * 280, duration: 400 });
+      });
+      return wrap;
+    }
+
+    const left = await side(data.left, false, tLeft);
+    const right = await side(data.right, true, tRight);
+
+    const vs = el("div", "vs", stage, "VS");
+    let tRibbon = null;
+    if (data.winner) {
+      const cued = data.ribbonCue ? cueStart(data.ribbonCue, ctx.words) : null;
+      tRibbon = cued != null ? cued : Math.min(D - 900, Math.max(tRight + 1500, D * 0.72));
+      const winnerSide = data.winner === "left" ? data.left : data.right;
+      const ribbon = el("div", "ribbon", stage, data.ribbon || winnerSide.name + " wins");
+      ribbon.style.left = (960 - ribbon.offsetWidth / 2) + "px";
+      animate(ribbon, [{ transform: "scaleX(0)", opacity: 0 }, { transform: "scaleX(1)", opacity: 1 }], { start: tRibbon, duration: 450 });
+      const loser = data.winner === "left" ? right : left;
+      animate(loser, [{ opacity: 1 }, { opacity: 0.4 }], { start: tRibbon + 150, duration: 500 });
+    }
+    // the seal pops in between the sides and gives way to the ribbon
+    const vsEnd = tRibbon != null ? tRibbon + 200 : D;
+    const vsSpan = vsEnd - tVs;
+    animate(vs, tRibbon != null ? [
+      { opacity: 0, transform: "scale(0.6)", offset: 0 },
+      { opacity: 1, transform: "scale(1)", offset: Math.min(0.5, 350 / vsSpan) },
+      { opacity: 1, transform: "scale(1)", offset: Math.max(0.51, (vsSpan - 200) / vsSpan) },
+      { opacity: 0, transform: "scale(0.9)", offset: 1 },
+    ] : [{ opacity: 0, transform: "scale(0.6)" }, { opacity: 1, transform: "scale(1)" }],
+    { start: tVs, duration: tRibbon != null ? vsSpan : 350, easing: tRibbon != null ? "linear" : GR.EASE });
+  },
+};
+</script>
+</body>
+</html>

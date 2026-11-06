@@ -112,6 +112,50 @@ prompt is byte-identical to before the field existed** — that identity is pinn
   185 branded beats across 183 stored plans). Rule (5) of the ENTITY RULE now says so
   explicitly, turning a habit into a guarantee.
 
+### Visual world (`VISUAL_WORLD`, 2026-11-06)
+
+One Gemini call per run (`services/visual-world.ts`, called at the top of `planBeats`' query
+step) reads the WHOLE script and returns `{topic, era, region, families[12–30], avoid[]}` — the
+universe of imagery the video lives in. Built after reverse-engineering a reference documentary
+(Sumer Vault, "Scorpion Men"): its editor keeps every shot on-topic by turning each abstract line
+into a piece of the same world ("the cuneiform world ended" → a cracked tablet; "everyone who knew
+it is dead" → an excavated burial). Before this, the planner's only notion of the topic was the
+FIRST 60 WORDS of narration (that script never names Sumer in them), and abstract lines carried the
+previous subject forward or fell back to generic stock.
+
+- **Planner**: `formatVisualWorld()` is added to every chunk prompt plus `VISUAL_WORLD_RULE`, which
+  overrides the ABSTRACT SCENE RULE's priority order (pick the family that embodies the idea; vary
+  it; never the listed off-topic imagery or generic modern stock). No world → the prompt is
+  byte-identical (pinned by `visual-world.test.ts`).
+- **AI anchor + footage scorer**: `withWorldAnchor()` puts the world's one-line anchor FIRST in
+  `videoContext`, because `buildPrompt`'s "in a documentary about:" reads only its first 160 chars.
+- **Resume** re-plans nothing, so the world is persisted to `<runDir>/visual-world.json` and read back
+  there (absent → the old title-only context).
+- **On by default** (`VISUAL_WORLD: "1"`, DB/API-only key); anything else = off. Fail-open: no key or
+  any Gemini failure logs one `warn` and plans exactly as before. Metered like the planner.
+- Live-probed on the reference transcript (gemini-3.5-flash): returned seals, reliefs, kudurrus,
+  tablets, excavation photos, an Assyriologist at work, desert scorpions — and listed fantasy CGI and
+  office workers as off-topic. **Not yet verified on a full real run** (that the per-beat queries
+  actually follow it end to end).
+- **Shot variety** (with a world only): `SHOT VARIETY RULE` + the previous chunk's last 3 queries
+  ("Recent shots") — measured on an archive test, 4 of 10 shots were the same tablet close-up because
+  consecutive lines all mentioned tablets; the rule rotates the angle (object → site → people → the
+  scene it records → map/document).
+- **The world made Flow's concurrent tile matching ambiguous — fixed in `flow-browser.ts`.** Shared
+  vocabulary ("ancient clay cuneiform tablet") let one beat's tile clear `MIN_CAPTION_MATCH` for
+  another beat's prompt. Two guards, both in the concurrent path: (1) `pendingFlowPrompts` — a tile
+  goes to the submitted prompt it matches BEST (`tileBelongsToPrompt`; tie → earlier submit;
+  abandoned prompts keep competing for 10 min so their late tile can't be taken as an orphan);
+  (2) a per-submit snapshot of tiles already finished in the grid, which are never a result. (2) was
+  a pre-existing hole: the project grid is shared and never cleared, and a later beat took a stale
+  tile from ANOTHER channel's earlier run at "100%". Pinned by `flow-tile-ownership.test.ts`; verified
+  live on a 10-beat run (every AI image matched its own prompt).
+- Archive sources, live-checked 2026-11-06: **Met** search moved to `/v1.1/search` (v1 answers 410)
+  — fixed; **Art Institute** images sit behind a Cloudflare bot challenge (search works, every
+  download 403s) and **Library of Congress** 403s even to a browser UA. Neither is worked around.
+- Archive style also gained ancient-era vocabulary (relief, stele, cylinder seal impression,
+  cuneiform tablet…) in `ARCHIVE_QUERY_RULE` / `ARCHIVE_AI_PROMPT_RULE`; it only knew photo/painting media.
+
 ---
 
 ## Upload voiceover (narration the operator recorded themselves)
@@ -1062,6 +1106,15 @@ underlying mechanism below still supports it.
   it — can never blank it out. `CharacterReferenceField.tsx` was generalized with an
   `endpoint` prop (default unchanged) to serve both the global route (still functional,
   just no longer linked from the Settings UI) and the per-channel one from one component.
+- **A channel's portrait is its own or NONE (2026-11-06).** A channel without
+  `character_reference_path` used to inherit the global `AI_CHARACTER_REFERENCE_PATH` — which
+  put one channel's presenter into another channel's video (measured: a survival-channel face
+  composited into a Nineveh excavation shot on a new history channel). `channelSettingOverrides`
+  now always sets the key, to `NO_CHARACTER_REFERENCE` (`"none"`, `src/lib/character-reference.ts`)
+  when the channel has none. A plain `""` could not do it: an empty override deliberately falls
+  through to the global value, pinned in `channel-settings-override.test.ts`. Readers must go
+  through `resolveCharacterReference()` so the sentinel never reaches `fs`. The global portrait
+  still applies to runs created with NO channel.
 - **Never send `api_keys_json` (raw) to the browser.** Every API route returns
   `toClientChannel(channel)`, which replaces it with `api_keys` — a masked map
   (`shortMask`, the same first4…last4 convention as `getMaskedSettings()`, exported from
@@ -1464,6 +1517,27 @@ key field accepts a value, and "Load voices" calls `/api/voices/ai33` and offers
 returns (the route was stubbed via `Fetch.fulfillRequest`; no key exists and the DB was not
 written to). **What is NOT verified is any live ai33 request** — no key was available.
 
+### Voicebox (local, free) — added 2026-10-05
+
+`VOICEOVER_PROVIDER=voicebox` narrates through the operator's own **Voicebox** app
+(github.com/jamiepine/voicebox — open-source voice cloning running on their machine).
+Contract read from Voicebox's backend source (`backend/routes/*.py`), not live-probed here:
+`POST /generate` queues and returns `{id, status:"generating"}` → poll `GET /history/{id}`
+(`loading_model`/`generating` → `completed`|`failed`) → `GET /audio/{id}` serves **WAV**.
+
+- **No key, no cost, nothing metered.** It's the one voice provider with `apiKey: ""`;
+  `ProviderVoiceFields` hides the key field for it, and the registry tests skip the
+  key checks for it. Only setting besides the voice: `VOICEBOX_URL` (blank =
+  `http://127.0.0.1:17493`). It is deliberately absent from `COST_PROVIDERS`.
+- **The voice id is a Voicebox PROFILE id.** The profile decides the engine (Qwen /
+  Chatterbox / …) and its language is sent with the request — there is no
+  `VOICEBOX_ENGINE` setting, for the same second-source-of-truth reason as ai33.
+- **The WAV is transcoded to MP3** (libmp3lame 192k/44.1 kHz) at `outPath`: chunk concat
+  stream-copies MP3 and the master must be `voiceover.mp3`.
+- Generation is local GPU/CPU and can be slow; the poll deadline is 45 min per chunk.
+  The Voicebox app must be open during the voiceover step — an unreachable server says so.
+- Covered by `voicebox.test.ts` (a fake server speaking the contract + real ffmpeg).
+
 ## Conventions & gotchas (inherited base — still true)
 
 - DB lives **outside** the project tree so `git pull` never touches user data.
@@ -1780,6 +1854,207 @@ pastes prompts into the account themselves and hands the resulting files back to
   pause/never-reuse behavior in `studio-pipeline.ts` itself is not unit-tested — that file has
   no test suite at all (too integration-heavy; every other guarantee there is verified by
   running real end-to-end video pipelines, per this file's own "Verified" sections).
+
+## GPT + LTX (`AI_PROVIDER=ltx`) — stills generate automatically, GPU video stays gated (2026-10-07)
+
+The "ltx" provider renders b-roll two ways: stills via the exclusive Codex/GPT account
+(`src/lib/services/codex-image-*.ts`), motion clips via a rented GPU running LTX
+(`workers/ltx-pod`, `services/ltx/session.ts`). Both used to pause the run for an explicit
+operator approval — `GptLtxBatch.tsx`'s "Preparar lote" / "Autorizo gerar..." checkbox — the
+same pattern as `AI_PROVIDER=manual`. **The image half no longer does.**
+
+- **Why the split.** A GPU round spends real Runpod dollars, budget-capped and guardian-
+  watched for exactly that reason (see the GPU section above). A still only spends the
+  operator's own Codex **plan quota** — there is no runaway-cost scenario a pause protects
+  against, and the operator asked for it to "just follow the planner's own prompt, in the
+  background." Video keeps its authorization gate unchanged; only stills changed.
+- **Notebook GPU import (Colab/Kaggle).** `/tools/ltx-scene-test` also accepts a manually
+  downloaded MP4 for a selected pending video scene (`/api/tools/ltx-scenes/import`).
+  The upload is streamed with a 256 MiB cap, checked by ffprobe and decoded by FFmpeg,
+  then attached to the scene fingerprint. Imported results are marked
+  `source: "notebook-upload"` and do not pretend that the RunPod guardian stopped an
+  external GPU. No notebook API, tunnel, automatic generation, or fallback is involved;
+  a ready scene requires explicit confirmation before its clip can be replaced.
+- **Live notebook GPU (2026-10-26).** A Colab/Kaggle notebook (`workers/ltx-notebook`)
+  can also be CONNECTED: ComfyUI on the notebook's loopback, `conveyer_proxy.py` (bearer
+  token, six whitelisted routes) in front, a trycloudflare tunnel. `/api/tools/ltx-notebook`
+  stores `{baseUrl, token}` in `<DATA_DIR>/ltx-session/notebook.json` (`services/ltx/notebook.ts`).
+  While connected, `visual-source.ts`'s video branch generates a pending scene inline
+  (start frame via GPT, then `animateLtxScene` through `notebookTransport`, serialized
+  process-wide) instead of pausing; any failure still pauses. No guardian/stop: nothing is
+  billed per hour by us, so `stopAndVerify` is `true` and results carry
+  `source: "notebook-remote"`. Without the sol-attn node the graph drops only `sol`
+  (`buildLtxWorkflow(..., { sparseAttention: false })`). The `.ipynb` is GENERATED by
+  `build_notebook.py` (embeds the proxy + models.json); `notebook-build.test.ts` fails when
+  stale. Verified only against a fake ComfyUI through the real proxy — never on a real GPU.
+  **`lite` profile** for the 16 GB T4 (the only GPU a free Colab account gets):
+  `workflow-lite.json` (LTX-Video 2B distilled 0.9.8 + T5 fp8, core nodes only, 832x480x121)
+  + `models-lite.json` (per-file repo/revision/sha256). The notebook picks `full` at >= 40 GB
+  VRAM, else `lite`; the proxy reports it in `/conveyer/health`, the session stores
+  `profile`, and `finalizeLtxClip(..., "lite")` scales-to-cover + crops to 1080p (never
+  stretches). The lite graph passed pinned ComfyUI 0.37.1's own `/prompt` validation
+  (CPU, empty model files); actual generation quality on a T4 is unverified.
+- **`services/ltx/auto-image.ts`** (`generateLtxImageAutomatically`) drives the SAME job
+  machinery the manual batch UI used — `prepareImageJob` → `reserveImageJob(..., confirmed:
+  true)` → `executeImageJob` — but calls it inline, awaited, with the reservation
+  auto-confirmed instead of waiting for a checkbox. A job left `generating`/`needs-recovery`
+  by an earlier crashed attempt is recovered (never resubmitted); a job left `reserved` is
+  executed, never re-reserved — same idempotent job ids as the manual path, so Resume finds
+  and continues the SAME job rather than starting a fresh one.
+  `visual-source.ts`'s `provider === "ltx"` branch now forks on `media`: `"video"` keeps the
+  exact original try/catch (any failure → `LtxGenerationPendingError` → run-wide pause,
+  via `/tools/ltx-scene-test`); `"image"` calls `generateLtxImageAutomatically` the moment
+  `acquireLtxScene` reports pending, and ANY failure there (quota, a bad generation, a local
+  resize error) is now an **ordinary beat failure** — it falls through to the normal
+  neighbour-reuse path, never a pause. There is no human step left for a pause to wait on.
+- **This also fixes a real data-loss bug, as a side effect.** The old flow required
+  re-clicking "Atualizar lote" to see new pending scenes, which called `prepareImageJob`
+  again for every not-yet-ready scene — and because a job's id is a hash of
+  `{beat, description, model}`, if anything about the scene's stored identity had drifted
+  between clicks (observed live: beats re-planned with slightly different values across a
+  Resume), the re-prepare silently created a FRESH job under a new id, orphaning whatever the
+  old job had already generated (confirmed on a real run: 23 completed Codex images, 0
+  applicable to any current scene). With no separate "prepare" click in the automatic path —
+  generation happens inline, once, inside the same `acquireAi` call that computed the
+  identity — that drift window no longer exists.
+- **The manual batch UI (`GptLtxBatch.tsx`, `/api/tools/ltx-image-batch`) was deliberately
+  left in place**, not removed: it's still a working manual override/recovery tool, and its
+  visibility condition on the run page (`logs.some(m => m.includes("aguardando LTX"))`)
+  already degrades correctly on its own — that log line is now only ever written for a
+  video/GPU scene, so the card naturally stops appearing for an all-stills run without any
+  change to `page.tsx`.
+- Covered by `services/ltx/auto-image.test.ts` (prepare→reserve→execute end to end; a
+  `reserved`-but-uncompleted job is executed, never re-reserved; a `generating` job is
+  recovered via its existing thread, never resubmitted; a failure surfaces without writing a
+  completed result) and `visual-source-ltx.test.ts` (video beats still pause unchanged; a
+  missing image generates automatically with no approval; a failed auto-generation — and a
+  failed local still-render after a successful generation — are both ordinary, non-pending
+  failures; a video beat never touches the image auto-generator at all).
+
+## Graphic beats (2026-10-29)
+
+The motion-graphics layer of `docs/SPEC-motion-graphics.md`: nine phase-1 templates
+(`product_hero`, `spec_callouts`, `kinetic_quote`, `impact_bars`, `counter`, `versus`,
+`checklist_card`, `polaroids`, `timeline`), previewed at `/tools/graphic-preview`, planned and
+rendered inside studio runs.
+
+### In a run
+
+- **Off unless asked.** Channel checkbox (`channels.graphics_enabled` '1'/'0', NULL = global
+  `GRAPHICS_ENABLED`, default "0") + % slider + theme. `/api/studio` adds `graphics:
+  {percent, theme}` to `config_json` ONLY when on (`resolveChannelGraphics`), so every other
+  run has a byte-identical config and plan — pinned by `graphic-plan.test.ts` (the ordinary
+  planner prompts are identical with and without the pass). The channel form sends its graphics
+  fields only once touched, so a save never turns NULL ("follow global") into an explicit off.
+- **On → the avatar is off for the run** (spec 3.4: `avatarPercent` passed as 0).
+- **The pass runs LAST in `planBeats`** (`graphic-plan.ts`), on the finished plan: one Gemini
+  call per 40 beats returns `{index, through, template, data}`; then, deterministically: zod
+  validation (invalid → the beat stays b-roll), merge of following beats up to
+  `GRAPHIC_MAX_SEC` (20) / `GRAPHIC_LIST_MAX_SEC` (45, list templates) on beat boundaries, no
+  template twice in a row, graphic screen time capped at percent + 10. Merging reindexes beats,
+  which is why nothing before it may see a graphic.
+- **A graphic beat keeps its first beat's b-roll fields** (visualQuery, aiPrompt, source). That
+  IS the fallback: any render failure flips `layout` to "broll" in the pipeline
+  (`graphicVisual`) and the ordinary visual path fills it — never a run failure, never a
+  second planner call. Graphic clips live in `<runDir>/graphics/`; Resume reuses intact ones and
+  reads `words.json` for cue timing. Neighbour carry-over never borrows a graphic (it would put
+  another beat's words on screen), and graphic beats are left out of the real/AI source ratio log.
+- **Clip length = the compositor's own rounding** (`graphicBeatFrames` ≡ `beatFrames`). One
+  frame short and the compositor's `-stream_loop` would flash the first frame at the end.
+- **Products: the planner writes `product:<name>`** and `product-cutout.ts` resolves it before
+  rendering: free photo search (wigolo/Openverse/Pixabay images via `searchStillPhotos`) →
+  background removed by a sharp flood fill from the border (only works on a light, plain ground,
+  which is what the query asks for; anything else is skipped, not half-cut) → Gemini confirms it
+  is that product → cached at `<DATA_DIR>/products/<slug>.png`. No ML model: the spec's options
+  were @imgly (AGPL, ~130 MB) and rembg (no wheels for this Python). Not built yet: generating
+  the product with the AI provider when no photo works — such a beat falls back to b-roll.
+- **First real run (2026-10-29, 35 s, 6 beats): 52% graphic time vs a 65% target.** Two
+  cut-out defects it exposed, both fixed: (1) a shop photo kept its grey display plate and a
+  printed "MINI MAGLITE 2AA" logo — small separate islands (< 12% of the largest) are now
+  dropped, and the judge must also say `isolated` (no surface, reflection, packaging, text);
+  (2) a flashlight photographed standing up rendered ~100 px wide — the judge flags
+  `upright_long_object` and a clearly portrait (h/w ≥ 1.8) long tool is laid flat. The cache
+  file name carries `CACHE_VERSION` so cut-outs made under older rules are not reused.
+- **A failed b-roll beat in a graphics run still reuses a neighbour**, exactly as in any run —
+  the repeated shot in that first run was a real beat routed to AI with the AI provider
+  unconfigured. Not graphic-specific; not changed.
+- Still unmeasured: a 15-min render time, and the 55–75% acceptance band on a full script.
+
+- **`stamp` is a layer, not a template** (spec #10): `data.stamp` (a string or `{text, cueWord}`)
+  on `product_hero`, `spec_callouts` and `checklist_card`, drawn by `GR.stamp`. Shared pieces
+  live in `runtime.js` (`GR.product` = cut-out + floor shadow + float, `GR.odometer`) so the
+  templates cannot drift on them.
+- **One animation per element per property.** Two WAAPI animations on the same property fight:
+  the later one's backwards fill holds its first keyframe from t=0 and silently erases the
+  earlier one (an entry fade simply vanishes). Enter-hold-leave is ONE animation with keyframe
+  offsets (see spec_callouts' dimming, versus' VS seal), or the second effect goes on a wrapper.
+- **Fit loops must measure the content, not a fixed-size container** — impact_bars first shrank
+  every line to the minimum because it measured its 1080 px flex box.
+- Sample images for the preview: `sample:flashlight`, `sample:knife`, `sample:phone`
+  (`src/graphics/samples/*.svg`). `image` is resolved at any depth (versus sides, polaroids).
+
+- **A template is an HTML page** (`src/graphics/templates/<key>.html`) on a fixed 1920×1080
+  `#stage` that `runtime.js` scales to the output size. `window.__setup(data, theme, words,
+  {durationMs})` builds it; `window.__seek(ms)` poses it. Every animation is a PAUSED Web
+  Animation whose `currentTime` is set by seek, or an `onSeek(ms)` function — no clock, no
+  `setTimeout`, no `Math.random`. Paper noise is `feTurbulence` with a fixed seed for the same reason.
+- **Determinism is pinned by test**: the same frame renders byte-identically twice, and a frame
+  reached by seeking forward equals a fresh render at that time. Going backward can differ by
+  1/255 on a few pixels (compositor caching of rotated/transformed layers) — invisible after
+  H.264, so that check uses a ≤ 2/255 tolerance. Anything driven per frame that must be exact
+  (the kinetic_quote progress bar) animates `width`, not `scaleX`, for this reason.
+- **Data is validated by zod before a browser opens** (`graphic-templates.ts`, `.strict()`).
+  Templates write text with `textContent` only, so the schema is the one gate.
+- **Fonts are bundled** (`src/graphics/fonts`, OFL: Oswald, EB Garamond Italic, JetBrains Mono)
+  and loaded via `@font-face`; `__setup` awaits them before measuring/fitting text.
+- **Chromium is Playwright's bundled headless shell, launched** — never the operator's Flow
+  Chrome. One browser per process (`globalThis.__facelessGraphicRenderer`),
+  `GRAPHIC_RENDER_CONCURRENCY` pages (default 2, DB/API-only key).
+- **Capture is CDP `Page.captureScreenshot` with `optimizeForSpeed`, not `page.screenshot()`.**
+  Measured at 1080p: Playwright's PNG encoder ~400 ms/frame, CDP fast PNG ~80 ms (still
+  lossless). A 6 s clip went from ~80 s to ~25 s end to end. Frames are piped to ffmpeg
+  (`image2pipe` → libx264 crf 16, yuv420p, `-an`) with `-frames:v` = round(duration × 30).
+- `cueWord` timing (spec 3.3) lives in `runtime.js` (`scheduleEntries`, `cueStart`), and
+  `kinetic_quote` types each word while it is spoken (`typingSchedule`). Those pure helpers are
+  exported through `module.exports` and unit-tested in node.
+- The preview's word timings are synthetic (narration spread evenly over the clip), and its
+  product image is a placeholder SVG (`sample:flashlight`) or an uploaded PNG — the cutout
+  service (spec 3.5) does not exist yet.
+
+## Archive edit style (`channels.edit_style = "archive"`, 2026-10-29)
+
+The historical-documentary look (reference: a royal-history channel — period paintings,
+engravings, archive photos, slow moves, dissolves, sparse slab-serif cards). One channel field
+turns it on; `channelSettingOverrides()` then applies `ARCHIVE_STYLE_OVERRIDES` (channels.ts)
+through the normal per-run getSetting() override store, so no call site knows about channels.
+
+- **Ken Burns** (`ken-burns.ts`): `KEN_BURNS_RANGE` (archive 0.06; default 0.18 = unchanged) and
+  `KEN_BURNS_MOTION=varied` → per-beat cycle in / out / tilt-up / pan (`variedMotion`), plus a
+  top-biased cover crop for portrait sources (keeps the face). Needs the beat index, so
+  `animateStill` forwards `beatIndex` — omitted, the kenBurns call is byte-identical (pinned by
+  still-animator.test.ts).
+- **Crossfade** (`SCENE_TRANSITIONS=crossfade`, `SCENE_TRANSITION_MS`): length-neutral like the
+  dip. Stills are rendered `crossfadeTailSec()` longer; each full-screen b-roll beat's own encode
+  dissolves in from the previous beat's source trimmed at that beat's end (xfade offset 0), so the
+  concat stays a stream copy and sync is untouched. Avatar/split beats never dissolve. It is a
+  STYLE, so it ignores the per-run dip-to-black checkbox.
+- **Cards** (`overlay-themes.ts`): archive-label (date/person/title: bottom-left slab on a dark
+  box), archive-statement (quote: centred, no box, shadow — new `center` placement),
+  archive-callout (fact: yellow on dark, bottom-centre). Font chain starts at Rockwell (ships with
+  macOS). `buildOverlayPlan(…, editStyle)` picks them; overlays must still be ticked per run.
+- **Planner** (`buildPlanPrompt(…, editStyle)`): archive swaps the PHOTOREALISTIC ai_prompt rule
+  for a period-authentic one (painting/engraving before ~1850, vintage photo 1850–1950), adds an
+  archive-catalogue search rule and the archive card rules. Default "" → byte-identical prompt.
+- **Museum sources** (`visual-source.ts`): `met`, `artic`, `loc` (no key, public-domain stills),
+  same weight tier as wikimedia. NOT yet verified against the live APIs (built from their
+  documented response shapes; the dev sandbox could not reach them).
+- **Anchor images** (`anchor-images.ts`, `channels.anchor_dir` → `ANCHOR_IMAGES_DIR`): the
+  protagonist's own photos, placed deterministically on beats matching `ANCHOR_TERMS` /
+  `AI_CHARACTER_TERMS`, ≥ `ANCHOR_MIN_GAP_SEC` apart, always on the last eligible beat. Rendered
+  before any search; Resume reuses intact clips.
+- Preset also sets `REAL_MEDIA`/`KIE_AI_MEDIA`/`FALLBACK_AI_MEDIA=image` (stills only) and
+  `BEAT_MAX_SEC=18` (longer holds; the channel's interval sets the target).
+- Tests: `archive-style.test.ts`.
 
 ## Known follow-ups
 

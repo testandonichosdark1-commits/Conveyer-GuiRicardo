@@ -81,6 +81,7 @@ export default function CreerVideoPage() {
   // AI Media / Real Footage Media — global settings (KIE_AI_MEDIA / REAL_MEDIA) surfaced here
   // contextually per visual mode. Seeded from /api/settings; a change persists back to the same
   // key, so they stay the single source of truth (no per-run plumbing, pipeline unchanged).
+  const [gptLtx, setGptLtx] = useState(false);
   const [aiMedia, setAiMedia] = useState("image");
   const [realMedia, setRealMedia] = useState("auto");
   // Photo/video split of the AI b-roll — PER-RUN, unlike the two dropdowns above: it is a
@@ -107,6 +108,7 @@ export default function CreerVideoPage() {
       if (d.avatarId === null || typeof d.avatarId === "number") { setAvatarId(d.avatarId); draftChoseAvatar.current = true; }
       if (d.visualMode === "ai" || d.visualMode === "real" || d.visualMode === "mix") setVisualMode(d.visualMode);
       if (Number.isFinite(d.realPercent)) setRealPercent(d.realPercent);
+      if (typeof d.gptLtx === "boolean") setGptLtx(d.gptLtx);
       if (Number.isFinite(d.aiVideoPercent)) setAiVideoPercent(d.aiVideoPercent);
       // secondsPerVisual is intentionally NOT restored from the draft — it is seeded
       // from the global SECONDS_PER_VISUAL below so the on-screen value is the single,
@@ -132,9 +134,9 @@ export default function CreerVideoPage() {
   useEffect(() => {
     if (!restored.current) return;
     try {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify({ title, script, channelId, avatarId, visualMode, realPercent, aiVideoPercent, avatarPercent, sceneTransitions, overlays, realFallback, inputSource, upload }));
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ title, script, channelId, avatarId, visualMode, realPercent, aiVideoPercent, gptLtx, avatarPercent, sceneTransitions, overlays, realFallback, inputSource, upload }));
     } catch { /* quota / private mode */ }
-  }, [title, script, channelId, avatarId, visualMode, realPercent, aiVideoPercent, avatarPercent, sceneTransitions, overlays, realFallback, inputSource, upload]);
+  }, [title, script, channelId, avatarId, visualMode, realPercent, aiVideoPercent, gptLtx, avatarPercent, sceneTransitions, overlays, realFallback, inputSource, upload]);
 
   useEffect(() => {
     fetch("/api/avatars")
@@ -241,8 +243,9 @@ export default function CreerVideoPage() {
           // Only while the slider is actually on screen. Omitted otherwise, which leaves the
           // per-beat planner verdict in charge exactly as before — an "images only" or
           // "video only" run must not carry a ratio that contradicts it.
+          ...(gptLtx ? { aiProvider: "ltx", aiMedia: "auto" } : {}),
           aiVideoPercent:
-            (visualMode === "ai" || visualMode === "mix") && aiMedia === "auto" ? aiVideoPercent : undefined,
+            (visualMode === "ai" || visualMode === "mix") && (gptLtx || aiMedia === "auto") ? aiVideoPercent : undefined,
           secondsPerVisual,
           avatarPercent,
           // visualPrompt is no longer user-facing; the channel's saved prompt (or
@@ -608,13 +611,21 @@ export default function CreerVideoPage() {
             <div>
               <label className="label">{tr("Mode visuel", "Visual mode")}</label>
               <div className="grid-3" style={{ gap: 10 }}>
-                {seg("ai", tr("100% IA", "Full AI"), tr("B-roll généré (nano-banana / Veo)", "Generated b-roll (nano-banana / Veo)"))}
+                {seg("ai", tr("100% IA", "Full AI"), gptLtx ? "GPT images / LTX video" : tr("B-roll généré (nano-banana / Veo)", "Generated b-roll (nano-banana / Veo)"))}
                 {seg("real", tr("Vrai footage", "Real footage"), tr("Vidéos & images réelles d'internet", "Real videos & images from the internet"))}
                 {seg("mix", tr("Mix", "Mix"), tr("Mélange réel + IA", "Blend real + AI"))}
               </div>
             </div>
 
-            {(visualMode === "ai" || visualMode === "mix") && (
+            {(visualMode === "ai" || visualMode === "mix") && <div>
+              <label className="label">AI generation for this video</label>
+              <select className="input" value={gptLtx ? "gpt-ltx" : "configured"} onChange={e => setGptLtx(e.target.value === "gpt-ltx")}>
+                <option value="configured">Current channel / provider</option>
+                <option value="gpt-ltx">GPT images + LTX videos</option>
+              </select>
+              {gptLtx && <p className="faint" style={{ fontSize: 12 }}>GPT: up to 4 images at once, after batch approval. LTX: separate GPU approval with a spending limit. Creating the video uses the channel's narration and planning settings.</p>}
+            </div>}
+            {(visualMode === "ai" || visualMode === "mix") && !gptLtx && (
               <div>
                 <label className="label">{tr("Média IA", "AI media")}</label>
                 <select className="input" value={aiMedia}
@@ -629,10 +640,10 @@ export default function CreerVideoPage() {
               </div>
             )}
 
-            {(visualMode === "ai" || visualMode === "mix") && aiMedia === "auto" && (
+            {(visualMode === "ai" || visualMode === "mix") && (gptLtx || aiMedia === "auto") && (
               <div>
                 <label className="label">
-                  {tr("Équilibre photo / vidéo IA", "AI photo / video balance")} — {100 - aiVideoPercent}% {tr("photo", "photo")} / {aiVideoPercent}% {tr("vidéo", "video")}
+                  {tr("Équilibre photo / vidéo IA", "AI photo / video balance")} — {100 - aiVideoPercent}% {gptLtx ? "GPT images" : tr("photo", "photo")} / {aiVideoPercent}% {gptLtx ? "LTX video" : tr("vidéo", "video")}
                 </label>
                 <input type="range" min={0} max={100} step={5} value={aiVideoPercent}
                   onChange={(e) => setAiVideoPercent(Number(e.target.value))} style={{ width: "100%" }} />

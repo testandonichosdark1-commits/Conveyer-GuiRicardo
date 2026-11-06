@@ -1,3 +1,4 @@
+import { gptLtxRunConfig } from "@/lib/services/gpt-ltx-config";
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import db from "@/lib/db";
@@ -8,7 +9,7 @@ import { sanitizeFolderName, pickAvailableFolderName } from "@/lib/run-paths";
 import { getPromptPreset } from "@/lib/prompts";
 import { getAvatar, snapshotRunAvatar } from "@/lib/avatars";
 import { verifyHeygenAvatar, checkAvatarVSupport } from "@/lib/services/heygen-avatar";
-import { getChannel } from "@/lib/channels";
+import { getChannel, resolveChannelGraphics } from "@/lib/channels";
 import { getSetting } from "@/lib/settings";
 import { resolveStagedUpload } from "@/lib/services/voiceover-upload";
 import { studioRunVoiceId, studioRunSpeed, studioRunAi84Model } from "@/lib/voice-select";
@@ -47,6 +48,8 @@ interface Body {
   /** Share of the AI beats to generate as video rather than stills, 0–100. Sent only
    * when AI media = "auto"; omitted = the planner decides per beat (unchanged behavior). */
   aiVideoPercent?: number;
+  aiProvider?: "ltx";
+  aiMedia?: "auto";
   aiStyle?: string;
   visualPrompt?: string;
   sceneTransitions?: boolean;
@@ -257,6 +260,7 @@ export async function POST(req: Request) {
   const baseFolder = sanitizeFolderName(body.title ?? "", id.slice(0, 8));
   const folderName = pickAvailableFolderName(baseFolder);
 
+  const graphics = resolveChannelGraphics(channel);
   const config = {
     mode: "studio",
     visualMode: body.visualMode ?? channel?.visual_mode ?? "mix",
@@ -273,6 +277,7 @@ export async function POST(req: Request) {
     ...(Number.isFinite(Number(body.aiVideoPercent))
       ? { aiVideoPercent: Math.max(0, Math.min(100, Number(body.aiVideoPercent))) }
       : {}),
+    ...gptLtxRunConfig(body),
     aiStyle: body.aiStyle ?? channel?.ai_style ?? undefined,
     visualPrompt: body.visualPrompt ?? channel?.visual_prompt ?? undefined,
     format: channel?.format,
@@ -288,6 +293,9 @@ export async function POST(req: Request) {
     // byte-identical to what it was before this feature existed. Nothing branches on it
     // (the pipeline is told the path directly); it exists so a run can be identified later.
     ...(voiceoverPath ? { voiceoverSource: "upload" as const } : {}),
+    // Graphic beats — snapshotted ONLY when the channel (or the global default) turns them
+    // on, so every other run keeps a byte-identical config_json and plans as before.
+    ...(graphics ? { graphics } : {}),
   };
 
   insertRun.run(id, body.title?.trim() || null, folderName, script, JSON.stringify(config));

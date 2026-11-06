@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { ensureInit } from "@/lib/init";
-import { getChannel, updateChannel, deleteChannel, toClientChannel, mergeChannelApiKeys, deriveVoiceProvider } from "@/lib/channels";
+import { getChannel, updateChannel, deleteChannel, toClientChannel, mergeChannelApiKeys, deriveVoiceProvider, parseChannelGraphics } from "@/lib/channels";
 
 export const runtime = "nodejs";
 
@@ -47,6 +47,9 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
       interval_sec: body.interval_sec != null ? Number(body.interval_sec) : undefined,
       format: body.format != null ? String(body.format) : undefined,
       avatar_id: body.avatar_id != null ? Number(body.avatar_id) : null,
+      graphics: parseChannelGraphics(body.graphics),
+      edit_style: body.edit_style !== undefined ? (body.edit_style == null ? null : String(body.edit_style)) : undefined,
+      anchor_dir: body.anchor_dir !== undefined ? (body.anchor_dir == null ? null : String(body.anchor_dir)) : undefined,
     });
     const updated = getChannel(cid);
     return NextResponse.json(updated ? toClientChannel(updated) : null);

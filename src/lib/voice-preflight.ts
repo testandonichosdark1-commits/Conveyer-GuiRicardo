@@ -41,6 +41,7 @@ import type { SettingKey } from "./settings";
  *   ai33        tts.ts                   "No ai33 voice_id available"
  *   fishaudio   tts.ts                   fishAudioTts throws
  *   hume        tts.ts                   humeTts throws
+ *   voicebox    tts.ts                   voiceboxTts throws
  *
  * EXCLUDED, deliberately: `69labs` (falls back to "en-US-GuyNeural") and `openai` (falls
  * back to "alloy"). Those have real built-in defaults, so a blank voice is a working
@@ -55,6 +56,7 @@ const PROVIDERS_REQUIRING_A_VOICE = new Set([
   "ai33",
   "fishaudio",
   "hume",
+  "voicebox",
 ]);
 
 /**

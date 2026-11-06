@@ -113,14 +113,15 @@ describe("voice provider registry", () => {
 
   it("every provider's key + voice-id settings really exist, so what the UI edits is what runtime reads", () => {
     for (const p of VOICE_PROVIDERS) {
-      expect(DEFAULTS, `${p.id} apiKey ${p.apiKey}`).toHaveProperty(p.apiKey);
+      // A local provider (Voicebox) has no credential — and therefore no key to persist.
+      if (p.apiKey) expect(DEFAULTS, `${p.id} apiKey ${p.apiKey}`).toHaveProperty(p.apiKey);
       expect(DEFAULTS, `${p.id} voiceIdKey ${p.voiceIdKey}`).toHaveProperty(p.voiceIdKey);
       for (const ek of p.extraKeys ?? []) expect(DEFAULTS, `${p.id} extra ${ek.key}`).toHaveProperty(ek.key);
     }
   });
 
   it("every API key setting defaults to empty — no key is ever hardcoded", () => {
-    for (const p of VOICE_PROVIDERS) expect(DEFAULTS[p.apiKey as keyof typeof DEFAULTS], p.apiKey).toBe("");
+    for (const p of VOICE_PROVIDERS) if (p.apiKey) expect(DEFAULTS[p.apiKey as keyof typeof DEFAULTS], p.apiKey).toBe("");
   });
 
   it("every declared voicesEndpoint has a matching /api/voices/<x> route", () => {
@@ -130,6 +131,18 @@ describe("voice provider registry", () => {
       if (!p.voicesEndpoint) continue;
       expect(routes, `${p.id} → /api/voices/${p.voicesEndpoint}`).toContain(p.voicesEndpoint);
     }
+  });
+
+  it("registers Voicebox as a keyless local provider whose only extra setting is its URL", () => {
+    const m = voiceProviderMeta("voicebox");
+    expect(m.id).toBe("voicebox");
+    expect(m.apiKey).toBe("");
+    expect(m.voicesEndpoint).toBe("voicebox");
+    expect(m.extraKeys?.map((k) => k.key)).toEqual(["VOICEBOX_URL"]);
+    // Blank = the documented local default, so nothing is pinned.
+    expect(DEFAULTS.VOICEBOX_URL).toBe("");
+    // The engine is the profile's own; a setting for it would be a second source of truth.
+    expect(DEFAULTS).not.toHaveProperty("VOICEBOX_ENGINE");
   });
 
   it("registers ai33.pro with a voice listing, since its ids are engine-prefixed and unguessable", () => {

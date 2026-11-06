@@ -4,6 +4,8 @@ import type { WordTiming } from "./elevenlabs-voiceover";
 import { recordGemini } from "./cost-ledger";
 import { callGemini, type GeminiGenerateContentResponse } from "./gemini-models";
 import { noteGeminiQuota, geminiQuotaHit } from "./gemini-quota";
+import { planGraphicBeats, type GraphicSpec } from "./graphic-plan";
+import { buildVisualWorld, formatVisualWorld, type VisualWorld } from "./visual-world";
 
 /**
  * Beat planner.
@@ -24,7 +26,9 @@ import { noteGeminiQuota, geminiQuotaHit } from "./gemini-quota";
  * source decision.
  */
 
-export type BeatLayout = "avatar" | "split" | "broll";
+/** "graphic" = a full-screen motion graphic (graphic-plan.ts); only ever produced when the
+ * run asked for graphics, and flipped back to "broll" by the pipeline if its render fails. */
+export type BeatLayout = "avatar" | "split" | "broll" | "graphic";
 
 /** Content domain of a beat (Patch 2.3a). DIAGNOSTIC ONLY — classified by keyword
  * and logged; not yet read by any routing/scoring/assignment logic. */
@@ -1258,6 +1262,9 @@ export interface Beat {
    * Persisted in beats.json → Resume replays it deterministically. */
   supportingStartMs?: number;
   supportingEndMs?: number;
+  /** Motion graphic for a layout="graphic" beat: template + validated data. Undefined on
+   * every other beat. Persisted in beats.json, so Resume re-renders it without re-planning. */
+  graphic?: GraphicSpec;
 }
 
 const SENTENCE_END = /[.!?]["')\]]?$/;
@@ -1392,14 +1399,84 @@ const PLAN_CHUNK_SIZE = 6;
  * the beat list is a chunk, and an optional carry-over line preserves the
  * "nearest previous concrete subject" continuity the ABSTRACT SCENE RULE needs.
  */
+/**
+ * Archive look (EDIT_STYLE=archive) — the three prompt rules that differ from the default.
+ * Only ever ADDED (or swapped for the ai_prompt rule) when the style is on; the default prompt
+ * does not contain a byte of them.
+ */
+const ARCHIVE_QUERY_RULE =
+  `ARCHIVE SEARCH RULE (historical documentary — the visuals come from museum and library archives, not stock): ` +
+  `write "visual_query" the way an archive catalogue titles its items — the named person/place first, then the dynasty, ` +
+  `decade or year, then the medium ("photograph", "portrait", "painting", "engraving", "print", "map", "letter"). ` +
+  `Good: "Empress Wanrong portrait photograph", "Forbidden City courtyard photograph 1920s", "Qing dynasty court ladies photograph", ` +
+  `"Changchun 1930s photograph". NEVER a modern subject, a re-enactment or present-day stock scene. ` +
+  `For ANCIENT subjects (before photography and painting traditions) the medium is the surviving object itself, as museums ` +
+  `catalogue it: "relief", "stele", "cylinder seal impression", "cuneiform tablet", "statuette", "papyrus", "fresco", "mosaic", ` +
+  `"coin", "vase", "excavation photograph". Good: "Assyrian palace relief winged genie", "Akkadian cylinder seal impression", ` +
+  `"Babylonian kudurru boundary stone", "Ur royal cemetery excavation photograph".\n`;
+const ARCHIVE_AI_PROMPT_RULE =
+  `- "ai_prompt": a 30-60 word image-generation prompt for the same line that looks like an AUTHENTIC PERIOD SOURCE from the ` +
+  `time and place the line is about — never a modern photograph. Use the medium that era itself produced: before about 1850 an ` +
+  `oil painting, court portrait, watercolour, engraving or woodblock print in that culture's own artistic tradition (for antiquity: ` +
+  `a museum photograph of a carved relief, stele, statuette or tablet of that civilisation); from about ` +
+  `1850 to 1950 a vintage black-and-white or sepia photograph (aged print, soft grain, period clothing, architecture and objects). ` +
+  `Name the medium, era and place explicitly (e.g. "1920s sepia photograph, Forbidden City courtyard, Manchu court ladies in qipao"). ` +
+  `Concrete subject, period-accurate setting, composition, lighting. NEVER fantasy, sci-fi, surreal, modern or anachronistic elements, ` +
+  `even if the sentence is metaphorical (translate metaphors into a literal period scene). `;
+/**
+ * Added only when a visual world was built for the run (services/visual-world.ts). It
+ * OVERRIDES the ABSTRACT SCENE RULE's priority order: an abstract line no longer carries the
+ * previous subject forward or falls back to generic stock — it becomes the piece of THIS
+ * video's world that embodies the idea, which is how a human documentary editor keeps every
+ * shot on-topic (measured on a reference video: "the cuneiform world ended" → a cracked
+ * tablet; "everyone who knew it is dead" → an excavated burial).
+ */
+const VISUAL_WORLD_RULE =
+  `ON-TOPIC WORLD RULE (overrides the ABSTRACT SCENE RULE's priority order): every "visual_query", "youtube_query" and ` +
+  `"ai_prompt" must depict something from the VISUAL WORLD above. For an abstract, rhetorical, metaphorical or transitional ` +
+  `line, do NOT illustrate the metaphor with generic imagery — choose the visual family from that world that best EMBODIES ` +
+  `the idea, then make it specific to the line. Patterns: loss / forgetting / ending → a broken, eroded or ruined object or ` +
+  `place of this world; time / age / origins → the oldest objects or sites of this world; experts / doubt / research → a ` +
+  `specialist of this field at work with its objects or documents; a threshold / passage → a gateway or doorway of this ` +
+  `world; people / a couple / a crowd → how this world itself depicted people; mystery / the unknown → a close-up detail ` +
+  `of the central subject. Only when no family fits, fall back to the nearest previous concrete subject. Vary the family ` +
+  `across consecutive abstract lines instead of repeating one subject. Never use imagery listed as off-topic, and never ` +
+  `generic modern stock (people thinking, office workers, abstract light, city skylines) unless the line is literally about ` +
+  `the present day.\n` +
+  // Measured on archive run d954871c: four of ten shots were the same tablet close-up, because
+  // consecutive lines all MENTIONED tablets. A reference editor rotates the angle instead.
+  `SHOT VARIETY RULE: two consecutive lines must never show the same kind of shot (e.g. two tablet close-ups in a row), ` +
+  `including across the "Recent shots" listed above. When several lines in a row are about the same object, rotate the ` +
+  `angle on it: the object itself → where it was made or found (site, excavation, city) → the people who made, used or ` +
+  `studied it → the story or scene it records (a relief, seal, painting or illustration of that scene) → a map, plan or ` +
+  `document of the place. Each line still depicts what it says; only the angle changes.\n`;
+
+const ARCHIVE_OVERLAY_RULE =
+  `ARCHIVE DOCUMENTARY CARDS (this channel's style — overrides the card guidance above): use ONLY these types. ` +
+  `"date" = a PLACE + YEAR stamp written exactly like "Changchun, Manchukuo - 1934", on the line where the story moves to a new place or year. ` +
+  `"person" = "Full Name, role" (e.g. title "Puyi, Emperor of Manchukuo"), only the FIRST time that person appears. ` +
+  `"quote" = a very short, dramatic restatement of a fact THIS line states, 2-6 words ending with a period (e.g. "Dead at thirty-nine."), ` +
+  `kept for the most tragic facts only — at most one in every ~25 lines. ` +
+  `"fact" = a short tragic fact as a callout sentence (e.g. "Only one would survive to adulthood."), equally rare. ` +
+  `Never use "section" or "title". No subtitles on "date"/"quote". Most lines must be null.\n`;
+
 export function buildPlanPrompt(
   chunk: { index: number; text: string; role?: VisualRole }[],
   guidance: string | undefined,
   scriptContext: string | undefined,
   carryOver: string,
   overlays = false,
-  structureHint = ""
+  structureHint = "",
+  /** EDIT_STYLE — "archive" swaps in period-authentic AI prompts, archive search words and
+   *  archive overlay cards. Default "" → the prompt is byte-identical to before. */
+  editStyle = "",
+  /** formatVisualWorld() block (services/visual-world.ts). "" → byte-identical to before. */
+  visualWorld = "",
+  /** visual_query of the last few beats of the previous chunk, for SHOT VARIETY. Read only with a world. */
+  recentShots: string[] = []
 ): string {
+  const archive = editStyle === "archive";
+  const world = visualWorld.trim();
   // Visual Stage 1 — when the beats carry a role (structured video), tag each line and explain the
   // two roles, so the planner requests ESTABLISHING footage for the intro and the object for items.
   // Absent roles → byte-identical to before (untagged lines, no role block).
@@ -1432,7 +1509,9 @@ export function buildPlanPrompt(
   return (
     `${(guidance && guidance.trim()) || DEFAULT_VISUAL_GUIDANCE}\n\n` +
     (scriptContext ? `Overall video context (use it to keep visuals coherent): "${scriptContext}"\n\n` : "") +
+    (world ? `${world}\n\n` : "") +
     (carryOver ? `Context from previous chunk:\nLast concrete subject: ${carryOver}\n\n` : "") +
+    (world && recentShots.length ? `Recent shots (the lines just before these): ${recentShots.join("; ")}\n\n` : "") +
     roleGuidance +
     `Narration lines:\n${numbered}\n\n` +
     `For EACH line return BOTH:\n` +
@@ -1457,6 +1536,8 @@ export function buildPlanPrompt(
     `Wrong: "walking past" -> "walking past". Wrong: "nose trained validate markup" -> "nose validate markup". Wrong: "where it gets interesting" -> "interesting moment". ` +
     `Good (detergent documentary): "walking past" -> "shoppers walking past detergent aisle". "nose trained validate markup" -> "person smelling freshly washed clothes closeup". "where it gets interesting" -> "detergent bottle closeup on supermarket shelf". ` +
     `visual_query must ALWAYS be concrete and searchable in stock-footage libraries — NEVER abstract concepts, rhetoric, or connective phrases.\n` +
+    (world ? VISUAL_WORLD_RULE : "") +
+    (archive ? ARCHIVE_QUERY_RULE : "") +
     `NEGATION RULE: "visual_query" must describe ONLY what is VISIBLE in the frame, never what is ABSENT. NEVER use negation words ` +
     `(no, not, without, never, none). Stock search has no concept of negation — "spinning without power" matches power turbines (the opposite subject). ` +
     `Drop the absence entirely. Wrong: "turbine ventilator spinning without power" -> keep "without power". ` +
@@ -1470,10 +1551,12 @@ export function buildPlanPrompt(
     `Bad: "large language models" -> Good: "GPU server racks". Bad: "Japanese daily life convenient innovations" -> Good: "Japan vending machine". ` +
     `Good examples: "Tokyo train platform safety doors", "NVIDIA H100 data center racks", "Parker shotgun", "Annie Oakley archival". ` +
     `For abstract/vague lines, apply the same NEAREST-CONCRETE-SUBJECT rule as visual_query. Always 2-6 words, never a full sentence.\n` +
-    `- "ai_prompt": a 30-60 word PHOTOREALISTIC, real-world documentary image-generation prompt for the same line ` +
-    `(concrete subject, real setting, composition, lighting), consistent with the overall video topic above. ` +
-    `It must depict a believable real photograph — NEVER fantasy, sci-fi, surreal, abstract, magical or artistic imagery, ` +
-    `even if the sentence is metaphorical (translate metaphors into a literal real-world object/scene). ` +
+    (archive
+      ? ARCHIVE_AI_PROMPT_RULE
+      : `- "ai_prompt": a 30-60 word PHOTOREALISTIC, real-world documentary image-generation prompt for the same line ` +
+        `(concrete subject, real setting, composition, lighting), consistent with the overall video topic above. ` +
+        `It must depict a believable real photograph — NEVER fantasy, sci-fi, surreal, abstract, magical or artistic imagery, ` +
+        `even if the sentence is metaphorical (translate metaphors into a literal real-world object/scene). `) +
     `No captions, subtitles, signs or posters — but a product's OWN packaging label is part of the product and is allowed.\n` +
     `- "product_label": ONLY for a shot whose main subject is a product or its packaging. Give the wording that should be ` +
     `legible on the pack: the named brand copied verbatim when the line names one, otherwise a short plausible category ` +
@@ -1504,6 +1587,7 @@ export function buildPlanPrompt(
     `"conceptual" = no real footage exists; a scientific/microscopic/abstract/process visual better generated by AI (e.g. "molecules colliding", "neural network visualization", "energy waves") — typically aligns with query_type "abstract". ` +
     `Judge by the ERA and AVAILABILITY of real footage, NOT the topic: a modern company is "contemporary", a 20th-century event is "archival". When unsure between archival and contemporary, prefer "contemporary".\n\n` +
     overlayInstr +
+    (overlays && archive ? ARCHIVE_OVERLAY_RULE : "") +
     (overlays ? structureHint : "") +
     `Return STRICTLY a JSON array, one object per line IN ORDER: {"index": <int>, "visual_query": "<string>", "youtube_query": "<string>", "ai_prompt": "<string>", "ai_media": "<image|video>", "query_type": "<entity|generic|abstract>", "footage_kind": "<archival|contemporary|conceptual>"${overlayField}}. No markdown.`
   );
@@ -1749,7 +1833,8 @@ async function planVisualQueries(
   guidance?: string,
   scriptContext?: string,
   overlays = false,
-  structureHint = ""
+  structureHint = "",
+  visualWorld = ""
 ): Promise<Map<number, PlannedVisual>> {
   const out = new Map<number, PlannedVisual>();
   const apiKey = getSetting("GOOGLE_API_KEY");
@@ -1766,7 +1851,12 @@ async function planVisualQueries(
   let carryOver = "";
   for (let start = 0; start < beats.length; start += PLAN_CHUNK_SIZE) {
     const chunk = beats.slice(start, start + PLAN_CHUNK_SIZE);
-    const prompt = buildPlanPrompt(chunk, guidance, scriptContext, carryOver, overlays, structureHint);
+    // Last 3 planned shots before this chunk — the variety rule must hold across chunk seams too.
+    const recentShots = beats
+      .slice(Math.max(0, start - 3), start)
+      .map((b) => out.get(b.index)?.query)
+      .filter((q): q is string => !!q);
+    const prompt = buildPlanPrompt(chunk, guidance, scriptContext, carryOver, overlays, structureHint, (getSetting("EDIT_STYLE") || "").trim().toLowerCase(), visualWorld, recentShots);
     const arr = await requestPlanChunk(prompt, runId, apiKey, model, overlays);
     if (arr) {
       for (const q of arr) {
@@ -2111,10 +2201,16 @@ export async function planBeats(
     /** Provenance hook — invoked once with the resolved structure (when one is detected) so the
      * caller can persist a run-level snapshot. Optional; nothing downstream depends on it. */
     onStructure?: (s: VideoStructure) => void;
+    /** Invoked once with the run's visual world when one was built, so the caller can persist
+     * it (Resume) and anchor AI prompts / footage scoring on it. */
+    onVisualWorld?: (w: VisualWorld) => void;
     /** Share of the AI beats to render as generated video rather than stills, 0–100.
      * Only sent when the operator picked AI media = "auto"; undefined/null → the planner's
      * own per-beat verdict decides, exactly as before. */
     aiVideoPercent?: number | null;
+    /** Graphic beats (docs/SPEC-motion-graphics.md). Undefined → this pass never runs and
+     * the plan is byte-identical to before the feature existed. */
+    graphics?: { percent: number; theme?: string };
   }
 ): Promise<Beat[]> {
   const minSec = Math.max(1.5, Number(getSetting("BEAT_MIN_SEC") || "3"));
@@ -2195,6 +2291,10 @@ export async function planBeats(
   // 2. Visual queries from Gemini for the non-avatar (and split) beats, with the
   // opening of the script as shared context so per-beat choices stay coherent.
   const scriptContext = words.slice(0, 60).map((w) => w.word).join(" ");
+  // The visual world reads the WHOLE script once (services/visual-world.ts); off/failed → null and
+  // every planner prompt below is byte-identical to before.
+  const world = await buildVisualWorld(opts.runId, words.map((w) => w.word).join(" "), opts.title);
+  if (world) opts.onVisualWorld?.(world);
 
   // Visual Stage 1 — classify beats on the Item Timeline (intro vs item) so the planner requests
   // establishing footage for the intro and the object for items. Empty (no-op) for non-list videos.
@@ -2208,7 +2308,8 @@ export async function planBeats(
     opts.visualPrompt,
     scriptContext,
     opts.overlays === true,
-    structure ? structurePromptHint(structure) : ""
+    structure ? structurePromptHint(structure) : "",
+    world ? formatVisualWorld(world) : ""
   );
 
   // 3. Assemble beats with layout.
@@ -2283,7 +2384,7 @@ export async function planBeats(
   );
   for (const m of shared) log(opts.runId, "debug", `Topic shared by beats [${m.join(", ")}]`, { stage: "plan" });
 
-  const c = { avatar: 0, split: 0, broll: 0 };
+  const c = { avatar: 0, split: 0, broll: 0, graphic: 0 }; // graphic beats only appear after this log (graphic-plan.ts)
   for (const b of beats) c[b.layout]++;
   const realN = beats.filter((b) => b.layout !== "avatar" && b.source === "real").length;
   const aiN = beats.filter((b) => b.layout !== "avatar" && b.source === "ai").length;
@@ -2341,6 +2442,10 @@ export async function planBeats(
       );
     }
   }
+
+  // Graphic beats — last, on the finished plan, and only when asked for: merging beats
+  // reindexes them, and nothing above may see that. Fail-open inside planGraphicBeats.
+  if (opts.graphics) return planGraphicBeats(beats, opts.runId, opts.graphics);
 
   return beats;
 }

@@ -1,0 +1,21 @@
+{
+  "profile": "lite",
+  "files": [
+    {
+      "repo": "Lightricks/LTX-Video",
+      "revision": "8984fa25007f376c1a299016d0957a37a2f797bb",
+      "file": "ltxv-2b-0.9.8-distilled.safetensors",
+      "path": "checkpoints/ltxv-2b-0.9.8-distilled.safetensors",
+      "bytes": 6340744492,
+      "sha256": "76aa8c4786af752fa6f951947129d5290c3c6c0b2fadcadea6b5e114ae2cad8f"
+    },
+    {
+      "repo": "comfyanonymous/flux_text_encoders",
+      "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+      "file": "t5xxl_fp8_e4m3fn_scaled.safetensors",
+      "path": "text_encoders/t5xxl_fp8_e4m3fn_scaled.safetensors",
+      "bytes": 5157348688,
+      "sha256": "a498f0485dc9536735258018417c3fd7758dc3bccc0a645feaa472b34955557a"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 260" width="900" height="260">
+  <!-- Placeholder product for /tools/graphic-preview: an open folding knife, transparent background. -->
+  <defs>
+    <linearGradient id="blade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f3f4f5"/>
+      <stop offset="0.45" stop-color="#b9bcc0"/>
+      <stop offset="0.55" stop-color="#d7d9dc"/>
+      <stop offset="1" stop-color="#7d8085"/>
+    </linearGradient>
+    <linearGradient id="wood" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4a2a17"/>
+      <stop offset="0.35" stop-color="#7a4526"/>
+      <stop offset="0.7" stop-color="#3c2112"/>
+      <stop offset="1" stop-color="#231309"/>
+    </linearGradient>
+    <linearGradient id="brass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8a6a2a"/>
+      <stop offset="0.35" stop-color="#e9cf86"/>
+      <stop offset="0.7" stop-color="#a07d34"/>
+      <stop offset="1" stop-color="#5d4519"/>
+    </linearGradient>
+  </defs>
+  <path d="M60 128 L420 104 L432 150 Q300 158 160 150 Q90 146 60 128 Z" fill="url(#blade)"/>
+  <path d="M60 128 Q120 142 240 146" stroke="#ffffff" stroke-opacity="0.6" stroke-width="2" fill="none"/>
+  <rect x="418" y="96" width="64" height="66" rx="8" fill="url(#brass)"/>
+  <path d="M480 98 L800 110 Q850 114 850 132 Q850 152 800 156 L480 162 Z" fill="url(#wood)"/>
+  <rect x="800" y="108" width="54" height="50" rx="16" fill="url(#brass)"/>
+  <circle cx="452" cy="128" r="7" fill="#5d4519"/>
+  <circle cx="826" cy="133" r="6" fill="#5d4519"/>
+</svg>

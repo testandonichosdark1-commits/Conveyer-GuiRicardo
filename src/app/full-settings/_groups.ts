@@ -476,6 +476,16 @@ export const ALL_GROUPS: Group[] = [
         desc: "USD per 1,000 characters of narration text (Hume Octave's billing unit). Published rates: $0.15 Free/Starter/Creator, $0.12 Pro, $0.10 Scale, $0.05 Business. Defaults to the entry-tier $0.15 — lower it to match your plan.",
         examples: "0.15  /  0.12  /  0.10  /  0.05",
       },
+      {
+        key: "VOICEBOX_URL",
+        desc: "Address of your local Voicebox server (github.com/jamiepine/voicebox — free, open-source voice cloning that runs on your own machine). Leave EMPTY for Voicebox's default, http://127.0.0.1:17493. Voicebox has no API key. The Voicebox app must be open while a run narrates. Audio only, so word timing comes from Groq Whisper (set GROQ_API_KEY).",
+        examples: "(empty) = http://127.0.0.1:17493  /  http://192.168.1.20:17493",
+      },
+      {
+        key: "VOICEBOX_VOICE_ID",
+        desc: "Voicebox voice PROFILE id. Use “Load voices” on the Settings page to pick one of the profiles you created in Voicebox. The profile's own language and engine (Qwen, Chatterbox, …) are used. A channel profile's voice_id overrides it per channel.",
+        examples: "3f2b9c1e-…",
+      },
     ],
   },
   {

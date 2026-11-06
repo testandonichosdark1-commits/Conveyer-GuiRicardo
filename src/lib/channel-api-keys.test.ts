@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { NO_CHARACTER_REFERENCE } from "./character-reference";
 import {
   filterToSecretKeys,
   mergeChannelApiKeys,
@@ -36,6 +37,11 @@ function baseChannel(overrides: Partial<Channel> = {}): Channel {
     interval_sec: 4.5,
     format: "1920x1080",
     avatar_id: null,
+    graphics_enabled: null,
+    graphic_percent: null,
+    graphic_theme: null,
+    edit_style: null,
+    anchor_dir: null,
     created_at: "",
     updated_at: "",
     ...overrides,
@@ -130,13 +136,13 @@ describe("channelSettingOverrides", () => {
     });
   });
 
-  it("a channel with nothing set overrides nothing", () => {
-    expect(channelSettingOverrides(baseChannel())).toEqual({});
+  it("a channel with nothing set overrides nothing — except that it has NO portrait", () => {
+    expect(channelSettingOverrides(baseChannel())).toEqual({ AI_CHARACTER_REFERENCE_PATH: NO_CHARACTER_REFERENCE });
   });
 
-  it("blank voice_provider/character_reference_path are NOT sent as overrides", () => {
+  it("blank voice_provider is not sent; a blank portrait means none, never the global one", () => {
     const channel = baseChannel({ voice_provider: "   ", character_reference_path: "" });
-    expect(channelSettingOverrides(channel)).toEqual({});
+    expect(channelSettingOverrides(channel)).toEqual({ AI_CHARACTER_REFERENCE_PATH: NO_CHARACTER_REFERENCE });
   });
 });
 

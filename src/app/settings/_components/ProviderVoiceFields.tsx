@@ -50,7 +50,8 @@ export function ProviderVoiceFields({ provider, val, set }: { provider: string; 
         </>
       ) : (
         <>
-          <SettingsField label={`${meta.label} — API key`} settingKey={meta.apiKey} val={val} set={set} />
+          {/* A local provider (Voicebox) has no credential, so no key field. */}
+          {meta.apiKey && <SettingsField label={`${meta.label} — API key`} settingKey={meta.apiKey} val={val} set={set} />}
           {is69labs && <Labs69VoiceEngine val={val} set={set} />}
           {/* Any provider that can list its voices gets the picker — the operator never has
               to go hunting for an id. 69labs is excluded because its id's expected FORM

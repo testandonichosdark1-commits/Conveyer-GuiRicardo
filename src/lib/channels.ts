@@ -1,5 +1,6 @@
 import db from "./db";
-import { isSecretKey, shortMask, type SettingKey } from "./settings";
+import { getSetting, isSecretKey, shortMask, type SettingKey } from "./settings";
+import { NO_CHARACTER_REFERENCE } from "./character-reference";
 
 /**
  * Channels ("Chaîne") — a simple per-channel defaults bundle the operator picks
@@ -44,8 +45,8 @@ export interface Channel {
    *  alone is provider-blind — see channelSettingOverrides(). */
   voice_provider: string | null;
   /** Absolute path to this channel's own character-reference portrait (managed by
-   *  /api/channels/[id]/character-reference, never by updateChannel). NULL = global
-   *  AI_CHARACTER_REFERENCE_PATH. */
+   *  /api/channels/[id]/character-reference, never by updateChannel). NULL = no portrait for
+   *  this channel's runs (the global AI_CHARACTER_REFERENCE_PATH applies only to channel-less runs). */
   character_reference_path: string | null;
   /** Comma-separated words that attach the character reference to a beat. NULL = built-in list. */
   character_terms: string | null;
@@ -56,13 +57,24 @@ export interface Channel {
   interval_sec: number;
   format: string;
   avatar_id: number | null;
+  /** Graphic beats: '1' on, '0' off, NULL = global GRAPHICS_ENABLED. */
+  graphics_enabled: string | null;
+  /** Target % of screen time in graphics. NULL = global GRAPHIC_BEAT_PERCENT. */
+  graphic_percent: number | null;
+  /** Graphic theme. NULL = global GRAPHIC_THEME. */
+  graphic_theme: string | null;
+  /** "archive" = historical-documentary edit preset (see ARCHIVE_STYLE_OVERRIDES). NULL = today's look. */
+  edit_style: string | null;
+  /** Folder of protagonist anchor images (ANCHOR_IMAGES_DIR). NULL = off. */
+  anchor_dir: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const COLS =
   "id, name, visual_mode, ai_style, visual_prompt, voice_id, voice_speed, voice_provider, " +
-  "character_reference_path, character_terms, api_keys_json, interval_sec, format, avatar_id, created_at, updated_at";
+  "character_reference_path, character_terms, api_keys_json, interval_sec, format, avatar_id, " +
+  "graphics_enabled, graphic_percent, graphic_theme, edit_style, anchor_dir, created_at, updated_at";
 const listStmt = db.prepare(`SELECT ${COLS} FROM channels ORDER BY name COLLATE NOCASE ASC`);
 const getStmt = db.prepare(`SELECT ${COLS} FROM channels WHERE id = ?`);
 const getByNameStmt = db.prepare(`SELECT ${COLS} FROM channels WHERE name = ?`);
@@ -104,6 +116,89 @@ export interface ChannelInput {
   interval_sec?: number;
   format?: string;
   avatar_id?: number | null;
+  /** Written only when sent (like api_keys_json), so a form without these fields can
+   *  never reset a channel's graphics. */
+  graphics?: ChannelGraphicsInput;
+  /** Written only when sent (undefined = leave as is). "" / null = back to today's look. */
+  edit_style?: string | null;
+  /** Written only when sent. "" / null = no anchor images. */
+  anchor_dir?: string | null;
+}
+
+/** The edit styles a channel may pick. Anything else is stored as NULL. */
+export const EDIT_STYLES = ["archive"] as const;
+
+/**
+ * The "archive" preset — the historical-documentary look (still images only, gentle varied
+ * Ken Burns, short dissolves, archive overlay cards, museum sources, period-authentic AI).
+ * Applied through the same per-run getSetting() override store as every other channel value,
+ * so no call site needs to know a channel exists.
+ */
+export const ARCHIVE_STYLE_OVERRIDES: Readonly<Record<string, string>> = {
+  EDIT_STYLE: "archive",
+  SCENE_TRANSITIONS: "crossfade",
+  SCENE_TRANSITION_MS: "400",
+  KEN_BURNS_RANGE: "0.06",
+  KEN_BURNS_MOTION: "varied",
+  REAL_MEDIA: "image",
+  KIE_AI_MEDIA: "image",
+  FALLBACK_AI_MEDIA: "image",
+  FOOTAGE_SOURCES: "wikimedia,met,artic,loc,openverse",
+  // Long, unhurried holds (the reference holds a still 8–30 s). The channel's own interval
+  // (Seconds per visual) sets the target; this only lifts the hard cap from 10 s.
+  BEAT_MAX_SEC: "18",
+};
+
+/** Store a channel's edit style + anchor folder. Each field is written only when sent. */
+export function setChannelEditStyle(id: number, input: { edit_style?: string | null; anchor_dir?: string | null }): void {
+  if (input.edit_style !== undefined) {
+    const v = (input.edit_style ?? "").trim();
+    const style = (EDIT_STYLES as readonly string[]).includes(v) ? v : null;
+    db.prepare("UPDATE channels SET edit_style = ?, updated_at = datetime('now') WHERE id = ?").run(style, id);
+  }
+  if (input.anchor_dir !== undefined) {
+    const dir = (input.anchor_dir ?? "").trim() || null;
+    db.prepare("UPDATE channels SET anchor_dir = ?, updated_at = datetime('now') WHERE id = ?").run(dir, id);
+  }
+}
+
+export interface ChannelGraphicsInput {
+  enabled: boolean | null;
+  percent?: number | null;
+  theme?: string | null;
+}
+
+/** A request body's `graphics` → ChannelGraphicsInput, or undefined when absent (leave as is). */
+export function parseChannelGraphics(raw: unknown): ChannelGraphicsInput | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const g = raw as { enabled?: unknown; percent?: unknown; theme?: unknown };
+  return {
+    enabled: g.enabled === true ? true : g.enabled === false ? false : null,
+    percent: g.percent == null || g.percent === "" ? null : Number(g.percent),
+    theme: typeof g.theme === "string" ? g.theme : null,
+  };
+}
+
+/** Store a channel's graphic-beat settings. null fields fall back to the global setting. */
+export function setChannelGraphics(id: number, g: ChannelGraphicsInput): void {
+  const pct = g.percent == null || !Number.isFinite(Number(g.percent)) ? null : Math.max(0, Math.min(100, Math.round(Number(g.percent))));
+  const theme = g.theme?.trim() || null;
+  db.prepare("UPDATE channels SET graphics_enabled = ?, graphic_percent = ?, graphic_theme = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(g.enabled == null ? null : g.enabled ? "1" : "0", pct, theme, id);
+}
+
+/**
+ * The graphic-beat config a run on this channel gets, or undefined when graphics are off.
+ * Channel value first, global setting second; off unless one of them says on.
+ */
+export function resolveChannelGraphics(channel: Channel | null): { percent: number; theme: string } | undefined {
+  const flag = channel?.graphics_enabled;
+  const enabled = flag === "1" ? true : flag === "0" ? false : getSetting("GRAPHICS_ENABLED") === "1";
+  if (!enabled) return undefined;
+  const pct = channel?.graphic_percent ?? Number(getSetting("GRAPHIC_BEAT_PERCENT") || "65");
+  const percent = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 65;
+  if (percent <= 0) return undefined;
+  return { percent, theme: channel?.graphic_theme || getSetting("GRAPHIC_THEME") || "arden" };
 }
 
 /** ai33 is the only provider the Channels UI lets an operator pin per channel — see the
@@ -152,6 +247,8 @@ export function createChannel(input: ChannelInput): number {
   // writing on create — the UI only edits keys on an existing channel), so set it only
   // when the caller actually passed something.
   if (input.api_keys_json) setChannelApiKeysJson(id, input.api_keys_json);
+  if (input.graphics) setChannelGraphics(id, input.graphics);
+  setChannelEditStyle(id, input);
   return id;
 }
 
@@ -181,6 +278,8 @@ export function updateChannel(id: number, input: ChannelInput): void {
   // save from a form that doesn't carry api_keys_json (there isn't one today, but future
   // callers might not) can never silently wipe existing overrides.
   if (input.api_keys_json !== undefined) setChannelApiKeysJson(id, input.api_keys_json);
+  if (input.graphics !== undefined) setChannelGraphics(id, input.graphics);
+  setChannelEditStyle(id, input);
 }
 
 export function deleteChannel(id: number): void {
@@ -296,7 +395,8 @@ export function mergeChannelApiKeys(existingJson: string | null | undefined, inc
  * `setChannelSettingOverrides()` — merges its API-key overrides with the two other
  * columns that also map onto a global SettingKey:
  *   - voice_provider  -> VOICEOVER_PROVIDER (so voice_id is no longer provider-blind)
- *   - character_reference_path -> AI_CHARACTER_REFERENCE_PATH
+ *   - character_reference_path -> AI_CHARACTER_REFERENCE_PATH (NO_CHARACTER_REFERENCE when the
+ *     channel has none — a channel never inherits the global portrait)
  * `channel: null` (no channel on this run) returns {} — every global setting applies,
  * unchanged from before this feature existed.
  */
@@ -304,7 +404,12 @@ export function channelSettingOverrides(channel: Channel | null): Record<string,
   if (!channel) return {};
   const out: Record<string, string> = { ...filterToSecretKeys(channel.api_keys_json) };
   if (channel.voice_provider?.trim()) out.VOICEOVER_PROVIDER = channel.voice_provider.trim();
-  if (channel.character_reference_path?.trim()) out.AI_CHARACTER_REFERENCE_PATH = channel.character_reference_path.trim();
+  // A channel's portrait is its OWN or none: the global one belongs to whichever channel set it
+  // up, and inheriting it put that character into other channels' videos (measured 2026-11-06:
+  // a Japanese survival-channel presenter composited into a Nineveh excavation shot).
+  out.AI_CHARACTER_REFERENCE_PATH = channel.character_reference_path?.trim() || NO_CHARACTER_REFERENCE;
   if (channel.character_terms?.trim()) out.AI_CHARACTER_TERMS = channel.character_terms.trim();
+  if (channel.edit_style === "archive") Object.assign(out, ARCHIVE_STYLE_OVERRIDES);
+  if (channel.anchor_dir?.trim()) out.ANCHOR_IMAGES_DIR = channel.anchor_dir.trim();
   return out;
 }

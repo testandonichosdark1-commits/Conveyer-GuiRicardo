@@ -72,8 +72,15 @@ export const SETTING_KEYS = [
   // ── Video assembly (FFmpeg) ───────────────────────────────────────
   "VIDEO_RESOLUTION",        // e.g. 1920x1080
   "VIDEO_FPS",               // 24 / 30 / 60
-  "SCENE_TRANSITIONS",       // Phase 1: "on" = dip-to-black between scenes/beats; "off" (default) = hard cuts, byte-identical to today.
-  "SCENE_TRANSITION_MS",     // Phase 1: dip-to-black duration per side (ms). Clamped to beatDur/3 on short beats. Default 300.
+  "SCENE_TRANSITIONS",       // Phase 1: "on" = dip-to-black between scenes/beats; "off" (default) = hard cuts, byte-identical to today. "crossfade" = short dissolve between full-screen b-roll beats (archive style; ignores the per-run dip toggle).
+  "SCENE_TRANSITION_MS",     // Phase 1: dip-to-black duration per side (ms). Clamped to beatDur/3 on short beats. Default 300. Also the crossfade length when SCENE_TRANSITIONS=crossfade.
+  "VISUAL_WORLD",            // "1" (default) = one Gemini call reads the whole script and defines the video's visual world, which keeps every planned shot on-topic (services/visual-world.ts). Anything else = off; the planner prompt is then byte-identical to before.
+  "EDIT_STYLE",              // "" (default) = today's look | "archive" = historical-documentary look (gentle varied Ken Burns, crossfades, archive overlay cards, period-authentic AI prompts). Normally set per channel (channels.edit_style).
+  "KEN_BURNS_RANGE",         // total zoom of a still across its clip, as a fraction (default 0.18 = 18%). Archive style uses 0.06.
+  "KEN_BURNS_MOTION",        // "zoom" (default: alternate push-in / pull-back) | "varied" (cycle push-in, pull-back, tilt-up, pan; portrait stills crop toward the top)
+  "ANCHOR_IMAGES_DIR",       // folder of protagonist "anchor" images reused across the video (per channel: channels.anchor_dir). Empty = off.
+  "ANCHOR_TERMS",            // comma-separated words that mark a beat as being about the protagonist (empty = AI_CHARACTER_TERMS, else every beat is eligible)
+  "ANCHOR_MIN_GAP_SEC",      // minimum seconds between two anchor beats (default 75)
   "SCENE_DURATION_SECONDS",  // fallback duration when TTS length is unknown
   "TRANSITION_DURATION",     // crossfade between scenes in seconds (0 = none)
   "SCENE_TAIL_SILENCE",      // silence appended to each clip's audio (seconds), creates breathing room between scenes
@@ -84,6 +91,13 @@ export const SETTING_KEYS = [
   "ANIMATION_CONCURRENCY",   // parallel img2vid jobs
   "ASSEMBLE_CONCURRENCY",    // parallel FFmpeg clip renders
   "ASSEMBLE_XFADE_CHUNKS",   // split final xfade into N parallel chunks (1 = monolithic)
+  "GRAPHIC_RENDER_CONCURRENCY", // parallel Chromium pages rendering graphic beats (one browser)
+  // Graphic beats (docs/SPEC-motion-graphics.md) — app-wide defaults; a channel overrides them.
+  "GRAPHICS_ENABLED",           // "1" = runs get full-screen motion graphics; default off
+  "GRAPHIC_BEAT_PERCENT",       // target share of screen time in graphics (0–100)
+  "GRAPHIC_MAX_SEC",            // longest graphic beat (merged sentences)
+  "GRAPHIC_LIST_MAX_SEC",       // longest list-style graphic (spec_callouts, checklist, timeline…)
+  "GRAPHIC_THEME",              // graphic theme (only "arden" exists)
 
   // ── Visual source mix (AI generation + Pexels stock) ──────────────
   "STOCK_RATIO_PERCENT",       // 0–100. % of scenes that use a real Pexels stock clip instead of AI generation. 0 = full AI (default).
@@ -92,7 +106,7 @@ export const SETTING_KEYS = [
   "STOCK_FOOTAGE_MIN_DURATION",// seconds — skip stock stingers shorter than this
 
   // ── Avatar documentary mode ───────────────────────────────────────
-  "VOICEOVER_PROVIDER",        // elevenlabs (direct, word-timestamps) | genaipro | ai84 | fishaudio | hume | 69labs | heygen | minimax
+  "VOICEOVER_PROVIDER",        // elevenlabs (direct, word-timestamps) | genaipro | ai84 | fishaudio | hume | voicebox | 69labs | heygen | minimax
   "ELEVENLABS_VOICE_ID",       // ElevenLabs narration voice_id (the script voiceover)
   "ELEVENLABS_MODEL",          // eleven_multilingual_v2 (default) | eleven_flash_v2_5
   "ELEVENLABS_RETRIES",        // retries for the voiceover call on TRANSIENT failures (500/503/429/timeout/network) before the run fails. Permanent 4xx (bad key/voice/quota) fail fast. attempts = retries + 1. 0 = one-shot. Default 3 (clamped 0–8).
@@ -115,6 +129,8 @@ export const SETTING_KEYS = [
   "HUME_API_KEY",              // Hume AI (api.hume.ai) API key — sent as the `X-Hume-Api-Key` header.
   "HUME_VOICE_ID",             // Hume voice UUID. A bare id resolves against BOTH the Voice Library and custom voices, so no provider is stored alongside it.
   "HUME_VERSION",              // Octave model version: "" = Hume's default | "1" | "2". Octave-2-only voices REQUIRE "2".
+  "VOICEBOX_URL",              // Voicebox local server (github.com/jamiepine/voicebox). Blank = http://127.0.0.1:17493. No key — it has no auth.
+  "VOICEBOX_VOICE_ID",         // Voicebox voice PROFILE id (GET /profiles). The engine (qwen, chatterbox, …) is the profile's own default.
   "COST_HUME_USD_PER_1K_CHARS", // Hume Octave TTS list price per 1,000 characters ($0.15 entry tier, $0.05 on Business).
   "SECONDS_PER_VISUAL",        // seconds each image/clip stays on screen (default 4.5)
   // Longest voiceover an operator may upload, in minutes. The binding constraint is Groq's
@@ -563,6 +579,13 @@ export const DEFAULTS: Record<SettingKey, string> = {
   VIDEO_FPS: "30",
   SCENE_TRANSITIONS: "off",
   SCENE_TRANSITION_MS: "300",
+  VISUAL_WORLD: "1",
+  EDIT_STYLE: "",
+  KEN_BURNS_RANGE: "0.18",
+  KEN_BURNS_MOTION: "zoom",
+  ANCHOR_IMAGES_DIR: "",
+  ANCHOR_TERMS: "",
+  ANCHOR_MIN_GAP_SEC: "75",
   SCENE_DURATION_SECONDS: "5",
   TRANSITION_DURATION: "0.5",
   SCENE_TAIL_SILENCE: "0.4",
@@ -573,6 +596,12 @@ export const DEFAULTS: Record<SettingKey, string> = {
   ANIMATION_CONCURRENCY: "3",
   ASSEMBLE_CONCURRENCY: "4",
   ASSEMBLE_XFADE_CHUNKS: "4",
+  GRAPHIC_RENDER_CONCURRENCY: "2",
+  GRAPHICS_ENABLED: "0",
+  GRAPHIC_BEAT_PERCENT: "65",
+  GRAPHIC_MAX_SEC: "20",
+  GRAPHIC_LIST_MAX_SEC: "45",
+  GRAPHIC_THEME: "arden",
 
   // Visual source mix (AI + Pexels stock)
   STOCK_RATIO_PERCENT: "0",
@@ -605,6 +634,8 @@ export const DEFAULTS: Record<SettingKey, string> = {
   HUME_VOICE_ID: "",
   HUME_VERSION: "",
   COST_HUME_USD_PER_1K_CHARS: "0.15",
+  VOICEBOX_URL: "",
+  VOICEBOX_VOICE_ID: "",
   SECONDS_PER_VISUAL: "4.5",
   UPLOAD_MAX_MINUTES: "50",
   BEAT_MIN_SEC: "3",
@@ -671,7 +702,7 @@ export const DEFAULTS: Record<SettingKey, string> = {
   FLOW_FALLBACK_PROVIDER: "none",
   FLOW_IMAGE_MODEL: defaultAiModel("flow_browser", "image"),
   // Empty by default — an operator opts in once they know their account's limit shape.
-  // "nano-banana-2" is the suggested value, not assumed: see flow-browser.ts's
+  // "nano-banana-2.1" is the suggested value, not assumed: see flow-browser.ts's
   // ensureImageModel()/generateFlowImage() doc comments for why this isn't hardcoded.
   VIDS_FIRST: "off",
   VIDS_PROJECT_URL: "",

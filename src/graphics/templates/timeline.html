@@ -1,0 +1,109 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../theme.css">
+<style>
+  .axis { position: absolute; left: 0; width: 1920px; height: 2px; background: var(--faint); }
+  .track { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; }
+  .mark { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; border: 2px solid var(--muted); box-sizing: border-box; background: var(--bg-dark); }
+  body.bg-parchment .mark { background: var(--parchment); }
+  .mark.focus { border-color: var(--gold-line); box-shadow: 0 0 0 7px rgba(201,162,39,0.18); }
+  .mark.focus::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--gold-line); }
+  .mark-year { position: absolute; transform: translateX(-50%); font-family: var(--f-mono); font-size: 17px; letter-spacing: 0.12em; color: var(--muted); }
+  .stem { position: absolute; width: 2px; background: var(--ink); opacity: 0.8; transform-origin: 50% 100%; }
+  .year { position: absolute; font-family: var(--f-title); font-weight: 600; font-size: 210px; color: var(--ink); }
+  .year .odo-col { width: 0.56em; }
+  .info { position: absolute; }
+  .info .idx { font-family: var(--f-mono); font-size: 18px; color: var(--gold-text); letter-spacing: 0.2em; }
+  .info .lbl { font-family: var(--f-title); font-weight: 600; font-size: 44px; text-transform: uppercase; color: var(--ink); margin-top: 6px; }
+  .info .sub { font-family: var(--f-serif); font-style: italic; font-size: 28px; color: var(--muted); margin-top: 4px; }
+  .list { position: absolute; left: 1160px; width: 620px; }
+  .li { display: flex; gap: 26px; align-items: baseline; padding: 18px 0; border-bottom: 2px solid rgba(154, 142, 122, 0.35); }
+  .li .y { font-family: var(--f-mono); font-weight: 500; font-size: 24px; color: var(--gold-text); }
+  .li .t { font-family: var(--f-title); font-weight: 500; font-size: 32px; text-transform: uppercase; color: var(--ink); letter-spacing: 0.02em; }
+  .pager { position: absolute; right: 120px; top: 92px; display: flex; gap: 10px; align-items: center; font-family: var(--f-mono); font-size: 17px; color: var(--muted); letter-spacing: 0.15em; }
+  .pager i { display: block; width: 26px; height: 3px; background: var(--faint); }
+  .pager i.on { background: var(--ink); }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script src="../runtime.js"></script>
+<script>
+/*
+ * timeline — the axis slides from the first event to the focus event while the big year rolls
+ * there (refs 04:06 → 04:12); then the focus event is named and the events are listed.
+ */
+window.__template = {
+  async setup(stage, data, ctx) {
+    const { el, animate, onSeek, easeInOut } = GR;
+    const D = ctx.durationMs;
+    const ev = data.events;
+    const focus = data.focus != null ? data.focus : ev.length - 1;
+    const AX = 300, AY = 760, STEP = 440;
+
+    if (data.title) {
+      const t = el("div", "abs tag-label", stage, data.title);
+      t.style.left = "120px"; t.style.top = "92px";
+      animate(t, [{ opacity: 0 }, { opacity: 1 }], { start: 0, duration: 500 });
+    }
+    const pager = el("div", "pager", stage);
+    ev.forEach((_, i) => el("i", i === focus ? "on" : "", pager));
+    el("span", "", pager, String(focus + 1).padStart(2, "0") + " / " + String(ev.length).padStart(2, "0"));
+    animate(pager, [{ opacity: 0 }, { opacity: 1 }], { start: 0, duration: 500 });
+
+    const axis = el("div", "axis", stage); axis.style.top = AY + "px";
+    const track = el("div", "track", stage);
+    ev.forEach((e, i) => {
+      const x = AX + (i - focus) * STEP;
+      const m = el("div", "mark" + (i === focus ? " focus" : ""), track);
+      m.style.left = x + "px"; m.style.top = (AY + 1) + "px";
+      if (i !== focus) {
+        const y = el("div", "mark-year", track, String(e.year));
+        y.style.left = x + "px"; y.style.top = (AY + 22) + "px";
+      }
+    });
+
+    const rollStart = 300;
+    const rollDur = focus > 0 ? Math.min(2400, Math.max(1000, D * 0.4)) : 1200;
+    const shift = focus * STEP;
+    onSeek((ms) => {
+      const p = easeInOut((ms - rollStart) / rollDur);
+      track.style.transform = "translateX(" + (shift * (1 - p)).toFixed(2) + "px)";
+    });
+
+    const stem = el("div", "stem", stage);
+    stem.style.left = (AX - 1) + "px"; stem.style.top = "330px"; stem.style.height = (AY - 330) + "px";
+    animate(stem, [{ transform: "scaleY(0)" }, { transform: "scaleY(1)" }], { start: 0, duration: 600 });
+
+    const year = el("div", "year", stage);
+    year.style.left = (AX + 36) + "px"; year.style.top = "350px";
+    const to = ev[focus].year;
+    GR.odometer(year, { to, from: focus > 0 ? ev[0].year : Math.max(0, to - 30), sep: "", minDigits: 4, start: rollStart, duration: rollDur });
+    animate(year, [{ opacity: 0 }, { opacity: 1 }], { start: 100, duration: 400 });
+
+    const info = el("div", "info", stage);
+    info.style.left = (AX + 36) + "px"; info.style.top = (AY + 34) + "px";
+    el("div", "idx", info, String(focus + 1).padStart(2, "0"));
+    el("div", "lbl", info, ev[focus].label);
+    if (ev[focus].sub) el("div", "sub", info, ev[focus].sub);
+    const named = rollStart + rollDur;
+    animate(info, [{ opacity: 0, transform: "translateY(12px)" }, { opacity: 1, transform: "translateY(0)" }], { start: named, duration: 500 });
+
+    // The list: every event in order, one by one once the year has landed.
+    const list = el("div", "list", stage);
+    const rows = ev.map((e) => {
+      const r = el("div", "li", list);
+      el("span", "y", r, String(e.year));
+      el("span", "t", r, e.label);
+      return r;
+    });
+    list.style.top = (AY - 60 - list.offsetHeight) + "px";
+    const times = GR.scheduleEntries(ev, [], D, { windowStartMs: named + 300, windowEndMs: Math.max(named + 400, D * 0.8) });
+    rows.forEach((r, i) => animate(r, [{ opacity: 0, transform: "translateX(24px)" }, { opacity: i === focus ? 1 : 0.7, transform: "translateX(0)" }], { start: times[i], duration: 450 }));
+  },
+};
+</script>
+</body>
+</html>

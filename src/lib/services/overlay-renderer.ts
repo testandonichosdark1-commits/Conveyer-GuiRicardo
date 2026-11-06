@@ -3,7 +3,14 @@ import path from "node:path";
 import sharp from "sharp";
 import { log } from "../logger";
 import type { Beat, Overlay } from "./studio-plan";
-import { DEFAULT_OVERLAY_THEME, PRESTIGE_THEME, type OverlayTheme } from "./overlay-themes";
+import {
+  DEFAULT_OVERLAY_THEME,
+  PRESTIGE_THEME,
+  ARCHIVE_LABEL_THEME,
+  ARCHIVE_STATEMENT_THEME,
+  ARCHIVE_CALLOUT_THEME,
+  type OverlayTheme,
+} from "./overlay-themes";
 
 // Re-exported so existing importers (tests, assembler) keep resolving these from the renderer.
 export { DEFAULT_OVERLAY_THEME } from "./overlay-themes";
@@ -54,7 +61,14 @@ export interface OverlayPlan {
  * stamps (`date`) get the large centred serif PRESTIGE treatment — this is what makes a countdown
  * "10" render large and on the baseline. Everything else stays on the documentary lower-third.
  */
-export function themeForOverlay(overlay: Overlay): OverlayTheme {
+export function themeForOverlay(overlay: Overlay, editStyle?: string): OverlayTheme {
+  // Archive look: place/date, names and titles are bottom-left labels; a quote is the big
+  // centred statement line; a fact is the yellow callout.
+  if (editStyle === "archive") {
+    if (overlay.type === "quote") return ARCHIVE_STATEMENT_THEME;
+    if (overlay.type === "fact") return ARCHIVE_CALLOUT_THEME;
+    return ARCHIVE_LABEL_THEME;
+  }
   return overlay.type === "section" || overlay.type === "date" ? PRESTIGE_THEME : DEFAULT_OVERLAY_THEME;
 }
 
@@ -226,7 +240,7 @@ export function buildCardSvg(
   const shadow = px(theme.shadowFrac, theme.shadowMin);
   const tracking = Math.round(titleFont * theme.titleLetterSpacingRatio);
   const lineGap = Math.round(subFont * theme.lineGapRatio);
-  const centered = theme.placement === "lower-center";
+  const centered = theme.placement === "lower-center" || theme.placement === "center";
 
   const textX = accentW + pad;
   // Both uses of the estimate are corrected by the SAME factor, in opposite directions: the
@@ -314,7 +328,10 @@ export function buildCardSvg(
     `</svg>`;
 
   const x = centered ? Math.round((w - cardW) / 2) : Math.round(w * theme.marginXFrac);
-  const y = Math.max(Math.round(h * theme.marginTopMinFrac), h - cardH - Math.round(h * theme.marginBottomFrac));
+  const y =
+    theme.placement === "center"
+      ? Math.max(0, Math.round((h - cardH) / 2))
+      : Math.max(Math.round(h * theme.marginTopMinFrac), h - cardH - Math.round(h * theme.marginBottomFrac));
   return { svg, geo: { x, y, w: cardW, h: cardH } };
 }
 
@@ -456,17 +473,19 @@ export async function buildOverlayPlan(
   beats: readonly Beat[],
   dim: { w: number; h: number },
   overlaysDir: string,
-  runId: string
+  runId: string,
+  /** EDIT_STYLE — "archive" picks the archive card themes. Omitted = today's themes. */
+  editStyle?: string
 ): Promise<OverlayPlan | null> {
   interface Job { overlay: Overlay; theme: OverlayTheme; startMs: number; endMs: number; pngPath: string; label: string }
   const jobs: Job[] = [];
   for (const b of beats) {
     const idx = String(b.index).padStart(4, "0");
     if (b.overlay?.title) {
-      jobs.push({ overlay: b.overlay, theme: themeForOverlay(b.overlay), startMs: b.overlayStartMs ?? b.startMs, endMs: b.overlayEndMs ?? b.endMs, pngPath: path.join(overlaysDir, `overlay_${idx}.png`), label: `beat ${b.index}` });
+      jobs.push({ overlay: b.overlay, theme: themeForOverlay(b.overlay, editStyle), startMs: b.overlayStartMs ?? b.startMs, endMs: b.overlayEndMs ?? b.endMs, pngPath: path.join(overlaysDir, `overlay_${idx}.png`), label: `beat ${b.index}` });
     }
     if (b.supporting?.title && b.supportingStartMs != null && b.supportingEndMs != null) {
-      jobs.push({ overlay: b.supporting, theme: themeForOverlay(b.supporting), startMs: b.supportingStartMs, endMs: b.supportingEndMs, pngPath: path.join(overlaysDir, `support_${idx}.png`), label: `beat ${b.index} (supporting)` });
+      jobs.push({ overlay: b.supporting, theme: themeForOverlay(b.supporting, editStyle), startMs: b.supportingStartMs, endMs: b.supportingEndMs, pngPath: path.join(overlaysDir, `support_${idx}.png`), label: `beat ${b.index} (supporting)` });
     }
   }
   if (jobs.length === 0) return null;

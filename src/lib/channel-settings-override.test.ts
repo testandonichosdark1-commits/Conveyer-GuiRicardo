@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { getSetting, setChannelSettingOverrides, clearChannelSettingOverrides } from "./settings";
+import { resolveCharacterReference, NO_CHARACTER_REFERENCE } from "./character-reference";
 
 /**
  * The AsyncLocalStorage-based channel-override seam in settings.ts. This is what lets a
@@ -37,6 +38,16 @@ describe("channel setting overrides", () => {
     expect(getSetting("HEYGEN_API_KEY")).not.toBe("");
     // i.e. it fell through to the normal DB/env lookup, whatever that value is — the
     // meaningful assertion is just that "" from the override map was never returned.
+  });
+
+  it("a channel with no portrait reads as NO portrait — the sentinel never leaks out as a path", () => {
+    setChannelSettingOverrides({ AI_CHARACTER_REFERENCE_PATH: NO_CHARACTER_REFERENCE });
+    expect(resolveCharacterReference(getSetting("AI_CHARACTER_REFERENCE_PATH"))).toBe("");
+  });
+
+  it("a channel's own portrait is returned as-is", () => {
+    setChannelSettingOverrides({ AI_CHARACTER_REFERENCE_PATH: "/data/channels/8/character-reference.png" });
+    expect(resolveCharacterReference(getSetting("AI_CHARACTER_REFERENCE_PATH"))).toBe("/data/channels/8/character-reference.png");
   });
 
   it("clearChannelSettingOverrides() removes every override", () => {

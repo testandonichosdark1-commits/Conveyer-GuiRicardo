@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../theme.css">
+<style>
+  .block { position: absolute; top: 0; height: 1080px; display: flex; flex-direction: column; justify-content: center; }
+  .numrow { display: flex; align-items: flex-end; gap: 0.08em; font-family: var(--f-title); font-weight: 600; color: var(--ink); margin-top: 18px; }
+  .prefix { color: var(--gold-text); font-size: 0.5em; line-height: 1; margin-bottom: 0.08em; }
+  .suffix { color: var(--gold-text); font-size: 0.3em; text-transform: uppercase; line-height: 1; margin: 0 0 0.12em 0.2em; letter-spacing: 0.02em; }
+  .odo .odo-col { margin: 0 0.03em; background: rgba(255, 255, 255, 0.035); box-shadow: inset 0 -0.5em 0 rgba(0,0,0,0.12); }
+  body.bg-parchment .odo .odo-col { background: rgba(60, 40, 10, 0.05); box-shadow: inset 0 -0.5em 0 rgba(60,40,10,0.03); }
+  .odo .odo-sep { color: var(--gold-text); }
+  .caption { font-family: var(--f-serif); font-style: italic; font-size: 34px; color: var(--muted); margin-top: 22px; max-width: 900px; }
+  .rule { height: 2px; background: var(--faint); margin-top: 22px; width: 420px; transform-origin: 0 50%; }
+  .kicker { font-family: var(--f-title); font-weight: 600; font-size: 58px; color: var(--gold-text); text-transform: uppercase; margin-top: 26px; line-height: 1; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script src="../runtime.js"></script>
+<script>
+/*
+ * counter — a big number rolling up like an odometer (refs 00:21, 02:45, 07:12). Leading
+ * zeros show during the roll, separators sit in gold, an optional product floats beside it.
+ */
+window.__template = {
+  async setup(stage, data, ctx) {
+    const { el, animate } = GR;
+    const D = ctx.durationMs;
+    const hasImg = !!data.image;
+    const block = el("div", "block", stage);
+    const maxW = hasImg ? 920 : 1500;
+    block.style.left = (hasImg ? 150 : 210) + "px";
+    let overline = null, caption = null, rule = null, kicker = null;
+    if (data.overline) overline = el("div", "overline", block, data.overline);
+    const row = el("div", "numrow", block);
+    if (data.prefix) el("span", "prefix", row, data.prefix);
+    const rollStart = 400;
+    const rollDur = Math.min(2600, Math.max(900, D * 0.5));
+    GR.odometer(row, { to: data.value, from: data.from || 0, start: rollStart, duration: rollDur });
+    if (data.suffix) {
+      // a unit sign ("%", "M") reads as part of the number; a word ("a year") stays small
+      const sx = el("span", "suffix", row, data.suffix);
+      if (data.suffix.length <= 2) { sx.style.fontSize = "0.5em"; sx.style.marginBottom = "0.08em"; }
+    }
+    if (data.caption) { rule = el("div", "rule", block); caption = el("div", "caption", block, data.caption); }
+    if (data.kicker) kicker = el("div", "kicker", block, data.kicker);
+
+    // Short numbers get bigger type: "25%" at the size of "39,000,000" is lost in the frame.
+    let px = 300;
+    row.style.fontSize = px + "px";
+    while (px > 70 && row.scrollWidth > maxW) { px -= 4; row.style.fontSize = px + "px"; }
+    if (!hasImg) {
+      block.style.alignItems = "center";
+      block.style.left = "0"; block.style.width = "1920px";
+      if (caption) caption.style.textAlign = "center";
+    } else {
+      // The product sits beside what the text actually occupies, not at a fixed far edge.
+      const textRight = 150 + Math.max(...Array.from(block.children).map((c) => c.scrollWidth));
+      const cx = Math.min(1480, Math.max(textRight + 380, 1180));
+      const prod = await GR.product(stage, data.image, { cx, cy: 500, w: 640, h: 400 });
+      animate(prod.entry, [{ opacity: 0, transform: "translateX(50px)" }, { opacity: 1, transform: "translateX(0)" }], { start: 0, duration: 800 });
+      animate(prod.shadow, [{ opacity: 0 }, { opacity: 1 }], { start: 0, duration: 800 });
+    }
+
+    if (overline) animate(overline, [{ opacity: 0, transform: "translateY(10px)" }, { opacity: 1, transform: "translateY(0)" }], { start: 100, duration: 500 });
+    animate(row, [{ opacity: 0 }, { opacity: 1 }], { start: 150, duration: 400 });
+    const after = rollStart + rollDur * 0.7;
+    if (rule) animate(rule, [{ transform: "scaleX(0)" }, { transform: "scaleX(1)" }], { start: after - 200, duration: 500 });
+    if (caption) animate(caption, [{ opacity: 0, transform: "translateY(10px)" }, { opacity: 1, transform: "translateY(0)" }], { start: after, duration: 600 });
+    if (kicker) animate(kicker, [{ opacity: 0, transform: "translateY(14px)" }, { opacity: 1, transform: "translateY(0)" }], { start: Math.min(D - 700, rollStart + rollDur + 300), duration: 600 });
+  },
+};
+</script>
+</body>
+</html>

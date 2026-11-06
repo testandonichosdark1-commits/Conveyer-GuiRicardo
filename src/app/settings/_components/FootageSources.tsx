@@ -9,6 +9,10 @@ const ALL_FOOTAGE: { id: string; label: string; disabled?: boolean; needsKey?: b
   { id: "pixabay", label: "Pixabay" },
   { id: "openverse", label: "Openverse" },
   { id: "wikimedia", label: "Wikimedia" },
+  // Museum / library archives (public-domain stills, no key) — the archive edit style uses these.
+  { id: "met", label: "The Met (museum)" },
+  { id: "artic", label: "Art Institute of Chicago" },
+  { id: "loc", label: "Library of Congress" },
   { id: "archive", label: "Archive.org" },
   // Web (Google CSE) — needs GOOGLE_CSE_KEY + GOOGLE_CSE_CX to return results.
   { id: "web", label: "Web (Google)" },

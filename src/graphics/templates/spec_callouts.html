@@ -1,0 +1,140 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../theme.css">
+<style>
+  .card {
+    position: absolute; width: 500px; box-sizing: border-box;
+    display: flex; gap: 18px; align-items: flex-start;
+    padding: 18px 22px 18px 18px;
+    background: rgba(0, 0, 0, 0.34);
+    border-left: 2px solid rgba(201, 162, 39, 0.0);
+  }
+  body.bg-parchment .card { background: rgba(255, 252, 244, 0.55); }
+  .badge {
+    flex: none; width: 38px; height: 38px; margin-top: 1px;
+    background: var(--gold-line); color: #1E1A15;
+    font-family: var(--f-mono); font-weight: 700; font-size: 16px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .card-label { font-family: var(--f-title); font-weight: 500; font-size: 27px; line-height: 1.12; text-transform: uppercase; letter-spacing: 0.03em; color: var(--ink); }
+  .card-sub { font-family: var(--f-serif); font-style: italic; font-size: 22px; line-height: 1.2; color: var(--muted); margin-top: 3px; }
+  svg.wires { position: absolute; left: 0; top: 0; overflow: visible; }
+  .wire { fill: none; stroke: var(--muted); stroke-width: 1.6; }
+  .dot-ring { fill: none; stroke: var(--ink); stroke-width: 2; opacity: 0.85; }
+  .dot { fill: var(--gold-line); }
+  .name { font-family: var(--f-title); font-weight: 600; font-size: 46px; text-transform: uppercase; color: var(--ink); line-height: 1; }
+  .name-row { display: flex; align-items: center; gap: 14px; margin-top: 12px; }
+  .price {
+    background: var(--gold-line); color: #1E1A15; font-family: var(--f-title); font-weight: 600;
+    font-size: 22px; padding: 3px 12px 4px; border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script src="../runtime.js"></script>
+<script>
+/*
+ * spec_callouts — product with numbered labels wired to points on it (refs 02:00, 10:12,
+ * 14:12). Each label enters on its cueWord (else spread over the first 60%), its wire draws
+ * to the anchor, and the previous label dims so the eye follows the newest one.
+ */
+window.__template = {
+  async setup(stage, data, ctx) {
+    const { el, animate, scheduleEntries } = GR;
+    const D = ctx.durationMs;
+    const NS = "http://www.w3.org/2000/svg";
+    const right = data.labelsSide === "right";
+    const box = right ? { cx: 700, cy: 470, w: 1080, h: 460 } : { cx: 1220, cy: 470, w: 1080, h: 460 };
+    const prod = await GR.product(stage, data.image, box, { shadowGap: 50 });
+    animate(prod.entry, [{ opacity: 0, transform: "translateX(" + (right ? -50 : 50) + "px)" }, { opacity: 1, transform: "translateX(0)" }], { start: 0, duration: 800 });
+    animate(prod.shadow, [{ opacity: 0 }, { opacity: 1 }], { start: 0, duration: 800 });
+
+    // ── name block ──
+    const nb = el("div", "abs", stage);
+    nb.style.left = (right ? 1300 : 110) + "px";
+    const name = el("div", "name", nb, data.name);
+    if (data.price || data.sub) {
+      const row = el("div", "name-row", nb);
+      if (data.price) el("span", "price", row, data.price);
+      if (data.sub) el("span", "mono-small", row, data.sub);
+    }
+    nb.style.top = (960 - nb.offsetHeight) + "px";
+    animate(nb, [{ opacity: 0, transform: "translateY(14px)" }, { opacity: 1, transform: "translateY(0)" }], { start: 250, duration: 600 });
+
+    // ── cards: placed near their anchor's height, then pushed apart so none overlap ──
+    const specs = data.specs;
+    const cardX = right ? 1920 - 110 - 500 : 110;
+    const anchors = specs.map((s) => ({ x: prod.drawn.x + s.anchor.x * prod.drawn.w, y: prod.drawn.y + s.anchor.y * prod.drawn.h }));
+    const cards = specs.map((s, i) => {
+      const c = el("div", "card", stage);
+      c.style.left = cardX + "px";
+      el("div", "badge", c, String(i + 1).padStart(2, "0"));
+      const body = el("div", "", c);
+      el("div", "card-label", body, s.label);
+      if (s.sub) el("div", "card-sub", body, s.sub);
+      return c;
+    });
+    const GAP = 22, TOP = 120, BOTTOM = 820;
+    const total = cards.reduce((a, c) => a + c.offsetHeight, 0) + GAP * (cards.length - 1);
+    // Stacked in order (01 on top), centred on the anchors' mean height, kept on screen.
+    const meanY = anchors.reduce((a, p) => a + p.y, 0) / anchors.length;
+    let y = Math.min(Math.max(TOP, meanY - total / 2), Math.max(TOP, BOTTOM - total));
+    const ys = cards.map((c) => { const top = y; c.style.top = top + "px"; y += c.offsetHeight + GAP; return top; });
+
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("class", "wires"); svg.setAttribute("width", "1920"); svg.setAttribute("height", "1080");
+    stage.appendChild(svg);
+
+    const times = scheduleEntries(specs, ctx.words, D, { windowStartMs: 700 });
+    cards.forEach((c, i) => {
+      const t = times[i];
+      const next = i + 1 < times.length ? Math.max(times[i + 1], t + 500) : null;
+      const sx = right ? cardX : cardX + 500;
+      const sy = ys[i] + c.offsetHeight / 2;
+      const a = anchors[i];
+      const ex = right ? Math.min(a.x + 110, sx - 30) : Math.max(a.x - 110, sx + 30);
+      const path = document.createElementNS(NS, "path");
+      path.setAttribute("class", "wire");
+      path.setAttribute("d", "M" + sx + " " + sy + " L" + ex + " " + sy + " L" + a.x + " " + a.y);
+      path.setAttribute("pathLength", "1");
+      path.style.strokeDasharray = "1";
+      svg.appendChild(path);
+      const ring = document.createElementNS(NS, "circle");
+      ring.setAttribute("class", "dot-ring"); ring.setAttribute("cx", a.x); ring.setAttribute("cy", a.y); ring.setAttribute("r", "11");
+      const dot = document.createElementNS(NS, "circle");
+      dot.setAttribute("class", "dot"); dot.setAttribute("cx", a.x); dot.setAttribute("cy", a.y); dot.setAttribute("r", "5");
+      svg.appendChild(ring); svg.appendChild(dot);
+
+      const dx = right ? 24 : -24;
+      if (next == null) {
+        animate(c, [{ opacity: 0, transform: "translateX(" + dx + "px)" }, { opacity: 1, transform: "translateX(0)" }], { start: t, duration: 450 });
+      } else {
+        // one animation: enter, hold, then dim when the next label arrives
+        const span = next + 400 - t;
+        animate(c, [
+          { opacity: 0, transform: "translateX(" + dx + "px)", offset: 0 },
+          { opacity: 1, transform: "translateX(0)", offset: 450 / span },
+          { opacity: 1, transform: "translateX(0)", offset: (next - t) / span },
+          { opacity: 0.45, transform: "translateX(0)", offset: 1 },
+        ], { start: t, duration: span, easing: "linear" });
+      }
+      animate(path, [{ strokeDashoffset: "1" }, { strokeDashoffset: "0" }], { start: t + 150, duration: 450 });
+      animate(ring, [{ opacity: 0 }, { opacity: 1 }], { start: t + 550, duration: 200 });
+      animate(dot, [{ opacity: 0 }, { opacity: 1 }], { start: t + 550, duration: 200 });
+    });
+
+    if (data.stamp) {
+      const last = times[times.length - 1];
+      GR.stamp(stage, data.stamp, ctx.words, {
+        x: Math.min(1740, prod.drawn.x + prod.drawn.w * 0.85), y: Math.max(150, prod.drawn.y - 70),
+        rotate: 7, maxWidth: 300, start: Math.min(D - 800, last + 1200),
+      });
+    }
+  },
+};
+</script>
+</body>
+</html>

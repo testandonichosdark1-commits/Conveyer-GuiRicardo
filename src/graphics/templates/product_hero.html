@@ -1,0 +1,194 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../theme.css">
+<style>
+  .rays {
+    width: 2800px; height: 2800px; border-radius: 50%;
+    background: repeating-conic-gradient(from 0deg, var(--ray) 0deg 0.55deg, transparent 0.55deg 5.5deg);
+    -webkit-mask-image: radial-gradient(circle, rgba(0,0,0,0) 0, rgba(0,0,0,0.3) 5%, #000 11%, rgba(0,0,0,0.4) 22%, rgba(0,0,0,0) 34%);
+            mask-image: radial-gradient(circle, rgba(0,0,0,0) 0, rgba(0,0,0,0.3) 5%, #000 11%, rgba(0,0,0,0.4) 22%, rgba(0,0,0,0) 34%);
+  }
+  .warm {
+    width: 1400px; height: 900px;
+    background: radial-gradient(ellipse at center, rgba(201,162,39,0.10) 0%, rgba(201,162,39,0) 62%);
+  }
+  .halo {
+    width: 1300px; height: 900px;
+    background: radial-gradient(ellipse at center, rgba(255,226,150,0.95) 0%, rgba(232,190,90,0.7) 16%, rgba(201,162,39,0.32) 36%, rgba(201,162,39,0) 64%);
+  }
+  .streak {
+    width: 2600px; height: 10px;
+    background: linear-gradient(90deg, rgba(255,240,200,0) 0%, rgba(255,240,200,0.9) 46%, #fff 50%, rgba(255,240,200,0.9) 54%, rgba(255,240,200,0) 100%);
+    box-shadow: 0 0 28px 8px rgba(255,214,120,0.45);
+    border-radius: 6px;
+  }
+  .shadow {
+    height: 70px;
+    background: radial-gradient(ellipse at center, var(--shadow) 0%, rgba(0,0,0,0) 70%);
+    filter: blur(6px);
+  }
+  .product img { display: block; width: 100%; height: 100%; object-fit: contain; }
+  .text-block {
+    top: 0; height: 1080px; width: 800px;
+    display: flex; flex-direction: column; justify-content: center;
+  }
+  .text-block.align-right { align-items: flex-start; }
+  .title { margin-top: 18px; }
+  .subtitle { font-size: 40px; margin-top: 14px; max-width: 760px; line-height: 1.25; }
+  .chip {
+    margin-top: 30px; align-self: flex-start;
+    border: 2px solid var(--gold-line); color: var(--gold-text);
+    font-family: var(--f-mono); font-weight: 500; font-size: 22px; letter-spacing: 0.22em;
+    text-transform: uppercase; padding: 12px 20px 11px;
+  }
+  .qmarks {
+    font-family: var(--f-title); font-weight: 600; font-size: 140px; line-height: 1;
+    color: var(--gold-text);
+  }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script src="../runtime.js"></script>
+<script>
+/*
+ * product_hero — cut-out product with rays and a floating shadow, big condensed title
+ * beside it (refs 00:00, 01:51, 06:15). reveal: black silhouette in a gold bloom with
+ * "???", then the product lights up and the title arrives (refs 01:48, 12:30).
+ */
+window.__template = {
+  async setup(stage, data, ctx) {
+    const { el, animate, onSeek, fitText, wordSpans, splitLines, cueStart, scheduleEntries } = GR;
+    const D = ctx.durationMs;
+    const right = data.productSide === "right";
+    const cx = right ? 1330 : 600, cy = 520;
+    const boxW = 780, boxH = 440;
+
+    const rays = el("div", "abs rays", stage);
+    rays.style.left = (cx - 1400) + "px"; rays.style.top = (cy - 1400) + "px";
+    const warm = el("div", "abs warm", stage);
+    warm.style.left = (cx - 700) + "px"; warm.style.top = (cy - 450) + "px";
+
+    let halo = null, streak = null;
+    if (data.reveal) {
+      halo = el("div", "abs halo", stage);
+      halo.style.left = (cx - 650) + "px"; halo.style.top = (cy - 450) + "px";
+      streak = el("div", "abs streak", stage);
+      streak.style.left = (cx - 1300) + "px"; streak.style.top = (cy - 5) + "px";
+      streak.style.transform = "rotate(-68deg)";
+    }
+
+    const shadow = el("div", "abs shadow", stage);
+    const floatEl = el("div", "abs product", stage);
+    floatEl.style.left = (cx - boxW / 2) + "px"; floatEl.style.top = (cy - boxH / 2) + "px";
+    floatEl.style.width = boxW + "px"; floatEl.style.height = boxH + "px";
+    const entry = el("div", "", floatEl);
+    entry.style.width = "100%"; entry.style.height = "100%";
+    const img = el("img", "", entry);
+    img.src = data.image;
+    await img.decode();
+
+    // The shadow sits under what the image actually draws, not under its box.
+    const ar = img.naturalWidth / Math.max(1, img.naturalHeight);
+    const drawnW = Math.min(boxW, boxH * ar), drawnH = Math.min(boxH, boxW / ar);
+    const shadowW = drawnW * 0.78;
+    shadow.style.width = shadowW + "px";
+    shadow.style.left = (cx - shadowW / 2) + "px";
+    shadow.style.top = (cy + drawnH / 2 + 46) + "px";
+
+    // ── text ──
+    const tb = el("div", "abs text-block", stage);
+    tb.style.left = (right ? 150 : 1030) + "px";
+    let overline = null, qmarks = null;
+    if (data.overline) overline = el("div", "overline", tb, data.overline);
+    if (data.reveal) qmarks = el("div", "qmarks", tb, "???");
+    const title = el("div", "title", tb);
+    wordSpans(title, data.title);
+    // The reference always stacks a multi-word name ("MINI / MAGLITE", "LED / LENSER P7"):
+    // break at the word boundary that best balances the two lines, first line not longer.
+    const ws = Array.from(title.querySelectorAll(".word"));
+    if (ws.length >= 2) {
+      const len = ws.map((w) => w.textContent.length);
+      const total = len.reduce((a, b) => a + b, 0);
+      let best = 1, bestCost = Infinity, acc = 0;
+      for (let k = 1; k < ws.length; k++) {
+        acc += len[k - 1];
+        const cost = Math.abs(total - 2 * acc) + (acc > total - acc ? 0.5 : 0);
+        if (cost < bestCost) { bestCost = cost; best = k; }
+      }
+      title.insertBefore(document.createElement("br"), ws[best]);
+    }
+    fitText(title, 150, 64, 780, 400);
+    const lines = splitLines(title);
+    let subtitle = null, chip = null;
+    if (data.subtitle) subtitle = el("div", "serif-italic subtitle", tb, data.subtitle);
+    if (data.chip) chip = el("div", "chip", tb, data.chip);
+    if (qmarks) {
+      // "???" occupies the title's slot until the reveal; the title then takes it over.
+      qmarks.style.position = "absolute";
+      qmarks.style.top = title.offsetTop + "px";
+    }
+
+    // ── choreography ──
+    let T0 = 0;
+    if (data.reveal) {
+      const cued = data.revealCue ? cueStart(data.revealCue, ctx.words) : null;
+      T0 = cued != null ? cued : Math.min(Math.max(1200, D * 0.4), Math.max(600, D - 2500));
+      // One animation per element: fade in, hold, fade out at the reveal. Two animations on
+      // the same property would fight (the later one's backwards fill wins from t=0).
+      const hold = (from, peak, after, out) => {
+        const total = T0 + out;
+        return [
+          { opacity: from, offset: 0 },
+          { opacity: peak, offset: Math.min(0.5, 600 / total) },
+          { opacity: peak, offset: T0 / total },
+          { opacity: after, offset: 1 },
+        ];
+      };
+      animate(halo, hold(0, 1, 0.12, 700), { start: 0, duration: T0 + 700, easing: "linear" });
+      animate(streak, hold(0, 0.95, 0, 400), { start: 0, duration: T0 + 400, easing: "linear" });
+      animate(qmarks, hold(0, 1, 0, 250), { start: 0, duration: T0 + 250, easing: "linear" });
+      animate(img, [{ filter: "brightness(0)" }, { filter: "brightness(1)" }], { start: T0, duration: 650 });
+      animate(entry, [{ opacity: 0, transform: "scale(0.97)" }, { opacity: 1, transform: "scale(1)" }], { start: 0, duration: 700 });
+      onSeek((ms) => {
+        const pulse = ms < T0 ? 1 + 0.035 * Math.sin((2 * Math.PI * ms) / 1600) : 1 + 0.15 * Math.min(1, (ms - T0) / 600);
+        halo.style.transform = "scale(" + pulse.toFixed(4) + ")";
+      });
+    } else {
+      const dx = right ? 60 : -60;
+      animate(entry, [{ opacity: 0, transform: "translateX(" + dx + "px)" }, { opacity: 1, transform: "translateX(0)" }], { start: 0, duration: 850 });
+    }
+
+    animate(rays, [{ opacity: 0 }, { opacity: 1 }], { start: T0, duration: 900 });
+    animate(warm, [{ opacity: 0 }, { opacity: 1 }], { start: T0, duration: 900 });
+    animate(shadow, [{ opacity: 0 }, { opacity: 1 }], { start: 0, duration: 800 });
+    if (overline) animate(overline, [{ opacity: 0, transform: "translateY(12px)" }, { opacity: 1, transform: "translateY(0)" }], { start: data.reveal ? 200 : T0 + 200, duration: 500 });
+    const tStart = T0 + (data.reveal ? 250 : 300);
+    lines.forEach((ln, i) => {
+      animate(ln, [{ transform: "translateY(108%)" }, { transform: "translateY(0)" }], { start: tStart + 110 * i, duration: 700 });
+    });
+    const afterTitle = tStart + 110 * lines.length + 200;
+    if (subtitle) animate(subtitle, [{ opacity: 0, transform: "translateY(10px)" }, { opacity: 1, transform: "translateY(0)" }], { start: afterTitle, duration: 600 });
+    if (chip) {
+      const [t] = scheduleEntries([{ cueWord: data.chipCue }], ctx.words, D, { windowStartMs: afterTitle + 900 });
+      animate(chip, [{ opacity: 0, transform: "scale(0.94)" }, { opacity: 1, transform: "scale(1)" }], { start: t, duration: 450 });
+    }
+
+    if (data.stamp) {
+      const tbLeft = right ? 150 : 1030;
+      GR.stamp(stage, data.stamp, ctx.words, { x: tbLeft + 700, y: 300, rotate: 6, maxWidth: 300, start: Math.min(D - 800, afterTitle + 1400) });
+    }
+
+    onSeek((ms) => {
+      const s = Math.sin((2 * Math.PI * ms) / 4400);
+      floatEl.style.transform = "translateY(" + (s * -9).toFixed(3) + "px)";
+      shadow.style.transform = "scaleX(" + (1 + s * 0.05).toFixed(4) + ")";
+      rays.style.transform = "rotate(" + (ms * 0.0011).toFixed(4) + "deg)";
+    });
+  },
+};
+</script>
+</body>
+</html>

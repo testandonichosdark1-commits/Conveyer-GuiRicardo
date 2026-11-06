@@ -255,7 +255,8 @@ tryAddColumn("channels", "voice_speed REAL");
 // src/lib/channels.ts channelSettingOverrides().
 tryAddColumn("channels", "voice_provider TEXT");
 // Per-channel character-reference portrait (absolute path under DATA_DIR/channels/<id>/).
-// NULL = global AI_CHARACTER_REFERENCE_PATH. Same global-vs-channel model as voice_id —
+// NULL = no portrait (2026-11-06: no longer inherits the global AI_CHARACTER_REFERENCE_PATH,
+// which now applies only to runs with no channel) —
 // see src/app/api/channels/[id]/character-reference/route.ts.
 tryAddColumn("channels", "character_reference_path TEXT");
 // Per-channel words that make a beat "show the character" (comma-separated). NULL/empty =
@@ -266,6 +267,16 @@ tryAddColumn("channels", "character_terms TEXT");
 // every global key. Lets one channel run entirely on a different client's provider accounts
 // without touching the global Settings page.
 tryAddColumn("channels", "api_keys_json TEXT");
+// Graphic beats per channel (docs/SPEC-motion-graphics.md). graphics_enabled '1'/'0', NULL =
+// the global GRAPHICS_ENABLED (off by default), so existing channels change nothing.
+// graphic_percent / graphic_theme NULL = global GRAPHIC_BEAT_PERCENT / GRAPHIC_THEME.
+tryAddColumn("channels", "graphics_enabled TEXT");
+tryAddColumn("channels", "graphic_percent INTEGER");
+tryAddColumn("channels", "graphic_theme TEXT");
+// Edit style per channel ("archive" = historical-documentary preset, NULL = today's look) and
+// the protagonist anchor-image folder. Both NULL by default, so existing channels change nothing.
+tryAddColumn("channels", "edit_style TEXT");
+tryAddColumn("channels", "anchor_dir TEXT");
 
 // Avatar snapshot onto a run — so the pipeline reads a stable avatar even if the
 // library row is edited/deleted later. avatar_db_id is the library id; the

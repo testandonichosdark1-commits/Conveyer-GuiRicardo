@@ -1980,6 +1980,76 @@ const MIN_CAPTION_MATCH = 0.6;
  *  UUIDs so unbounded growth across a long session is not a practical concern. */
 const claimedMediaIds = new Set<string>();
 
+/**
+ * Every prompt that has been SUBMITTED on this tab and whose tile may still appear. A tile is
+ * only claimable by the prompt it matches BEST among these — clearing MIN_CAPTION_MATCH on
+ * its own is not enough.
+ *
+ * Why (measured 2026-11-06, archive run d954871c): with a visual world every prompt of a run
+ * shares its vocabulary ("ancient", "clay", "cuneiform", "tablet"). Beat 7 asked for a tablet
+ * close-up; its tile's caption ALSO cleared 0.6 against beat 3's Nineveh-excavation prompt
+ * (which mentions "buried clay tablets"), beat 3 polled first and took it, and beat 7 then
+ * timed out with "no tile matched". Absolute thresholds cannot separate prompts that share a
+ * topic; comparing a tile against every competing prompt can.
+ *
+ * Abandoned prompts (timed out / failed after submit) stay as competitors for a while: their
+ * tile may still resolve later, and without them it would be an orphan any similar later
+ * prompt could take. They compete but never claim.
+ */
+interface PendingFlowPrompt {
+  seq: number;
+  prompt: string;
+  /** Set once the waiter gave up; the entry is dropped after it. */
+  abandonedUntil?: number;
+}
+const pendingFlowPrompts = new Map<number, PendingFlowPrompt>();
+let pendingFlowSeq = 0;
+const ABANDONED_PROMPT_TTL_MS = 10 * 60_000;
+
+function registerPendingFlowPrompt(prompt: string): number {
+  const seq = ++pendingFlowSeq;
+  pendingFlowPrompts.set(seq, { seq, prompt });
+  return seq;
+}
+
+function releasePendingFlowPrompt(seq: number, claimed: boolean): void {
+  const p = pendingFlowPrompts.get(seq);
+  if (!p) return;
+  if (claimed) pendingFlowPrompts.delete(seq);
+  else p.abandonedUntil = Date.now() + ABANDONED_PROMPT_TTL_MS;
+}
+
+function competingFlowPrompts(now = Date.now()): PendingFlowPrompt[] {
+  for (const [seq, p] of pendingFlowPrompts) {
+    if (p.abandonedUntil !== undefined && p.abandonedUntil < now) pendingFlowPrompts.delete(seq);
+  }
+  return [...pendingFlowPrompts.values()];
+}
+
+/**
+ * Does a tile with this caption belong to prompt `ownSeq`? Yes only if it clears
+ * MIN_CAPTION_MATCH for that prompt AND no competing prompt matches it better. On an exact
+ * tie the EARLIEST submitted live prompt wins (Flow renders in submit order), so a tie can
+ * never leave the tile unclaimed by everyone. Pure; exported for tests.
+ */
+export function tileBelongsToPrompt(caption: string, ownSeq: number, competitors: { seq: number; prompt: string; abandonedUntil?: number }[]): boolean {
+  const own = competitors.find((c) => c.seq === ownSeq);
+  if (!own) return false;
+  const ownScore = captionMatchScore(caption, own.prompt);
+  if (ownScore < MIN_CAPTION_MATCH) return false;
+  for (const c of competitors) {
+    if (c.seq === ownSeq) continue;
+    const s = captionMatchScore(caption, c.prompt);
+    if (s > ownScore) return false;
+    // Tie: an earlier submission (live or abandoned) has the better claim to it.
+    if (s === ownScore && c.seq < ownSeq) return false;
+  }
+  return true;
+}
+
+/** Test seam: the registry is module-global, like claimedMediaIds. */
+export const __pendingFlowPromptsForTests = { register: registerPendingFlowPrompt, release: releasePendingFlowPrompt, list: competingFlowPrompts, clear: () => pendingFlowPrompts.clear() };
+
 /** Synchronous test-and-set — Set.has/add never yields, so two concurrent callers can
  *  never both observe "unclaimed" for the same id. Exported for tests. */
 export function claimFlowTile(mediaId: string): boolean {
@@ -1996,7 +2066,11 @@ async function findAndClaimMatchingTile(
   prompt: string,
   deadline: number,
   runId: string,
-  failureBaseline?: FlowFailureBaseline
+  failureBaseline?: FlowFailureBaseline,
+  /** This waiter's entry in pendingFlowPrompts; tiles a competing prompt matches better are skipped. */
+  ownSeq?: number,
+  /** Tiles already finished in the grid when this prompt was submitted — never its result. */
+  preexisting?: ReadonlySet<string>
 ): Promise<{ mediaId: string; src: string } | null> {
   // Checked INSIDE this loop, not only after it exhausts: a credits/policy failure card
   // (e.g. "Você chegou ao limite de uso") can appear within seconds of submit, and this
@@ -2018,9 +2092,10 @@ async function findAndClaimMatchingTile(
     }
     const tiles = await currentFlowImageTiles(page);
     const scored = tiles
-      .filter((t) => !claimedMediaIds.has(t.mediaId))
+      .filter((t) => !claimedMediaIds.has(t.mediaId) && !preexisting?.has(t.mediaId))
       .map((t) => ({ ...t, score: captionMatchScore(t.caption, prompt) }))
       .filter((t) => t.score >= MIN_CAPTION_MATCH)
+      .filter((t) => ownSeq === undefined || tileBelongsToPrompt(t.caption, ownSeq, competingFlowPrompts()))
       .sort((a, b) => b.score - a.score);
     for (const candidate of scored) {
       if (claimFlowTile(candidate.mediaId)) return candidate;
@@ -2050,6 +2125,8 @@ async function fetchFlowImageSrc(page: Page, src: string): Promise<Buffer | null
 interface SubmittedFlowImage {
   page: Page;
   failureBaseline: FlowFailureBaseline;
+  seq: number;
+  preexisting: ReadonlySet<string>;
 }
 
 /**
@@ -2106,18 +2183,31 @@ async function attemptFlowImageConcurrent(
         "credits"
       );
     }
+    // Every tile already FINISHED in this project before the submit — earlier runs, earlier
+    // beats, abandoned generations. The project grid is shared and never cleared, so without
+    // this a caption-matching OLD tile is an instant false result: measured 2026-11-06, an
+    // excavation beat took a stale "man in a workshop" tile from another channel's run and a
+    // scholar beat took a tablet left over from the previous test run, both scored 100%.
+    const preexisting = new Set((await currentFlowImageTiles(page)).map((t) => t.mediaId));
     await submitPrompt(page, input);
+    // Registered inside the submit lock, so submit order == seq order (the tie-break).
+    const seq = registerPendingFlowPrompt(prompt);
     // Nothing to wait for here anymore (see the section comment for why v1's in-lock wait
     // was wrong) — release the lock immediately so the next beat can submit.
-    return { page, failureBaseline };
+    return { page, failureBaseline, seq, preexisting };
   });
 
   return imageWaitLimit(async () => {
-    const { page, failureBaseline } = submitted;
+    const { page, failureBaseline, seq, preexisting } = submitted;
     const timeoutMs = flowImageTimeoutMs();
     const deadline = Date.now() + timeoutMs;
     let nextFailureCheck = Date.now() + 4_000;
-    const claimed = await findAndClaimMatchingTile(page, prompt, deadline, runId, failureBaseline);
+    let claimed: { mediaId: string; src: string } | null = null;
+    try {
+      claimed = await findAndClaimMatchingTile(page, prompt, deadline, runId, failureBaseline, seq, preexisting);
+    } finally {
+      releasePendingFlowPrompt(seq, claimed !== null);
+    }
     if (!claimed) {
       throw new FlowBrowserError(
         `No Flow tile confidently matched this beat's prompt within ${Math.round(timeoutMs / 1000)}s (concurrent path). The UI may have changed, or the caption never resolved.`,

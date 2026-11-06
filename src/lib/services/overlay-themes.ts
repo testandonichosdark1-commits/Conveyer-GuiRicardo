@@ -16,7 +16,9 @@ export type CardPlacement =
   /** Left-aligned lower third — the news/documentary lower-third. */
   | "lower-left"
   /** Horizontally centred, lower third — a title/chapter card. */
-  | "lower-center";
+  | "lower-center"
+  /** Dead centre of the frame — the archive "statement" line ("Dead at twenty-one."). */
+  | "center";
 
 export interface OverlayTheme {
   /** Stable id, referenced by a visual profile. */
@@ -176,9 +178,71 @@ export const PRESTIGE_THEME: OverlayTheme = {
   fadeMaxSec: 1.0,
 };
 
+/**
+ * Archive look (EDIT_STYLE=archive) — the historical-documentary cards: a heavy slab serif.
+ * Rockwell ships with macOS; the chain falls back to other slabs, then to lining-figure serifs
+ * (see the SERIF note above for why Georgia is not here).
+ */
+const SLAB = "'Rockwell','Roboto Slab','Zilla Slab','Arvo','Times New Roman','Liberation Serif','DejaVu Serif',serif";
+
+/** Place/date stamp and person name: white slab on a plain dark box, bottom-left. */
+export const ARCHIVE_LABEL_THEME: OverlayTheme = {
+  ...DOCUMENTARY_THEME,
+  key: "archive-label",
+  cardColor: "#000000",
+  cardOpacity: 0.55,
+  accentColor: "#000000",
+  titleColor: "#FFFFFF",
+  subtitleColor: "#E6E6E6",
+  shadowOpacity: 0.45,
+  fontFamily: SLAB,
+  titleWeight: 700,
+  subtitleWeight: 400,
+  titleStrokeRatio: 0,
+  titleFontFrac: 0.05, titleFontMin: 24,
+  subtitleFontFrac: 0.032, subtitleFontMin: 16,
+  padFrac: 0.02, padMin: 12,
+  accentFrac: 0, accentMin: 0,
+  cornerFrac: 0, cornerMin: 0,
+  placement: "lower-left",
+  marginXFrac: 0.035,
+  marginBottomFrac: 0.07,
+  fadeMinSec: 0.3,
+  fadeMaxSec: 0.8,
+};
+
+/** The statement line: large white slab, no box, soft dark shadow, centre of the frame. */
+export const ARCHIVE_STATEMENT_THEME: OverlayTheme = {
+  ...ARCHIVE_LABEL_THEME,
+  key: "archive-statement",
+  cardOpacity: 0,
+  shadowOpacity: 0.85,
+  shadowFrac: 0.0045, shadowMin: 3,
+  titleFontFrac: 0.062, titleFontMin: 28,
+  placement: "center",
+  minWidthFrac: 0.1,
+  maxWidthFrac: 0.86,
+  marginBottomFrac: 0,
+};
+
+/** Tragic-fact callout: warm yellow slab on a dark box, bottom-centre. */
+export const ARCHIVE_CALLOUT_THEME: OverlayTheme = {
+  ...ARCHIVE_LABEL_THEME,
+  key: "archive-callout",
+  cardOpacity: 0.62,
+  titleColor: "#FFD54A",
+  subtitleColor: "#FFE9A6",
+  titleFontFrac: 0.045, titleFontMin: 22,
+  placement: "lower-center",
+  marginBottomFrac: 0.07,
+};
+
 export const OVERLAY_THEMES: Readonly<Record<string, OverlayTheme>> = {
   [DOCUMENTARY_THEME.key]: DOCUMENTARY_THEME,
   [PRESTIGE_THEME.key]: PRESTIGE_THEME,
+  [ARCHIVE_LABEL_THEME.key]: ARCHIVE_LABEL_THEME,
+  [ARCHIVE_STATEMENT_THEME.key]: ARCHIVE_STATEMENT_THEME,
+  [ARCHIVE_CALLOUT_THEME.key]: ARCHIVE_CALLOUT_THEME,
 };
 
 export const DEFAULT_OVERLAY_THEME = DOCUMENTARY_THEME;

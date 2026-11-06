@@ -394,7 +394,8 @@ async function renderBeat(
   outPath: string,
   dim: { w: number; h: number; fps: number },
   fade?: { inSec: number; outSec: number },
-  runId?: string
+  runId?: string,
+  xfade?: CrossfadeIn
 ): Promise<void> {
   const { w, h, fps } = dim;
   const frames = beatFrames(beat, fps);
@@ -487,6 +488,30 @@ async function renderBeat(
     return;
   }
 
+  // Full-screen B-roll dissolving in from the previous beat (SCENE_TRANSITIONS=crossfade).
+  // LENGTH-NEUTRAL like the dip-to-black: the dissolve lives inside THIS beat's exact frame
+  // budget. Input 1 is the previous beat's source continued past the point where that beat's
+  // own clip ended (stills are rendered with a crossfade tail, see crossfadeTailSec), so the
+  // outgoing picture keeps moving under the dissolve; a source with no tail holds its last
+  // frame instead (tpad clone). The concat below stays a plain stream copy.
+  if (beat.visualPath && xfade && xfade.sec > 0) {
+    const d = Math.min(xfade.sec, beatDurSec / 3);
+    if (d > 0) {
+      await runFfmpegAsync([
+        "-stream_loop", "-1", "-i", beat.visualPath,
+        "-i", xfade.prevPath,
+        "-filter_complex",
+        `[0:v]${fit},${pad},format=yuv420p,settb=AVTB[cur];` +
+          `[1:v]setpts=PTS-STARTPTS,${fit},tpad=stop_mode=clone:stop_duration=${(d + 2).toFixed(3)},` +
+          `trim=start=${xfade.prevDurSec.toFixed(3)}:duration=${d.toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p,settb=AVTB[prev];` +
+          `[prev][cur]xfade=transition=fade:duration=${d.toFixed(3)}:offset=0[v]`,
+        "-map", "[v]", "-frames:v", String(frames),
+        ...encodeV(fps), outPath,
+      ]);
+      return;
+    }
+  }
+
   // Full-screen B-roll (loops if shorter than the beat).
   if (beat.visualPath) {
     await runFfmpegAsync([
@@ -498,6 +523,19 @@ async function renderBeat(
   }
 
   throw new Error(`Beat ${beat.index} has neither a visual nor an avatar clip to render`);
+}
+
+/** A dissolve into a beat from the previous beat's source (see renderBeat). */
+interface CrossfadeIn {
+  prevPath: string;
+  /** Where the previous beat's own clip ended, on its source's timeline. */
+  prevDurSec: number;
+  sec: number;
+}
+
+/** A full-screen b-roll beat (no avatar) — the only kind that dissolves in/out. */
+function isFullBroll(b: RenderBeat | undefined): b is RenderBeat & { visualPath: string } {
+  return !!b && !!b.visualPath && !b.avatarClipPath && b.layout !== "avatar" && b.layout !== "split";
 }
 
 /** Neutral filler of exactly the beat's frames — keeps the timeline aligned when a beat fails to render. */
@@ -532,10 +570,15 @@ export async function assembleStudioVideo(
   // Per-run toggle (Create Video → Advanced Options) wins when set; otherwise fall
   // back to the global SCENE_TRANSITIONS default (off). Duration stays global (ms).
   const tv = (getSetting("SCENE_TRANSITIONS") || "off").trim().toLowerCase();
+  // "crossfade" (archive style, normally set by the channel) is a STYLE, not the per-run
+  // dip-to-black checkbox — so it applies whatever that checkbox says, and replaces the dip.
+  const crossfade = tv === "crossfade";
   const globalOn = tv === "on" || tv === "1" || tv === "true";
-  const transitionsOn = sceneTransitions ?? globalOn;
+  const transitionsOn = !crossfade && (sceneTransitions ?? globalOn);
   const transitionSec = transitionsOn ? Math.max(0, Number(getSetting("SCENE_TRANSITION_MS") || "300")) / 1000 : 0;
   if (transitionsOn) log(runId, "info", `Scene transitions ON — dip-to-black ${Math.round(transitionSec * 1000)}ms`, { stage: "assemble" });
+  const crossfadeSec = crossfade ? Math.min(1.5, Math.max(0, Number(getSetting("SCENE_TRANSITION_MS") || "400") / 1000)) : 0;
+  if (crossfade) log(runId, "info", `Scene transitions — crossfade ${Math.round(crossfadeSec * 1000)}ms between full-screen visuals`, { stage: "assemble" });
 
   // Each beat's own ffmpeg encode is fully independent (own input, own output file),
   // so this pass runs `assembleConcurrency()` of them at once instead of one at a time
@@ -554,8 +597,13 @@ export async function assembleStudioVideo(
           outSec: transitionSec > 0 && i < beats.length - 1 ? transitionSec : 0,
         };
         const clip = path.join(beatsDir, `beat_${String(i).padStart(4, "0")}.mp4`);
+        const prev = i > 0 ? beats[i - 1] : undefined;
+        const xfade: CrossfadeIn | undefined =
+          crossfadeSec > 0 && isFullBroll(beat) && isFullBroll(prev)
+            ? { prevPath: prev.visualPath, prevDurSec: beatFrames(prev, dim.fps) / dim.fps, sec: crossfadeSec }
+            : undefined;
         try {
-          await renderBeat(beat, clip, dim, fade, runId);
+          await renderBeat(beat, clip, dim, fade, runId, xfade);
           // A source that decodes just enough to pass retrieval (freeze probe ok) can
           // still exhaust/error mid-encode and yield a SHORT clip — which would slide
           // every later beat off the narration. Verify the exact frame count; if it's
@@ -647,7 +695,7 @@ export async function assembleStudioVideo(
   let videoForMux = silentPath;
   if (overlays === true) {
     try {
-      const plan = await buildOverlayPlan(beats, dim, path.join(beatsDir, "overlays"), runId);
+      const plan = await buildOverlayPlan(beats, dim, path.join(beatsDir, "overlays"), runId, (getSetting("EDIT_STYLE") || "").trim().toLowerCase() || undefined);
       if (plan) {
         const overlaidPath = path.join(beatsDir, "video_overlaid.mp4");
         // The card inputs are looped (`-loop 1`) and therefore INFINITE, while the base video

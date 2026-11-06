@@ -93,7 +93,8 @@ export function FlowBrowserBlock({ val, set }: { val: Val; set: Set }) {
         <label className="label">{tr("Modèle de secours si le modèle image atteint sa limite", "Fallback model if the image model hits its limit")}</label>
         <select className="input" value={val("FLOW_IMAGE_MODEL_FALLBACK") || ""} onChange={(e) => set("FLOW_IMAGE_MODEL_FALLBACK", e.target.value)}>
           <option value="">{tr("Aucun — échouer / basculer sur kie.ai selon le réglage ci-dessus", "None — fail / fall to kie.ai per the setting above")}</option>
-          <option value="nano-banana-2">Nano Banana 2</option>
+          <option value="nano-banana-2.1">Nano Banana 2.1</option>
+          <option value="nano-banana-2-lite">Nano Banana 2 Lite</option>
           <option value="nano-banana">Nano Banana</option>
           <option value="nano-banana-pro">Nano Banana Pro</option>
         </select>

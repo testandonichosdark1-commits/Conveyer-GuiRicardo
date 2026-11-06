@@ -12,8 +12,8 @@ export const runtime = "nodejs";
  * /api/settings/character-reference, scoped to ONE channel instead of the global
  * AI_CHARACTER_REFERENCE_PATH. A channel with its own portrait here overrides the
  * global one for every run created on it (see channels.ts channelSettingOverrides()
- * and studio-pipeline.ts activateChannelOverrides()); a channel with none falls back
- * to the global setting exactly as before this feature existed.
+ * and studio-pipeline.ts activateChannelOverrides()); a channel with none gets NO portrait —
+ * the global setting applies only to runs created without a channel.
  */
 
 const MAX_BYTES = 10 * 1024 * 1024;

@@ -1,0 +1,31 @@
+{
+  "repo": "Lightricks/LTX-2.5",
+  "revision": "2356ce76915d6c48d313d7e8b25900e1dd3abaa8",
+  "files": [
+    {
+      "path": "diffusion_models/ltx-2.5-22b-distilled-transformer-nvfp4.safetensors",
+      "bytes": 18721548408,
+      "sha256": "4b94231e734c1950f8f6826cb8bd8715d94be5b3e04f8256ee060c5bc3886c30"
+    },
+    {
+      "path": "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+      "bytes": 995778752,
+      "sha256": "eb5a71fe4068ee87ccdb1c3aa635e547ca76bd2d30ae20ae889f2c325c0677e8"
+    },
+    {
+      "path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+      "bytes": 15372969374,
+      "sha256": "6ce688a0aa98a5fa36a9f1e6c3f42152a498cc2b53ee8c15674c64244f91487f"
+    },
+    {
+      "path": "vae/ltx-2.5-audio-vae-bf16.safetensors",
+      "bytes": 364866540,
+      "sha256": "c52733d37f6a7fb7949c3dc0fb468c6cb2169e4d836983a73babb9f0d54837a5"
+    },
+    {
+      "path": "vae/ltx-2.5-video-vae-conv-bf16.safetensors",
+      "bytes": 1452269922,
+      "sha256": "685b06ee3d9b2039647698fc4ea33175112462fc374e2777312c907897dfce8d"
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 180" width="1000" height="180">
+  <!-- Placeholder product for /tools/graphic-preview: a pocket flashlight, side view,
+       transparent background. Real runs use a cut-out product photo instead. -->
+  <defs>
+    <linearGradient id="metal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#26272a"/>
+      <stop offset="0.16" stop-color="#7c7f85"/>
+      <stop offset="0.28" stop-color="#e4e6e9"/>
+      <stop offset="0.38" stop-color="#9a9da3"/>
+      <stop offset="0.6" stop-color="#3a3c40"/>
+      <stop offset="0.82" stop-color="#4a4c51"/>
+      <stop offset="1" stop-color="#141517"/>
+    </linearGradient>
+    <linearGradient id="metalDark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1c1e"/>
+      <stop offset="0.25" stop-color="#9da0a6"/>
+      <stop offset="0.4" stop-color="#55585d"/>
+      <stop offset="0.75" stop-color="#2a2b2e"/>
+      <stop offset="1" stop-color="#0e0f10"/>
+    </linearGradient>
+    <linearGradient id="lens" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#cfd8de"/>
+      <stop offset="0.5" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#9aa6ae"/>
+    </linearGradient>
+    <pattern id="knurl" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="9" height="9" fill="none"/>
+      <path d="M0 0 L9 0 M0 0 L0 9" stroke="#000" stroke-opacity="0.38" stroke-width="2"/>
+    </pattern>
+  </defs>
+  <!-- lens face -->
+  <rect x="6" y="14" width="12" height="152" rx="5" fill="url(#lens)"/>
+  <!-- bezel -->
+  <rect x="14" y="8" width="58" height="164" rx="10" fill="url(#metal)"/>
+  <rect x="24" y="8" width="4" height="164" fill="#000" fill-opacity="0.25"/>
+  <rect x="40" y="8" width="4" height="164" fill="#000" fill-opacity="0.25"/>
+  <rect x="56" y="8" width="4" height="164" fill="#000" fill-opacity="0.25"/>
+  <!-- head taper -->
+  <path d="M70 12 L210 34 L210 146 L70 168 Z" fill="url(#metal)"/>
+  <rect x="200" y="34" width="14" height="112" fill="url(#metalDark)"/>
+  <!-- body -->
+  <rect x="212" y="38" width="700" height="104" fill="url(#metal)"/>
+  <rect x="380" y="38" width="420" height="104" fill="url(#knurl)"/>
+  <rect x="372" y="38" width="6" height="104" fill="#000" fill-opacity="0.35"/>
+  <rect x="802" y="38" width="6" height="104" fill="#000" fill-opacity="0.35"/>
+  <!-- tail cap -->
+  <rect x="905" y="34" width="70" height="112" rx="6" fill="url(#metal)"/>
+  <rect x="918" y="34" width="3" height="112" fill="#000" fill-opacity="0.3"/>
+  <path d="M972 40 Q996 48 996 90 Q996 132 972 140 Z" fill="url(#metalDark)"/>
+  <circle cx="985" cy="90" r="6" fill="#0b0b0c"/>
+</svg>

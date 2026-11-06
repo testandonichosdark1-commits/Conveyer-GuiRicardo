@@ -20,6 +20,11 @@ interface Channel {
   interval_sec: number;
   format: string;
   avatar_id: number | null;
+  graphics_enabled: string | null;
+  graphic_percent: number | null;
+  graphic_theme: string | null;
+  edit_style: string | null;
+  anchor_dir: string | null;
 }
 
 interface Draft {
@@ -37,6 +42,15 @@ interface Draft {
   voice_speed: string;
   avatar_id: number | null;
   api_keys: Record<string, string>; // CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN / AI33_API_KEY
+  // Graphic beats. Sent only once touched, so saving a channel never turns a NULL
+  // ("follow the global default") into an explicit off.
+  graphics_enabled: boolean;
+  graphic_percent: number;
+  graphic_theme: string;
+  graphics_touched: boolean;
+  // Edit style ("" = default look, "archive" = historical documentary) + anchor-image folder.
+  edit_style: string;
+  anchor_dir: string;
 }
 
 const EMPTY: Draft = {
@@ -51,6 +65,12 @@ const EMPTY: Draft = {
   voice_speed: "",
   avatar_id: null,
   api_keys: {},
+  graphics_enabled: false,
+  graphic_percent: 65,
+  graphic_theme: "arden",
+  graphics_touched: false,
+  edit_style: "",
+  anchor_dir: "",
 };
 
 export default function ChainesPage() {
@@ -91,6 +111,11 @@ export default function ChainesPage() {
       visual_prompt: d.visual_prompt,
       interval_sec: d.interval_sec,
       format: d.format,
+      edit_style: d.edit_style,
+      anchor_dir: d.anchor_dir,
+      ...(d.graphics_touched
+        ? { graphics: { enabled: d.graphics_enabled, percent: d.graphic_percent, theme: d.graphic_theme } }
+        : {}),
     };
   }
 
@@ -120,6 +145,12 @@ export default function ChainesPage() {
       voice_speed: c.voice_speed != null ? String(c.voice_speed) : "",
       avatar_id: c.avatar_id,
       api_keys: c.api_keys ?? {},
+      graphics_enabled: c.graphics_enabled === "1",
+      graphic_percent: c.graphic_percent ?? 65,
+      graphic_theme: c.graphic_theme || "arden",
+      graphics_touched: false,
+      edit_style: c.edit_style ?? "",
+      anchor_dir: c.anchor_dir ?? "",
     });
   }
 
@@ -208,6 +239,63 @@ export default function ChainesPage() {
           )}
         />
       )}
+
+      <div>
+        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, fontWeight: 600 }}>
+          <input type="checkbox" checked={d.graphics_enabled}
+            onChange={(e) => set({ ...d, graphics_enabled: e.target.checked, graphics_touched: true })} />
+          {tr("Motion graphics (style documentaire)", "Motion graphics (documentary style)")}
+        </label>
+        <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+          {tr(
+            "Une partie des plans devient des scènes graphiques animées (produit, citation, chiffre, comparaison…). L'avatar est désactivé pour ces vidéos.",
+            "Part of the beats become animated full-screen graphics (product, quote, number, comparison…). The avatar is turned off for these videos."
+          )}
+        </div>
+        {d.graphics_enabled && (
+          <div className="grid-2" style={{ gap: 16, marginTop: 10 }}>
+            <div>
+              <label className="label">{tr("% de scènes graphiques", "% of graphic scenes")}: {d.graphic_percent}%</label>
+              <input type="range" min={20} max={90} step={5} value={d.graphic_percent} style={{ width: "100%" }}
+                onChange={(e) => set({ ...d, graphic_percent: Number(e.target.value), graphics_touched: true })} />
+            </div>
+            <div>
+              <label className="label">{tr("Thème", "Theme")}</label>
+              <select className="input" value={d.graphic_theme}
+                onChange={(e) => set({ ...d, graphic_theme: e.target.value, graphics_touched: true })}>
+                <option value="arden">arden</option>
+              </select>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="grid-2" style={{ gap: 16 }}>
+        <div>
+          <label className="label">{tr("Style de montage", "Edit style")}</label>
+          <select className="input" value={d.edit_style} onChange={(e) => set({ ...d, edit_style: e.target.value })}>
+            <option value="">{tr("Standard", "Standard")}</option>
+            <option value="archive">{tr("Documentaire d'archives (historique)", "Archive documentary (historical)")}</option>
+          </select>
+          <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+            {tr(
+              "Archives : images fixes uniquement, zoom/panoramique lent, fondus enchaînés, cartes lieu/date/nom, sources musées (Wikimedia, Met, Art Institute, Library of Congress) et images IA au style d'époque.",
+              "Archive: still images only, slow varied zoom/pan, crossfades, place/date/name cards, museum sources (Wikimedia, Met, Art Institute, Library of Congress) and period-styled AI images."
+            )}
+          </div>
+        </div>
+        <div>
+          <label className="label">{tr("Dossier d'images d'ancrage (protagoniste)", "Anchor images folder (protagonist)")}</label>
+          <input className="input" value={d.anchor_dir} placeholder="/Users/…/Wanrong"
+            onChange={(e) => set({ ...d, anchor_dir: e.target.value })} />
+          <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+            {tr(
+              "Photos réelles du protagoniste, réutilisées régulièrement (et sur le dernier plan) quand la narration parle de lui/elle. Vide = désactivé.",
+              "Real photos of the protagonist, reused regularly (and on the final shot) when the narration is about them. Empty = off."
+            )}
+          </div>
+        </div>
+      </div>
 
       <ChannelApiKeysField value={d.api_keys} onChange={(next) => set({ ...d, api_keys: next })} />
     </>
