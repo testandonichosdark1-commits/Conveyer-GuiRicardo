@@ -16,3 +16,8 @@ Thumbs.db
 
 # Accidental macOS Finder alias (points at /Applications/DICloak.app/Contents) — not part of the project
 /Contents - cópia
+
+# Factory: skills hold the channel briefs and travel as a zip, never in git
+/skills/
+/share/
+__pycache__/

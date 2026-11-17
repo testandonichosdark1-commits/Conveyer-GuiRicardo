@@ -119,8 +119,8 @@ describe("Real footage only — never generates AI", () => {
 });
 
 describe("broadenQuery — strict-only level 3", () => {
-  it("collapses to the single most salient token", () => {
-    expect(broadenQuery("Rwanda genocide memorial site", 3)).toBe("Rwanda");
+  it("keeps two words, never a single loose token", () => {
+    expect(broadenQuery("Rwanda genocide memorial site", 3)).toBe("Rwanda genocide");
   });
 
   it("is a no-op for an already-single-token query (retry is then skipped)", () => {

@@ -74,10 +74,12 @@ describe("broadenQuery — everything else is untouched", () => {
     expect(broadenQuery("Colosseum", 2)).toBe("Colosseum");
   });
 
-  it("does not change level 3, the strict-only widest rung", () => {
-    // real-strict.test.ts depends on this rung collapsing to one token.
-    expect(broadenQuery("old rusty metal gears turning slowly", 3)).toBe("old");
-    expect(broadenQuery("Arm & Hammer washing soda box", 3)).toBe("Arm");
-    expect(broadenQuery("aerial view rusty industrial gears turning slowly workshop", 3)).toBe("rusty");
+  it("level 3 (strict-only widest rung) keeps two words, never one loose word", () => {
+    // "Draper" alone returned a 1948 Lucky Strike ad from archive.org for a WWII bomb-disposal line.
+    expect(broadenQuery("Draper Kaufman bomb disposal officer World War II Blitz UK archival photograph", 3)).toBe("Draper Kaufman");
+    expect(broadenQuery("old rusty metal gears turning slowly", 3)).toBe("old rusty");
+    expect(broadenQuery("Arm & Hammer washing soda box", 3)).toBe("Arm & Hammer");
+    expect(broadenQuery("aerial view rusty industrial gears turning slowly workshop", 3)).toBe("rusty industrial");
+    expect(broadenQuery("Colosseum", 3)).toBe("Colosseum"); // single-token query: unchanged → retry skipped
   });
 });

@@ -56,6 +56,36 @@ export interface KenBurnsOptions {
   motion?: KenBurnsMotion;
   /** Bias the cover-crop toward the TOP of the source (portraits: keep the face, not the chest). */
   topBias?: boolean;
+  /** Show the WHOLE source on a dark ground instead of cover-cropping it (see KEN_BURNS_FIT). */
+  contain?: boolean;
+}
+
+/** Background behind a contained still — near-black, like a museum catalogue plate. */
+const CONTAIN_BG = "0x0d0d0d";
+/** KEN_BURNS_FIT=auto contains a still only when cover-cropping would discard more than this
+ *  share of it. A 3:2 painting loses 16% to a 16:9 crop and stays full-frame; a portrait tablet
+ *  loses ~68% and is shown whole instead. */
+const AUTO_CONTAIN_MAX_LOSS = 0.25;
+
+/** Share of the source image a cover-crop to the output aspect throws away (0 = none). */
+export function coverCropLoss(srcW: number, srcH: number, outW: number, outH: number): number {
+  if (!(srcW > 0 && srcH > 0 && outW > 0 && outH > 0)) return 0;
+  const a = srcW / srcH;
+  const b = outW / outH;
+  return 1 - Math.min(a, b) / Math.max(a, b);
+}
+
+/**
+ * KEN_BURNS_FIT: "" (default) = cover-crop, as always; "contain" = always show the whole still;
+ * "auto" = contain only when the crop would lose more than AUTO_CONTAIN_MAX_LOSS. The archive
+ * style uses "auto": measured 2026-11-06, a real 1850 watercolour of the Nineveh excavation was
+ * cover-cropped into an unrecognisable brown smear.
+ */
+export function shouldContain(fit: string, src: { w: number; h: number } | null, outW: number, outH: number): boolean {
+  const f = fit.trim().toLowerCase();
+  if (f === "contain") return true;
+  if (f !== "auto" || !src) return false;
+  return coverCropLoss(src.w, src.h, outW, outH) > AUTO_CONTAIN_MAX_LOSS;
 }
 
 const DEFAULT_RANGE = 0.18;
@@ -98,8 +128,11 @@ export function kenBurnsFilter(
   // 1. Cover-crop to the output aspect at NATIVE resolution — the whole point (see above).
   //    Centred (crop's default x/y), keeping the largest rectangle of the right shape.
   //    topBias keeps the upper part of a portrait (where the face is) instead of its middle.
-  const cover =
-    `crop='min(iw,ih*${w}/${h})':'min(ih,iw*${h}/${w})'` + (opts?.topBias ? `:'(iw-ow)/2':'(ih-oh)*0.2'` : "");
+  //    contain: pad the SHORT side out to the output aspect instead, so the whole still stays
+  //    in frame at native resolution (zoompan then moves within the padded canvas).
+  const cover = opts?.contain
+    ? `pad='max(iw,ih*${w}/${h})':'max(ih,iw*${h}/${w})':'(ow-iw)/2':'(oh-ih)/2':color=${CONTAIN_BG}`
+    : `crop='min(iw,ih*${w}/${h})':'min(ih,iw*${h}/${w})'` + (opts?.topBias ? `:'(iw-ow)/2':'(ih-oh)*0.2'` : "");
   // 2. Zoompan headroom. The old `scale=8000:-1` was fixed and output-blind: on a 2772x4158
   //    photo it built a 8000x12000 (96 MP) intermediate to feed a 1920x1080 filter, paying
   //    for a huge resample twice over. Three times the output width is past the point where
@@ -150,14 +183,21 @@ export function kenBurns(
   const rangeRaw = getSetting("KEN_BURNS_RANGE");
   const range = rangeRaw ? Number(rangeRaw) : undefined;
   const varied = (getSetting("KEN_BURNS_MOTION") || "").trim().toLowerCase() === "varied" && beatIndex !== undefined;
+  const fit = getSetting("KEN_BURNS_FIT") || "";
   let opts: KenBurnsOptions | undefined;
+  let src: { w: number; h: number } | null | undefined;
+  const probe = () => (src === undefined ? (src = probeImageSize(imagePath)) : src);
   if (varied || (range !== undefined && Number.isFinite(range) && range !== DEFAULT_RANGE)) {
     opts = { range };
     if (varied) {
       opts.motion = variedMotion(beatIndex!);
-      const src = probeImageSize(imagePath);
-      opts.topBias = src !== null && src.h >= src.w; // portrait/square source → keep the face
+      const s = probe();
+      opts.topBias = s !== null && s.h >= s.w; // portrait/square source → keep the face
     }
+  }
+  // Blank KEN_BURNS_FIT never probes and never sets `contain`, so the command is unchanged.
+  if (fit.trim() && shouldContain(fit, fit.trim().toLowerCase() === "auto" ? probe() : null, w, h)) {
+    opts = { ...(opts ?? { range }), contain: true, topBias: false };
   }
   const filter = kenBurnsFilter(w, h, frames, fps, zoomOut, opts);
 

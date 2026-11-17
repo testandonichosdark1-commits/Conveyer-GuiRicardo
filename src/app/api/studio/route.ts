@@ -85,6 +85,12 @@ interface Body {
    * exists so a caller that already knows the engine can skip that lookup.
    */
   voiceBackend?: string;
+  /**
+   * Narration provider for THIS video, beating the channel's and the global one. Only
+   * "voicestudio" (local, free) is accepted; anything else is ignored as if absent, so the
+   * run follows the channel/global provider exactly as before. API-only (the Video Factory).
+   */
+  voiceProvider?: string;
 }
 
 export async function POST(req: Request) {
@@ -143,7 +149,11 @@ export async function POST(req: Request) {
   // create page counts as "this run has a voice" — otherwise we would refuse a run the
   // operator has explicitly configured.
   const explicitVoiceId = (body.voiceId || "").trim() || null;
-  const runVoiceId = studioRunVoiceId(channel, explicitVoiceId);
+  // A run narrated by VoiceStudio must not inherit the channel's voice: that id belongs to
+  // the channel's own provider (e.g. ai33 "elevenlabs_…") and VoiceStudio would 500 on it.
+  // Only a voice sent for this video counts; otherwise VOICESTUDIO_VOICE_ID applies.
+  const runVoiceId =
+    body.voiceProvider === "voicestudio" ? explicitVoiceId : studioRunVoiceId(channel, explicitVoiceId);
 
   // Pre-flight: does this run have a voice at all? Script mode only — an uploaded
   // voiceover synthesizes nothing, so a missing TTS voice is irrelevant to it. Costs
@@ -289,6 +299,8 @@ export async function POST(req: Request) {
     // Real Footage fallback behavior. Snapshotted per-run (not a global setting) so a
     // Resume replays the mode the run was created with. Only "strict" opts in.
     realFallback: body.realFallback === "strict" ? "strict" : "ai",
+    // Spread only when sent, so every other run keeps a byte-identical config_json.
+    ...(body.voiceProvider === "voicestudio" ? { voiceProvider: "voicestudio" as const } : {}),
     // Provenance only — added ONLY for upload runs, so a script run's config_json stays
     // byte-identical to what it was before this feature existed. Nothing branches on it
     // (the pipeline is told the path directly); it exists so a run can be identified later.

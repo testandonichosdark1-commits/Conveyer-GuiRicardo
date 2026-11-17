@@ -14,6 +14,7 @@ import { ai84Backend } from "../providers";
 import { pickTaskId, readTaskState, describeUnparsed } from "./ai33-response";
 import { noteCreditExhausted } from "./credit-exhaustion";
 import { AI33_DEFAULT_BASE } from "./ai33-voices";
+import { voicestudioTts } from "./voicestudio";
 import {
   voiceboxBaseUrl,
   voiceboxErrorDetail,
@@ -94,6 +95,9 @@ async function dispatchTts(
   } else if (provider === "voicebox") {
     // Local and free — nothing billed, so nothing metered.
     await voiceboxTts(runId, text, outPath, options.voiceOverride);
+  } else if (provider === "voicestudio") {
+    // Local and free (VoiceStudio app) — nothing billed, so nothing metered.
+    await voicestudioTts(runId, text, outPath, options.voiceOverride, options.speedOverride);
   } else {
     throw new Error(`Unknown TTS provider: ${provider}`);
   }

@@ -1,7 +1,8 @@
 import { getSetting } from "../settings";
+import { callPlanner } from "./planner-engine";
 import { log } from "../logger";
 import { recordGemini } from "./cost-ledger";
-import { callGemini, type GeminiGenerateContentResponse } from "./gemini-models";
+import { type GeminiGenerateContentResponse } from "./gemini-models";
 import { noteGeminiQuota } from "./gemini-quota";
 import { isGraphicTemplateKey, validateGraphicData, type GraphicTemplateKey } from "./graphic-templates";
 import type { Beat } from "./studio-plan";
@@ -229,7 +230,8 @@ async function requestGraphicPicks(beats: Beat[], runId: string, percent: number
       generationConfig: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 20000, thinkingConfig: { thinkingBudget: 0 } },
     });
     try {
-      const { json } = await callGemini({
+      const { json } = await callPlanner({
+      log: (m: string) => log(runId, "warn", m, { stage: "plan" }),
         apiKey, model, body, timeoutMs: 60_000,
         validate: (j, usedModel) => {
           // metered on every billed attempt, as in requestPlanChunk

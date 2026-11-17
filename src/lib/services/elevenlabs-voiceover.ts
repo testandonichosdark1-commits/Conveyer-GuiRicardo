@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { respellFromScript } from "./respell-words";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -161,7 +162,8 @@ async function synthesizeViaProvider(
     modelOverride: opts.modelOverride,
     provider,
   });
-  const words = await alignWords(runId, outPath, script, durationSec);
+  // Names come back spelled by ear ("Kaufman" for "Kauffman"); the script we synthesized knows better.
+  const words = respellFromScript(await alignWords(runId, outPath, script, durationSec), script);
   log(runId, "success", `Voiceover ready: ${durationSec.toFixed(1)}s, ${words.length} words timed`, {
     stage: "voiceover",
   });

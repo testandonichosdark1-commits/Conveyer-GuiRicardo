@@ -35,6 +35,19 @@ ElevenLabs, footage-source and Ken Burns API details.
 
 ---
 
+## Video Factory (`/factory`) — titles in, finished videos out
+
+Batch front end over the studio pipeline: title → script + description (Claude skills) →
+thumbnail (ChatGPT, one image with text + arrow) → voice (VoiceStudio) → b-roll → video.
+Zero-cost / zero-copyright-risk by design. **Setup, keys, defaults and troubleshooting:
+`docs/FABRICA.md`.** Code: `src/lib/factory/`, `src/app/factory/`. Notable pieces added with it:
+`services/voicestudio.ts` (local TTS), `services/planner-engine.ts` (`PLANNER_ENGINE=claude`),
+`services/claude-vision.ts` / `chatgpt-vision.ts` (`VISION_SCORING`), `services/public-domain-sources.ts`
+(NASA, Smithsonian, …), `services/beat-gap-fill.ts` (a beat with no asset is absorbed by its
+neighbour — an asset is NEVER repeated), `services/respell-words.ts` (names from the script, not Whisper).
+
+---
+
 ## The studio pipeline (the new core)
 
 `POST /api/studio` (script **or** `voiceoverUploadId`, + avatarId + visualMode +
@@ -153,6 +166,23 @@ previous subject forward or fell back to generic stock.
 - Archive sources, live-checked 2026-11-06: **Met** search moved to `/v1.1/search` (v1 answers 410)
   — fixed; **Art Institute** images sit behind a Cloudflare bot challenge (search works, every
   download 403s) and **Library of Congress** 403s even to a browser UA. Neither is worked around.
+- **Archive fidelity fixes (2026-11-06, from a 90%-real archive test):**
+  - *Namesakes.* "George Smith British" returned the NPG portrait of George Smith the publisher
+    (d. 1901) for the Assyriologist (d. 1876). Archive hits now carry `ProviderHit.description`
+    (Commons ImageDescription + date, Met title/date/culture — `catalogueText()`), shown ONLY to
+    the vision scorer with an IDENTITY RULE (lexical scorers untouched). **That alone did not fix
+    it** — the lite vision model still scored the namesake 95. What did: `PERSON_ROLE_RULE`
+    (archive + world prompts) puts the role right after a person's name, which survives
+    `broadenQuery`'s 3-token cap; with "George Smith Assyriologist" Commons' top 5 are all him.
+  - *Crop.* `KEN_BURNS_FIT` ("" default = cover, unchanged; "contain"; "auto" = contain when the
+    16:9 cover-crop would lose > 25%, `coverCropLoss`). Archive sets "auto": a portrait-format 1850
+    watercolour had been cropped into a smear; it now shows whole on a near-black ground.
+  - *Fake documents.* `NO_FAKE_DOCUMENT_RULE`: an AI "1870s newspaper" came back with an invented,
+    legible masthead and headline. ai_prompt may not depict readable documents (archive + world
+    prompts only); the document stays in visual_query, where only real archive items are found.
+  - Still open: AI can still render an imitation ARTIFACT (an "Assyrian relief" of the flood boat)
+    when no real one is found — a fake object rather than a fake document.
+  - Pinned by `archive-fidelity.test.ts`.
 - Archive style also gained ancient-era vocabulary (relief, stele, cylinder seal impression,
   cuneiform tablet…) in `ARCHIVE_QUERY_RULE` / `ARCHIVE_AI_PROMPT_RULE`; it only knew photo/painting media.
 

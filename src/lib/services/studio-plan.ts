@@ -1,8 +1,9 @@
 import { getSetting } from "../settings";
+import { callPlanner } from "./planner-engine";
 import { log } from "../logger";
 import type { WordTiming } from "./elevenlabs-voiceover";
 import { recordGemini } from "./cost-ledger";
-import { callGemini, type GeminiGenerateContentResponse } from "./gemini-models";
+import { type GeminiGenerateContentResponse } from "./gemini-models";
 import { noteGeminiQuota, geminiQuotaHit } from "./gemini-quota";
 import { planGraphicBeats, type GraphicSpec } from "./graphic-plan";
 import { buildVisualWorld, formatVisualWorld, type VisualWorld } from "./visual-world";
@@ -1342,6 +1343,33 @@ export function buildBeats(
   return beats;
 }
 
+/**
+ * Faster cuts during the opening hook, the normal rhythm afterwards. The hook is the words up
+ * to the end of the sentence running at `hookSec`; they are cut at ~`hookTargetSec` (hard cap
+ * 1.75×), the rest at `targetSec` exactly as buildBeats always did. hookTargetSec <= 0, or a
+ * hook target not shorter than the normal one, returns plain buildBeats (byte-identical).
+ */
+export function buildBeatsWithHook(
+  words: WordTiming[],
+  targetSec: number,
+  minSec: number,
+  maxSec: number,
+  hookSec: number,
+  hookTargetSec: number
+): Omit<Beat, "layout" | "visualQuery" | "source">[] {
+  if (!(hookTargetSec > 0) || !(hookSec > 0) || hookTargetSec >= targetSec || words.length === 0) {
+    return buildBeats(words, targetSec, minSec, maxSec);
+  }
+  const hookMs = (words[0].startMs ?? 0) + hookSec * 1000;
+  let cut = words.findIndex((w) => w.endMs >= hookMs && SENTENCE_END.test(w.word));
+  if (cut < 0) cut = words.length - 1;
+  const head = words.slice(0, cut + 1);
+  const tail = words.slice(cut + 1);
+  const hookBeats = buildBeats(head, hookTargetSec, Math.min(minSec, hookTargetSec), hookTargetSec * 1.75);
+  const rest = tail.length ? buildBeats(tail, targetSec, minSec, maxSec) : [];
+  return [...hookBeats, ...rest].map((b, i) => ({ ...b, index: i }));
+}
+
 export interface GeminiQuery {
   index: number;
   visual_query?: string;
@@ -1404,6 +1432,35 @@ const PLAN_CHUNK_SIZE = 6;
  * Only ever ADDED (or swapped for the ai_prompt rule) when the style is on; the default prompt
  * does not contain a byte of them.
  */
+/**
+ * AI must never fabricate a READABLE document. Measured 2026-11-06 (archive run 8d724249): a line
+ * about the discovery making the newspapers produced an AI "1870s newspaper" with a legible,
+ * invented masthead and headline ("THE LONDON PRESS … MR. GEORGE SMITH'S REMARKABLE FIND") — a
+ * fake primary source inside a history video. Real documents come from the archive SEARCH
+ * (visual_query is unaffected); only the generated fallback is steered to the scene instead.
+ * Appended to the archive ai_prompt rule and to the visual-world rule, so the default prompt is
+ * unchanged.
+ */
+const NO_FAKE_DOCUMENT_RULE =
+  `"ai_prompt" must NEVER depict a readable document — no newspaper page or headline, letter, book or manuscript page, ` +
+  `poster, certificate, map with labels or legible inscription: an image model invents its words and it becomes a fake ` +
+  `primary source. When the line is about such a document, the ai_prompt shows the people or the scene around it instead ` +
+  `(e.g. "crowd outside a Victorian newspaper office", "audience in a lecture hall"); keep the document itself in ` +
+  `"visual_query", where only real archive items are found.\n`;
+
+/**
+ * Archives hold many people with one name. Measured 2026-11-06: "George Smith British" (the
+ * broadened form of the planner's query) returned a National Portrait Gallery painting of
+ * George Smith the PUBLISHER (d. 1901) for the Assyriologist (d. 1876), and the vision scorer
+ * gave it 95 even with that catalogue text in front of it. With the profession in the query,
+ * Commons' top five were all the right man. The role goes right after the name so it survives
+ * broadenQuery's 3-token entity cap. Archive and visual-world prompts only.
+ */
+const PERSON_ROLE_RULE =
+  `PERSON RULE: when "visual_query" names a person, put their ROLE or profession immediately after the name ` +
+  `(e.g. "George Smith Assyriologist portrait", "Austen Henry Layard archaeologist"), never the name alone or with ` +
+  `only a nationality or place — archives hold many different people who share a name.\n`;
+
 const ARCHIVE_QUERY_RULE =
   `ARCHIVE SEARCH RULE (historical documentary — the visuals come from museum and library archives, not stock): ` +
   `write "visual_query" the way an archive catalogue titles its items — the named person/place first, then the dynasty, ` +
@@ -1413,7 +1470,8 @@ const ARCHIVE_QUERY_RULE =
   `For ANCIENT subjects (before photography and painting traditions) the medium is the surviving object itself, as museums ` +
   `catalogue it: "relief", "stele", "cylinder seal impression", "cuneiform tablet", "statuette", "papyrus", "fresco", "mosaic", ` +
   `"coin", "vase", "excavation photograph". Good: "Assyrian palace relief winged genie", "Akkadian cylinder seal impression", ` +
-  `"Babylonian kudurru boundary stone", "Ur royal cemetery excavation photograph".\n`;
+  `"Babylonian kudurru boundary stone", "Ur royal cemetery excavation photograph".\n` +
+  PERSON_ROLE_RULE;
 const ARCHIVE_AI_PROMPT_RULE =
   `- "ai_prompt": a 30-60 word image-generation prompt for the same line that looks like an AUTHENTIC PERIOD SOURCE from the ` +
   `time and place the line is about — never a modern photograph. Use the medium that era itself produced: before about 1850 an ` +
@@ -1422,7 +1480,8 @@ const ARCHIVE_AI_PROMPT_RULE =
   `1850 to 1950 a vintage black-and-white or sepia photograph (aged print, soft grain, period clothing, architecture and objects). ` +
   `Name the medium, era and place explicitly (e.g. "1920s sepia photograph, Forbidden City courtyard, Manchu court ladies in qipao"). ` +
   `Concrete subject, period-accurate setting, composition, lighting. NEVER fantasy, sci-fi, surreal, modern or anachronistic elements, ` +
-  `even if the sentence is metaphorical (translate metaphors into a literal period scene). `;
+  `even if the sentence is metaphorical (translate metaphors into a literal period scene). ` +
+  NO_FAKE_DOCUMENT_RULE;
 /**
  * Added only when a visual world was built for the run (services/visual-world.ts). It
  * OVERRIDES the ABSTRACT SCENE RULE's priority order: an abstract line no longer carries the
@@ -1449,7 +1508,9 @@ const VISUAL_WORLD_RULE =
   `including across the "Recent shots" listed above. When several lines in a row are about the same object, rotate the ` +
   `angle on it: the object itself → where it was made or found (site, excavation, city) → the people who made, used or ` +
   `studied it → the story or scene it records (a relief, seal, painting or illustration of that scene) → a map, plan or ` +
-  `document of the place. Each line still depicts what it says; only the angle changes.\n`;
+  `document of the place. Each line still depicts what it says; only the angle changes.\n` +
+  PERSON_ROLE_RULE +
+  NO_FAKE_DOCUMENT_RULE;
 
 const ARCHIVE_OVERLAY_RULE =
   `ARCHIVE DOCUMENTARY CARDS (this channel's style — overrides the card guidance above): use ONLY these types. ` +
@@ -1788,7 +1849,8 @@ export async function requestPlanChunk(prompt: string, runId: string, apiKey: st
     },
   });
   try {
-    const { json: j } = await callGemini({
+    const { json: j } = await callPlanner({
+      log: (m: string) => log(runId, "warn", m, { stage: "plan" }),
       apiKey,
       model,
       body,
@@ -2215,7 +2277,11 @@ export async function planBeats(
 ): Promise<Beat[]> {
   const minSec = Math.max(1.5, Number(getSetting("BEAT_MIN_SEC") || "3"));
   const maxSec = Math.max(minSec + 1, Number(getSetting("BEAT_MAX_SEC") || "10"));
-  let base = buildBeats(words, opts.secondsPerVisual, minSec, maxSec);
+  // Blank (a DB seeded before this key existed) means the default 3 s; an explicit "0" turns it off.
+  const hookRaw = getSetting("HOOK_SECONDS_PER_VISUAL");
+  const hookTarget = hookRaw === "" ? 3 : Number(hookRaw) || 0;
+  const hookSec = Number(getSetting("HOOK_SEC") || "40");
+  let base = buildBeatsWithHook(words, opts.secondsPerVisual, minSec, maxSec, hookSec, hookTarget);
   if (base.length === 0) return [];
 
   // Stage 2 — is this a structured/list video? Detect ONCE, only when overlays are enabled (keeps the

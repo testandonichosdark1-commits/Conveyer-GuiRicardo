@@ -1,9 +1,10 @@
 import fs from "fs";
+import { callPlanner } from "./planner-engine";
 import path from "path";
 import { getSetting } from "../settings";
 import { log } from "../logger";
 import { recordGemini } from "./cost-ledger";
-import { callGemini, type GeminiGenerateContentResponse } from "./gemini-models";
+import { type GeminiGenerateContentResponse } from "./gemini-models";
 import { noteGeminiQuota } from "./gemini-quota";
 
 /**
@@ -160,7 +161,8 @@ export async function buildVisualWorld(runId: string, script: string, title?: st
     },
   });
   try {
-    const { json } = await callGemini({
+    const { json } = await callPlanner({
+      log: (m: string) => log(runId, "warn", m, { stage: "plan" }),
       apiKey,
       model: getSetting("SCENE_SPLIT_MODEL"),
       body,

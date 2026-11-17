@@ -21,6 +21,13 @@ const ALL_FOOTAGE: { id: string; label: string; disabled?: boolean; needsKey?: b
   // the fallback below like every other shipped source. (`optIn` stays in the type: it is the
   // mechanism for a source that must never be switched on for someone; nothing uses it now.)
   { id: "wigolo", label: "Wigolo (web photos)" },
+  // Public domain / CC0 only (no licence, no attribution). NASA needs no key; the rest
+  // return nothing until their key is set under API keys.
+  { id: "nasa", label: "NASA (video + photos, public domain)" },
+  { id: "smithsonian", label: "Smithsonian (CC0)", needsKey: true },
+  { id: "europeana", label: "Europeana (public domain)", needsKey: true },
+  { id: "flickr", label: "Flickr (CC0 / public domain only)", needsKey: true },
+  { id: "dvids", label: "DVIDS (US military, public domain)", needsKey: true },
 ];
 
 /**

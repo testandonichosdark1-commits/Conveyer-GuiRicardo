@@ -74,6 +74,7 @@ export const SETTING_KEYS = [
   "VIDEO_FPS",               // 24 / 30 / 60
   "SCENE_TRANSITIONS",       // Phase 1: "on" = dip-to-black between scenes/beats; "off" (default) = hard cuts, byte-identical to today. "crossfade" = short dissolve between full-screen b-roll beats (archive style; ignores the per-run dip toggle).
   "SCENE_TRANSITION_MS",     // Phase 1: dip-to-black duration per side (ms). Clamped to beatDur/3 on short beats. Default 300. Also the crossfade length when SCENE_TRANSITIONS=crossfade.
+  "KEN_BURNS_FIT",           // "" (default) = cover-crop stills | "contain" = always show the whole still | "auto" = whole only when a crop would lose >25% (archive style sets "auto")
   "VISUAL_WORLD",            // "1" (default) = one Gemini call reads the whole script and defines the video's visual world, which keeps every planned shot on-topic (services/visual-world.ts). Anything else = off; the planner prompt is then byte-identical to before.
   "EDIT_STYLE",              // "" (default) = today's look | "archive" = historical-documentary look (gentle varied Ken Burns, crossfades, archive overlay cards, period-authentic AI prompts). Normally set per channel (channels.edit_style).
   "KEN_BURNS_RANGE",         // total zoom of a still across its clip, as a fraction (default 0.18 = 18%). Archive style uses 0.06.
@@ -130,7 +131,10 @@ export const SETTING_KEYS = [
   "HUME_VOICE_ID",             // Hume voice UUID. A bare id resolves against BOTH the Voice Library and custom voices, so no provider is stored alongside it.
   "HUME_VERSION",              // Octave model version: "" = Hume's default | "1" | "2". Octave-2-only voices REQUIRE "2".
   "VOICEBOX_URL",              // Voicebox local server (github.com/jamiepine/voicebox). Blank = http://127.0.0.1:17493. No key — it has no auth.
-  "VOICEBOX_VOICE_ID",         // Voicebox voice PROFILE id (GET /profiles). The engine (qwen, chatterbox, …) is the profile's own default.
+  "VOICEBOX_VOICE_ID",
+  "VOICESTUDIO_URL",           // VoiceStudio local app (voicestudio.sh). Blank = http://127.0.0.1:3900. No key.
+  "VOICESTUDIO_MODEL",         // VoiceStudio engine id. Blank = mlx-audio (Kokoro on Apple MLX — fast; OmniVoice stalled and is non-commercial).
+  "VOICESTUDIO_VOICE_ID",      // VoiceStudio voice: an engine preset/profile, e.g. am_michael, bm_george. Blank = am_michael.         // Voicebox voice PROFILE id (GET /profiles). The engine (qwen, chatterbox, …) is the profile's own default.
   "COST_HUME_USD_PER_1K_CHARS", // Hume Octave TTS list price per 1,000 characters ($0.15 entry tier, $0.05 on Business).
   "SECONDS_PER_VISUAL",        // seconds each image/clip stays on screen (default 4.5)
   // Longest voiceover an operator may upload, in minutes. The binding constraint is Groq's
@@ -148,6 +152,14 @@ export const SETTING_KEYS = [
   "VISUAL_MODE",               // ai | real | mix — default visual source for new videos (default mix)
   "FOOTAGE_SOURCES",           // CSV priority list: pexels,pixabay,openverse,wikimedia
   "REAL_MATCH_THRESHOLD",      // 0–100. >0 = Gemini scores how well each stock hit matches the query; hits below the bar are skipped (falls back to AI). 0 = off.
+  "VISION_SCORING",            // "" = Gemini scores the candidate images (default) · "claude" = Claude scores them (claude -p) · "chatgpt" = ChatGPT scores them (codex exec, your ChatGPT account) · "off" = no image check, local lexical ranking.
+  "CHATGPT_VISION_MODEL",      // Model for VISION_SCORING=chatgpt (blank = the ChatGPT account's default). `codex debug models` lists them.
+  "VISION_CLAUDE_MODEL",       // Claude alias for VISION_SCORING=claude (default "haiku").
+  "PLANNER_ENGINE",            // "gemini" (default) | "claude" — who writes the plan (visual world, search queries). Image scoring always stays on Gemini.
+  "PLANNER_CLAUDE_MODEL",      // Claude model alias for PLANNER_ENGINE=claude (default "haiku").
+  "REAL_STRICT_MIN_SCORE",     // Real-footage-only: lowest vision score still put on screen (default 50); below it the adjacent shot covers the beat.
+  "HOOK_SECONDS_PER_VISUAL",   // Shot length during the opening hook (default 3s; 0 = same as SECONDS_PER_VISUAL).
+  "HOOK_SEC",                  // How long the opening hook lasts, in seconds (default 40).
   "REAL_MEDIA",                // image (photos only) | video (videos only) | auto (photos + video — DEFAULT). Filters real-footage candidates by media kind. Surfaced on the Run page.
   "AI_MATCH_THRESHOLD",        // 0–100. Early-exit bar for AI image regeneration. Empty = REAL_MATCH_THRESHOLD / 75. (AI typically scores 68–78, so a lower bar avoids wasted regens.)
   "VISION_MATCH_MODEL",        // Gemini model used to visually score footage candidates (vision). Default gemini-3.1-flash-lite (cheap/fast); empty = inherit SCENE_SPLIT_MODEL.
@@ -159,6 +171,10 @@ export const SETTING_KEYS = [
                                // limit, so the source behaves like every other one. DB/API-only on purpose: it is a
                                // safety valve for an operator who wants one, not a knob every user must understand.
   "PIXABAY_API_KEY",           // Pixabay (images + videos). Free, no attribution.
+  "SMITHSONIAN_API_KEY",       // Smithsonian Open Access (CC0 images). Free api.data.gov key.
+  "EUROPEANA_API_KEY",         // Europeana (public-domain/CC0 images + newsreels). Free key.
+  "FLICKR_API_KEY",            // Flickr — only CC0 / PD Mark / Flickr Commons photos are used. Free key.
+  "DVIDS_API_KEY",             // DVIDS (US military public-domain photos + video). Free key.
   "OPENVERSE_TOKEN",           // Optional Openverse bearer token for higher rate limits
   "GOOGLE_CSE_KEY",            // Google Programmable Search (Custom Search JSON API) key — web image search ("web" source)
   "GOOGLE_CSE_CX",             // Google Programmable Search engine id (cx) — must have Image search ON
@@ -579,6 +595,7 @@ export const DEFAULTS: Record<SettingKey, string> = {
   VIDEO_FPS: "30",
   SCENE_TRANSITIONS: "off",
   SCENE_TRANSITION_MS: "300",
+  KEN_BURNS_FIT: "",
   VISUAL_WORLD: "1",
   EDIT_STYLE: "",
   KEN_BURNS_RANGE: "0.18",
@@ -636,6 +653,9 @@ export const DEFAULTS: Record<SettingKey, string> = {
   COST_HUME_USD_PER_1K_CHARS: "0.15",
   VOICEBOX_URL: "",
   VOICEBOX_VOICE_ID: "",
+  VOICESTUDIO_URL: "",
+  VOICESTUDIO_MODEL: "",
+  VOICESTUDIO_VOICE_ID: "",
   SECONDS_PER_VISUAL: "4.5",
   UPLOAD_MAX_MINUTES: "50",
   BEAT_MIN_SEC: "3",
@@ -647,8 +667,16 @@ export const DEFAULTS: Record<SettingKey, string> = {
   AVATAR_SYNC_OFFSET_MS: "0",
   REAL_RATIO_PERCENT: "50",
   VISUAL_MODE: "mix",
-  FOOTAGE_SOURCES: "youtube,storyblocks,pexels,pixabay,openverse,wikimedia,archive,web,wigolo",
+  FOOTAGE_SOURCES: "youtube,storyblocks,pexels,pixabay,openverse,wikimedia,archive,web,wigolo,nasa,smithsonian,europeana,flickr,dvids",
   REAL_MATCH_THRESHOLD: "85",
+  VISION_SCORING: "chatgpt",
+  CHATGPT_VISION_MODEL: "",
+  VISION_CLAUDE_MODEL: "haiku",
+  PLANNER_ENGINE: "claude",
+  PLANNER_CLAUDE_MODEL: "haiku",
+  REAL_STRICT_MIN_SCORE: "50",
+  HOOK_SECONDS_PER_VISUAL: "3",
+  HOOK_SEC: "40",
   REAL_MEDIA: "auto",
   AI_MATCH_THRESHOLD: "75",
   VISION_MATCH_MODEL: "gemini-3.1-flash-lite",
@@ -656,6 +684,10 @@ export const DEFAULTS: Record<SettingKey, string> = {
   STORYBLOCKS_API_KEYS: "",
   STORYBLOCKS_MAX_DOWNLOADS_PER_RUN: "0",
   PIXABAY_API_KEY: "",
+  SMITHSONIAN_API_KEY: "",
+  EUROPEANA_API_KEY: "",
+  FLICKR_API_KEY: "",
+  DVIDS_API_KEY: "",
   OPENVERSE_TOKEN: "",
   GOOGLE_CSE_KEY: "",
   GOOGLE_CSE_CX: "",
@@ -891,6 +923,10 @@ export function seedDefaults() {
   // value-based check (like the youtube migration's) would see the just-written default.
   // migrateFallbackAiMediaForExistingInstalls needs it and nothing else does.
   const preexistingInstall = (settingsCountStmt.get() as { n: number }).n > 0;
+  // `preexistingInstall` above is NOT reliable for this: db.ts writes a row at import, so the
+  // count is never 0 (measured on an empty data dir: 1 row before the first seed). A fresh
+  // install is one that has never stored a footage-source list.
+  const brandNewInstall = !getStmt.get("FOOTAGE_SOURCES");
   for (const [k, v] of Object.entries(DEFAULTS)) {
     const row = getStmt.get(k) as { value: string } | undefined;
     if (!row) upsertStmt.run(k, v);
@@ -909,6 +945,8 @@ export function seedDefaults() {
   backfillWigoloUrlOnce();
   widenWigoloExcludeDomainsOnce();
   enableWigoloDefaultOnce();
+  enablePublicDomainSourcesOnce();
+  applyCopyrightSafeDefaultsToFreshInstall(brandNewInstall);
   migrateFallbackAiMediaForExistingInstalls(preexistingInstall);
   migrateFallbackAiMediaToImageDefault();
 }
@@ -1025,6 +1063,42 @@ function enableWigoloDefaultOnce() {
     if (!list.includes("wigolo")) upsertStmt.run("FOOTAGE_SOURCES", [...list, "wigolo"].join(","));
   }
   upsertStmt.run("_migration_wigolo_default_on", "1");
+}
+
+/**
+ * One-time migration: add the public-domain / CC0 sources (public-domain-sources.ts) to
+ * FOOTAGE_SOURCES on existing DBs — DEFAULTS only seed a fresh database. Safe to enable for
+ * everyone: NASA needs no key, the others return nothing until their key is set. Marked done
+ * immediately, so an operator who unticks one afterwards stays unticked.
+ */
+function enablePublicDomainSourcesOnce() {
+  const flag = getStmt.get("_migration_public_domain_sources") as { value: string } | undefined;
+  if (flag?.value === "1") return;
+  const fs = getStmt.get("FOOTAGE_SOURCES") as { value: string } | undefined;
+  if (fs) {
+    const list = fs.value.split(/[,\n;]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
+    const add = ["nasa", "smithsonian", "europeana", "flickr", "dvids"].filter((x) => !list.includes(x));
+    if (add.length) upsertStmt.run("FOOTAGE_SOURCES", [...list, ...add].join(","));
+  }
+  upsertStmt.run("_migration_public_domain_sources", "1");
+}
+
+/**
+ * FRESH installs only (a colleague cloning the Factory): the migrations above deliberately turn
+ * YouTube clips + Storyblocks on for a new database ("a fresh recipient gets the clean YouTube").
+ * The Factory is built to publish to monetized channels with ZERO copyright risk and zero spend,
+ * so a new install ends up on public-domain / CC0 / free-licence sources only — YouTube and
+ * Storyblocks stay available in Settings, switched OFF until someone ticks them. An existing
+ * install is never touched (the marker is written either way, so this can't run later).
+ */
+function applyCopyrightSafeDefaultsToFreshInstall(brandNewInstall: boolean) {
+  const flag = getStmt.get("_migration_factory_safe_defaults") as { value: string } | undefined;
+  if (flag?.value === "1") return;
+  if (brandNewInstall) {
+    upsertStmt.run("FOOTAGE_SOURCES", "pexels,pixabay,openverse,wikimedia,archive,web,wigolo,nasa,smithsonian");
+    upsertStmt.run("YT_DLP_ENABLED", "0");
+  }
+  upsertStmt.run("_migration_factory_safe_defaults", "1");
 }
 
 function enableStoryblocksDefaultOnce() {

@@ -19,6 +19,7 @@ export type VoiceProviderId =
   | "fishaudio"
   | "hume"
   | "voicebox"
+  | "voicestudio"
   | "69labs"
   | "heygen"
   | "minimax";
@@ -71,6 +72,9 @@ export const VOICE_PROVIDERS: VoiceProviderMeta[] = [
   // account, no key, no cost. Its "voice id" is a Voicebox profile id; the server address
   // is the only extra setting (blank = http://127.0.0.1:17493).
   { id: "voicebox", label: "Voicebox", selectLabel: "Voicebox (local, free)", apiKey: "", voiceIdKey: "VOICEBOX_VOICE_ID", voicesEndpoint: "voicebox", extraKeys: [{ key: "VOICEBOX_URL", label: "Voicebox — server URL (blank = http://127.0.0.1:17493)" }] },
+  // VoiceStudio runs LOCALLY (voicestudio.sh): free, no key. The voice id is an engine
+  // preset or profile (Kokoro presets such as am_michael / bm_george on the mlx-audio engine).
+  { id: "voicestudio", label: "VoiceStudio", selectLabel: "VoiceStudio (local, free)", apiKey: "", voiceIdKey: "VOICESTUDIO_VOICE_ID", extraKeys: [{ key: "VOICESTUDIO_URL", label: "VoiceStudio — server URL (blank = http://127.0.0.1:3900)" }, { key: "VOICESTUDIO_MODEL", label: "VoiceStudio — engine (blank = mlx-audio)" }] },
   { id: "69labs", label: "69labs", selectLabel: "69labs (ElevenLabs / EdgeTTS / clone)", apiKey: "LABS69_API_KEY", voiceIdKey: "TTS_VOICE_ID" },
   { id: "heygen", label: "HeyGen", selectLabel: "HeyGen", apiKey: "HEYGEN_API_KEY", voiceIdKey: "HEYGEN_VOICE_ID", voicesEndpoint: "heygen" },
   { id: "minimax", label: "MiniMax", selectLabel: "MiniMax", apiKey: "MINIMAX_API_KEY", voiceIdKey: "MINIMAX_VOICE_ID", extraKeys: [{ key: "MINIMAX_GROUP_ID", label: "MiniMax — Group ID" }] },

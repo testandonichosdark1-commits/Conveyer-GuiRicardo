@@ -47,6 +47,9 @@ import { acquireLtxScene, ltxSceneRequest, LtxGenerationPendingError, readLtxInp
 import { generateLtxImageAutomatically } from "./ltx/auto-image";
 import { readLtxNotebookSession, generateLtxClipViaNotebook } from "./ltx/notebook";
 import { ManualGenerationPendingError, appendManualPrompt, findManualFile } from "./manual-pending";
+import { claudeScoreCandidates } from "./claude-vision";
+import { chatgptScoreCandidates } from "./chatgpt-vision";
+import { nasaSearch, smithsonianSearch, europeanaSearch, flickrSearch, dvidsSearch } from "./public-domain-sources";
 
 // Provider-level circuit breaker. Profile-level credential/config failures are handled inside
 // cloudflare-image.ts by deterministic operational failover (Primary → Backup 1 → ...). If the
@@ -148,6 +151,10 @@ export interface ProviderHit {
   license?: string | null;
   /** Which provider produced it (filled by gatherCandidates). */
   provider?: string;
+  /** Catalogue text from an archive source (description, date, culture). Shown ONLY to the
+   *  vision scorer as identity evidence — never fed to the lexical scorers, so ranking of
+   *  sources without it is unchanged. */
+  description?: string;
 }
 
 /**
@@ -291,11 +298,18 @@ async function pixabayImageSearch(query: string): Promise<ProviderHit[]> {
     .filter((x): x is ProviderHit => x !== null);
 }
 
-async function openverseSearch(query: string): Promise<ProviderHit[]> {
+/**
+ * Public domain / CC0 only (operator's decision, 2026-11-17). It used to also take CC BY and
+ * CC BY-SA, which require crediting the author — a monetized channel that skips the credit is
+ * in breach of the licence. The result's own `license` is checked again, so a misfiled item
+ * can't slip through on the query filter alone.
+ */
+const OPENVERSE_FREE = new Set(["pdm", "cc0"]);
+
+export async function openverseSearch(query: string): Promise<ProviderHit[]> {
   const url = new URL("https://api.openverse.org/v1/images/");
   url.searchParams.set("q", query);
-  url.searchParams.set("license", "pdm,cc0,by,by-sa");
-  url.searchParams.set("license_type", "commercial,modification");
+  url.searchParams.set("license", [...OPENVERSE_FREE].join(","));
   url.searchParams.set("page_size", "20");
   const headers: Record<string, string> = { "User-Agent": UA };
   const token = getSetting("OPENVERSE_TOKEN");
@@ -306,7 +320,7 @@ async function openverseSearch(query: string): Promise<ProviderHit[]> {
     results?: { id: string; url?: string; thumbnail?: string; creator?: string; foreign_landing_url?: string; license?: string; attribution?: string }[];
   };
   return (data.results ?? [])
-    .filter((r) => r.url)
+    .filter((r) => r.url && OPENVERSE_FREE.has((r.license ?? "").toLowerCase()))
     .map((r): ProviderHit => ({
       kind: "image",
       url: r.url as string,
@@ -316,6 +330,50 @@ async function openverseSearch(query: string): Promise<ProviderHit[]> {
       sourceUrl: r.foreign_landing_url,
       license: r.license ?? null,
     }));
+}
+
+/** Plain-text catalogue line from archive metadata fields (HTML stripped, joined, capped). */
+export function catalogueText(...fields: (string | null | undefined)[]): string | undefined {
+  const parts = fields
+    .map((f) => (f || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const text = parts.join(" · ").slice(0, 300);
+  return text || undefined;
+}
+
+/**
+ * Commons' API rate-limits bursts from one client. A real run fired its searches from up to
+ * VISUAL_CONCURRENCY beats × 4 broaden attempts at once and got 264 × 429 — so Wikimedia, the
+ * one free source with photos of real people and historical events, contributed almost
+ * nothing. Calls are now serialized process-wide with a minimum gap, and a 429 waits
+ * (honouring Retry-After, capped) and tries again instead of counting as "no results".
+ */
+const WIKIMEDIA_MIN_GAP_MS = 700;
+const wikiState = globalThis as unknown as { __facelessWikiQueue?: Promise<unknown>; __facelessWikiLast?: number };
+
+export async function wikimediaFetch(url: URL | string, opts: { minGapMs?: number; retries?: number; fetchImpl?: typeof fetch } = {}): Promise<Response> {
+  const gap = opts.minGapMs ?? WIKIMEDIA_MIN_GAP_MS;
+  const retries = opts.retries ?? 3;
+  const doFetch = opts.fetchImpl ?? fetch;
+  const run = async (): Promise<Response> => {
+    let resp: Response | null = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      const wait = (wikiState.__facelessWikiLast ?? 0) + gap - Date.now();
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      wikiState.__facelessWikiLast = Date.now();
+      resp = await doFetch(url, { headers: { "User-Agent": UA } });
+      if (resp.status !== 429 && resp.status < 500) return resp;
+      if (attempt === retries) break;
+      const ra = Number(resp.headers.get("retry-after"));
+      const backoff = Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, 20_000) : 2000 * (attempt + 1);
+      await new Promise((r) => setTimeout(r, Math.max(gap, backoff)));
+    }
+    return resp!;
+  };
+  const prev = wikiState.__facelessWikiQueue ?? Promise.resolve();
+  const mine = prev.catch(() => {}).then(run);
+  wikiState.__facelessWikiQueue = mine.catch(() => {});
+  return mine;
 }
 
 async function wikimediaSearch(query: string): Promise<ProviderHit[]> {
@@ -329,7 +387,7 @@ async function wikimediaSearch(query: string): Promise<ProviderHit[]> {
   url.searchParams.set("prop", "imageinfo");
   url.searchParams.set("iiprop", "url|size|mime|extmetadata");
   url.searchParams.set("iiurlwidth", "1920");
-  const resp = await fetch(url, { headers: { "User-Agent": UA } });
+  const resp = await wikimediaFetch(url);
   if (!resp.ok) throw new Error(`Wikimedia ${resp.status}`);
   const data = (await resp.json()) as {
     query?: { pages?: Record<string, { title?: string; imageinfo?: { url?: string; thumburl?: string; mime?: string; descriptionurl?: string; extmetadata?: Record<string, { value?: string }> }[] }> };
@@ -352,6 +410,7 @@ async function wikimediaSearch(query: string): Promise<ProviderHit[]> {
       author: info.extmetadata?.Artist?.value?.replace(/<[^>]+>/g, "").slice(0, 120) ?? null,
       sourceUrl: info.descriptionurl,
       license: info.extmetadata?.LicenseShortName?.value ?? null,
+      description: catalogueText(info.extmetadata?.ImageDescription?.value, info.extmetadata?.DateTimeOriginal?.value),
     });
   }
   return hits;
@@ -382,6 +441,7 @@ export async function metSearch(query: string): Promise<ProviderHit[]> {
         return (await r.json()) as {
           objectID?: number; isPublicDomain?: boolean; primaryImage?: string; primaryImageSmall?: string;
           title?: string; artistDisplayName?: string; objectURL?: string;
+          objectDate?: string; culture?: string; period?: string;
         };
       } catch {
         return null;
@@ -399,6 +459,7 @@ export async function metSearch(query: string): Promise<ProviderHit[]> {
       author: [o.title, o.artistDisplayName].filter(Boolean).join(" — ").slice(0, 160) || null,
       sourceUrl: o.objectURL,
       license: "Public Domain (The Met Open Access)",
+      description: catalogueText(o.title, o.objectDate, o.culture, o.period),
     });
   }
   return hits;
@@ -471,6 +532,12 @@ const PROVIDERS: Record<string, (q: string, runId: string, minDurSec?: number) =
   storyblocks: (q, runId, minDurSec) => storyblocksProvider(q, runId, minDurSec),
   web: (q, runId) => googleCseSearch(q, runId),
   wigolo: (q, runId) => wigoloSearch(q, runId),
+  // Public domain / CC0 only (public-domain-sources.ts). The keyed ones return [] without a key.
+  nasa: (q) => nasaSearch(q),
+  smithsonian: (q) => smithsonianSearch(q),
+  europeana: (q) => europeanaSearch(q),
+  flickr: (q) => flickrSearch(q),
+  dvids: (q) => dvidsSearch(q),
 };
 
 /**
@@ -524,9 +591,19 @@ async function safe<T>(p: Promise<T[]>): Promise<T[]> {
  * ("archive"). Two-step API: advancedsearch for identifiers, then per-item
  * metadata to pick a reasonably small mp4 derivative.
  */
-async function archiveSearch(query: string): Promise<ProviderHit[]> {
+/**
+ * Public domain / CC0 items only (operator's decision, 2026-11-17). archive.org accepts any
+ * upload, including TV and film clips under copyright, and video is exactly what YouTube's
+ * Content ID matches — so an unfiltered archive.org clip is the riskiest asset the app could
+ * put in a video. Filtered in the query AND re-checked against the item's own licenseurl.
+ */
+export function archiveLicenseIsFree(licenseurl: string | undefined): boolean {
+  return /creativecommons\.org\/(publicdomain\/(mark|zero)\/|licenses\/publicdomain)/i.test(licenseurl ?? "");
+}
+
+export async function archiveSearch(query: string): Promise<ProviderHit[]> {
   const search = new URL("https://archive.org/advancedsearch.php");
-  search.searchParams.set("q", `(${query.slice(0, 120)}) AND mediatype:(movies)`);
+  search.searchParams.set("q", `(${query.slice(0, 120)}) AND mediatype:(movies) AND (licenseurl:*publicdomain* OR licenseurl:*zero*)`);
   search.searchParams.append("fl[]", "identifier");
   search.searchParams.append("fl[]", "title");
   search.searchParams.append("sort[]", "downloads desc");
@@ -554,6 +631,7 @@ async function archiveSearch(query: string): Promise<ProviderHit[]> {
         .sort((a, b) => Number(a.size) - Number(b.size));
       const file = mp4s[0];
       if (!file?.name) continue;
+      if (!archiveLicenseIsFree(meta.metadata?.licenseurl)) continue;
       hits.push({
         kind: "video",
         url: `https://archive.org/download/${encodeURIComponent(d.identifier!)}/${encodeURIComponent(file.name)}`,
@@ -1509,9 +1587,10 @@ const GENERIC_DESCRIPTORS = new Set(
  *   retry 1 → entity + up to 2 meaningful words
  *   retry 2 → entity only (or entity + 1 meaningful word when the entity is a
  *             single token, to retain product identity)
- *   retry 3 → the single most salient token (Real-footage-only mode's last-ditch
- *             broadening — the widest query we can still form). The normal
- *             3-attempt loop never passes a level above 2, so this is additive.
+ *   retry 3 → the protected entity alone, or its first two salient words —
+ *             never a single word (Real-footage-only mode's last-ditch
+ *             broadening). The normal 3-attempt loop never passes a level
+ *             above 2, so this is additive.
  */
 export function broadenQuery(query: string, level: number): string {
   if (level <= 0) return query;
@@ -1538,10 +1617,21 @@ export function broadenQuery(query: string, level: number): string {
   // 2. Remaining meaningful (non-generic) words, in source order.
   const meaningful = tokens.slice(entityEnd).filter((w) => !isGeneric(w));
 
-  // 2b. Strict-only: widest possible query — one token, entity first. When the query
-  // is already a single token this returns it unchanged and acquireReal's triedQueries
-  // guard skips the attempt, which is the intended no-op.
-  if (level >= 3) return entity[0] ?? meaningful[0] ?? tokens[0];
+  // 2b. Strict-only widest query — but NEVER a single loose word. It used to be one token,
+  // and "Draper Kaufman bomb disposal officer…" became "Draper", for which archive.org
+  // returned a 1948 Lucky Strike cigarette ad that then went on screen over a WWII bomb-
+  // disposal line. A name or subject keeps at least two tokens; a query that cannot is
+  // left at its level-2 form, which acquireReal's triedQueries guard skips as a duplicate.
+  if (level >= 3) {
+    // Leading tokens up to the second real word ("Draper Kaufman", "Arm & Hammer").
+    const wide: string[] = [];
+    let words = 0;
+    for (const t of [...entity, ...meaningful]) {
+      wide.push(t);
+      if (/[\p{L}\p{N}]/u.test(t) && ++words === 2) break;
+    }
+    return words >= 2 ? wide.join(" ") : broadenQuery(query, 2);
+  }
 
   // 3. Keep entity + fewer meaningful words each retry; retry 2 is aggressive.
   const keepRest = level === 1 ? 2 : entity.length >= 2 ? 0 : 1;
@@ -1763,6 +1853,13 @@ const PROVIDER_WEIGHT: Record<string, number> = {
   // THIRD, above wikimedia/openverse/web/archive, purely by omission. Listing it at -3 keeps
   // every existing provider's relative order exactly as it was.
   wigolo: -3,
+  // Public-domain / CC0 sources. nasa, europeana and dvids also return VIDEO, so they sit with
+  // the museum tier rather than below it; flickr is open-web-like stills, with openverse.
+  nasa: -1,
+  smithsonian: -1,
+  europeana: -1,
+  dvids: -1,
+  flickr: -2,
   archive: -4,
 };
 /** Ranking score = raw semantic score + provider weight + video bonus. */
@@ -1794,6 +1891,13 @@ const PREFILTER_PROVIDER_WEIGHT: Record<string, number> = {
   // still scores -3 + 0 + 1(thumb) = -2, so an all-wigolo pool stays "weak" exactly as an
   // all-web pool does today, and the route-to-AI gate behaves as it did before.
   wigolo: -3,
+  // Public-domain / CC0 sources. nasa, europeana and dvids also return VIDEO, so they sit with
+  // the museum tier rather than below it; flickr is open-web-like stills, with openverse.
+  nasa: -1,
+  smithsonian: -1,
+  europeana: -1,
+  dvids: -1,
+  flickr: -2,
   archive: -4,
 };
 /**
@@ -2087,6 +2191,7 @@ function explainWeakPool(pool: ProviderHit[]): string {
   return `candidates=${pool.length}, videos=${videos}, bestScore=${best}, providers=[${providers.join(",")}]`;
 }
 
+const noteVisionOff = new Set<string>(); // one notice per run, not one per beat
 async function scoreAndPick(
   runId: string,
   beatIndex: number,
@@ -2100,8 +2205,19 @@ async function scoreAndPick(
   const apiKey = getSetting("GOOGLE_API_KEY");
   // scoring intentionally off → accept, rankKey() orders
   if (threshold <= 0) return { picks: pool.map((h) => ({ hit: h, score: threshold })), reserve: [] };
-  if (!apiKey) {
-    log(runId, "debug", `Beat ${beatIndex}: no Gemini key — lexical fallback scoring`, { stage: "visual" });
+  // VISION_SCORING=off: the operator chose to run without the Gemini image check (free keys
+  // run out of quota within a minute of footage). Same path as "no key": every candidate is
+  // ranked by the local lexical scorer, no image is sent anywhere.
+  const visionMode = (getSetting("VISION_SCORING") || "").trim().toLowerCase();
+  const visionOff = visionMode === "off";
+  // VISION_SCORING=claude judges the previews with Claude (claude-vision.ts): no Gemini key needed.
+  const visionClaude = visionMode === "claude" || visionMode === "chatgpt";
+  const visionChatgpt = visionMode === "chatgpt"; // same flow, ChatGPT (codex exec) as the judge
+  if (visionOff || (!apiKey && !visionClaude)) {
+    if (!visionOff || !noteVisionOff.has(runId)) {
+      if (visionOff) noteVisionOff.add(runId);
+      log(runId, visionOff ? "info" : "debug", `Beat ${beatIndex}: ${visionOff ? "image check switched off (VISION_SCORING=off)" : "no Gemini key"} — lexical fallback scoring`, { stage: "visual" });
+    }
     // No prefilter on this path (it never ran here), so the whole pool is scored and
     // nothing is held back — there is no reserve because nothing was dropped.
     return { picks: pool.map((h) => ({ hit: h, score: fallbackSemanticScore(sceneQuery, h), fallback: true })), reserve: [] };
@@ -2115,7 +2231,8 @@ async function scoreAndPick(
   const kept = new Set(pool.map((h) => h.dedupeId));
   const reserve = gathered.filter((h) => !kept.has(h.dedupeId));
 
-  const circuit = beginVisionCall(runId);
+  // The Gemini circuit breaker guards Gemini's quota only; Claude has no per-call bill to protect.
+  const circuit = visionClaude ? { allow: true, probe: false } : beginVisionCall(runId);
   if (!circuit.allow) {
     return { picks: pool.map((h) => ({ hit: h, score: fallbackSemanticScore(sceneQuery, h), fallback: true })), reserve };
   }
@@ -2158,14 +2275,47 @@ async function scoreAndPick(
         `75-84 = same product/subject CATEGORY — strong supporting B-roll (e.g. a generic washing-soda or detergent box / cleaning aisle when the wanted visual names a specific brand). ` +
         `40-74 = only loosely related to the topic. ` +
         `0-39 = wrong domain, misleading, low quality, OR fake/CGI/gibberish-text (see AUTHENTICITY RULE). ` +
-        `Judge what you actually SEE, not the title. Return STRICTLY JSON: [{"i":<int>,"score":<int>}]. No markdown.`,
+        `WATERMARK RULE: score 39 or below when the candidate shows a watermark, a stock-agency or archive logo, a TV-channel logo bug, ` +
+        `or a burned-in credit / caption / title slate over the picture — it cannot go on screen in someone else's video. ` +
+        `A small, unobtrusive date stamp on an old photograph, or a museum's colour chart beside an object, is NOT a watermark. ` +
+        `MEANING RULE: read every word in the sense THIS narration uses it. A candidate that shows the word's OTHER meaning is WRONG — score it 39 or below ` +
+        `(e.g. "SEALs" in a military script are US Navy special forces, never the animal; "Jaguar" in a car script is the car, never the cat). ` +
+        `Judge what you actually SEE, not the title. Return STRICTLY JSON: [{"i":<int>,"score":<int>}]. No markdown.` +
+        // Only when some candidate carries archive catalogue text — otherwise the prompt is unchanged.
+        (pool.some((h) => h.description)
+          ? `\nIDENTITY RULE: some candidates include their museum/archive CATALOGUE text. When the scene names a specific ` +
+            `person, object or place, treat that text as evidence of WHO or WHAT the image really shows: a different person ` +
+            `who merely shares the name (other profession, other lifetime, e.g. died decades after the scene's events), or a ` +
+            `different object or place, is WRONG — score it 39 or below however well it looks.`
+          : ""),
     },
   ];
   pool.forEach((h, i) => {
-    parts.push({ text: `[${i}] ${h.kind} from ${h.provider}: ${hitLabel(h)}` });
+    parts.push({ text: `[${i}] ${h.kind} from ${h.provider}: ${hitLabel(h)}${h.description ? ` — catalogue: "${h.description}"` : ""}` });
     const thumb = thumbs[i];
     if (thumb) parts.push({ inline_data: { mime_type: thumb.mime, data: thumb.data } });
   });
+
+  if (visionClaude) {
+    try {
+      // Same instructions and candidate labels the Gemini call gets; Claude reads the previews from files.
+      const instructions = parts.filter((p): p is { text: string } => "text" in p).map((p) => p.text).join("\n");
+      const images = thumbs.map((t) => (t ? { mime: t.mime, data: t.data } : null));
+      const arr = visionChatgpt
+        ? await chatgptScoreCandidates({ instructions, images })
+        : await claudeScoreCandidates({ instructions, images, model: getSetting("VISION_CLAUDE_MODEL") || "haiku" });
+      const scored = arr
+        .map((x) => ({ hit: pool[Number(x.i)], score: Number(x.score) }))
+        .filter((x) => x.hit && Number.isFinite(x.score))
+        .sort((a, b) => b.score - a.score);
+      const best = scored[0];
+      log(runId, "debug", `Beat ${beatIndex}: scored ${pool.length} candidates with ${visionChatgpt ? "ChatGPT" : "Claude"} (${thumbs.filter(Boolean).length} with image) — best ${best ? best.score : "n/a"}/${threshold} (${best ? best.hit.provider : "—"})`, { stage: "visual" });
+      return { picks: scored.length ? scored : pool.map((h) => ({ hit: h, score: 0 })), reserve };
+    } catch (e) {
+      log(runId, "warn", `Beat ${beatIndex}: ${visionChatgpt ? "ChatGPT" : "Claude"} scoring failed (${(e as Error).message.slice(0, 100)}) — lexical fallback scoring`, { stage: "visual" });
+      return { picks: pool.map((h) => ({ hit: h, score: fallbackSemanticScore(sceneQuery, h), fallback: true })), reserve };
+    }
+  }
 
   const model = getSetting("VISION_MATCH_MODEL") || getSetting("SCENE_SPLIT_MODEL");
   const body = JSON.stringify({
@@ -2948,7 +3098,8 @@ async function acquireReal(
   videoContext?: string,
   youtubeFirst = false,
   topicPool?: TopicPool,
-  strict = false
+  strict = false,
+  report?: { belowFloor: boolean }
 ): Promise<VisualResult | null> {
   const rawText = beat.visualQuery || beat.text;
   const query = visualPromptToQuery(rawText);
@@ -3180,12 +3331,24 @@ async function acquireReal(
     if (yt) return yt;
   }
 
-  // ── Real-footage-only (strict) — the bar itself is the last thing to go ──────
-  // Everything above already ran: broadened attempts (incl. the extra level-3 one),
-  // the full provider fan-out and YouTube. Nothing cleared the 75/80 bar, so accept
-  // the BEST real candidate at ANY score rather than generating AI. This IS the
-  // threshold relaxation — the bar is now 0, so there is nothing further to relax.
+  // ── Real-footage-only (strict) — the bar is relaxed, down to a relevance floor ──────
+  // Everything above already ran: broadened attempts (incl. the extra level-3 one), the full
+  // provider fan-out and YouTube. Nothing cleared the 75/80 bar, so accept the BEST unused
+  // real candidate — but only if it is at least loosely about the scene
+  // (REAL_STRICT_MIN_SCORE, default 50). Below that it is off-topic (measured: 53 of 223 beats
+  // of one run went on screen at 30–45%, e.g. a warship for a person's portrait), and the
+  // beat is better absorbed by the adjacent shot than shown with an unrelated clip.
+  //
+  // There is deliberately NO "accept a repeat" rung any more: the operator never wants the
+  // same asset twice in a video. A beat with nothing usable is absorbed by its neighbour in
+  // the pipeline (beat-gap-fill.ts), which plays on through its time.
+  const floor = strictMinScore();
   if (strict && bestHit && !usedIds.has(bestHit.hit.dedupeId)) {
+    if (bestHit.score < floor) {
+      if (report) report.belowFloor = true;
+      log(runId, "info", `Beat ${beat.index}: best real candidate is off-topic (${bestHit.score}% < ${floor}%) — the adjacent shot will cover this beat`, { stage: "visual" });
+      return null;
+    }
     usedIds.add(bestHit.hit.dedupeId);
     try {
       const res = await materialize(runId, beat, bestHit.hit, beatDurSec, outPath, resolution);
@@ -3196,33 +3359,15 @@ async function acquireReal(
     }
   }
 
-  // Last-ditch (strict): every attempt's pool came back EMPTY. The usual cause is
-  // usedIds exhaustion — the matches exist but other beats took them. Re-gather
-  // ignoring usedIds and accept a REPEAT: the same footage twice is still real, and
-  // this picks the most RELEVANT repeat (vs the pipeline's positionally-nearest one).
-  if (strict && !bestHit) {
-    const wideQuery = broadenQuery(baseQuery, 1);
-    let pool = await gatherCandidates(runId, wideQuery, beatDurSec, NO_USED_FILTER);
-    if (realMedia === "image" || realMedia === "video") pool = pool.filter((h) => h.kind === realMedia);
-    if (pool.length > 0) {
-      const { picks: scored } = await scoreAndPick(runId, beat.index, query, beat.text, videoContext, pool);
-      // The reserve is not consulted here: this rung already re-gathers with NO_USED_FILTER
-      // and accepts a repeat at any score, so it is strictly broader than the reserve is.
-      const ranked = [...scored].sort((a, b) => b.score - a.score || rankKey(b) - rankKey(a));
-      for (const cand of ranked) {
-        try {
-          const res = await materialize(runId, beat, cand.hit, beatDurSec, outPath, resolution);
-          log(runId, "info", `Beat ${beat.index}: real ${res.kind} via ${cand.hit.provider} — accepted a repeat (${cand.score}%, Real-footage-only; no unused footage left)`, { stage: "visual" });
-          return res;
-        } catch {
-          /* try the next candidate */
-        }
-      }
-    }
-  }
-
   log(runId, "warn", `Beat ${beat.index}: real retrieval exhausted after ${maxAttempts} attempts — ${strict ? "no real media reachable (Real-footage-only)" : "routing to AI"} (bestScore=${bestSeen ? bestSeen.score : "n/a"}, bestProvider=${bestSeen ? bestSeen.provider : "—"}, finalQuery="${lastSearchQuery}")`, { stage: "visual" });
   return null;
+}
+
+/** Real-footage-only: the lowest vision score still shown on screen (0–100, default 50). */
+function strictMinScore(): number {
+  const raw = getSetting("REAL_STRICT_MIN_SCORE");
+  const n = Number(raw);
+  return raw !== "" && Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 50;
 }
 
 function aiAspect(resolution?: string): string {
@@ -4522,6 +4667,7 @@ export async function acquireVisual(
   // relevance threshold is set to. Only ever true for real-sourced beats in "real"
   // visual mode; ai/mix beats are untouched.
   const strict = opts.strictReal === true && beat.source === "real";
+  const strictReport = { belowFloor: false };
   if (beat.source === "real") {
     // Stock-impossibility detector: skip real retrieval for queries stock libraries
     // can't satisfy (chemistry/process abstractions). Product/entity queries exempt.
@@ -4548,7 +4694,7 @@ export async function acquireVisual(
         const why = archival ? "footage_kind=archival" : contemporary ? "footage_kind=contemporary (YT_PREFER)" : "legacy entity proxy";
         log(runId, "debug", `Beat ${beat.index}: YouTube-first (${why})`, { stage: "visual" });
       }
-      const real = await acquireReal(runId, beat, beatDurSec, outPath, usedIds, opts.resolution, opts.videoContext, youtubeFirst, opts.topicPool, strict);
+      const real = await acquireReal(runId, beat, beatDurSec, outPath, usedIds, opts.resolution, opts.videoContext, youtubeFirst, opts.topicPool, strict, strictReport);
       if (real) return real;
       // Reason (poolIsWeak / exhausted-after-3-attempts) is logged inside acquireReal.
     }
@@ -4563,6 +4709,10 @@ export async function acquireVisual(
   // give up WITHOUT generating AI: throwing hands the beat to the pipeline's existing
   // neighbour-reuse (studio-pipeline "No black screens"), which in this mode carries
   // over real footage.
+  if (strict && strictReport.belowFloor) {
+    // Candidates existed but all were off-topic: retrying the same ladder buys nothing.
+    throw new Error(`Real-footage-only: no relevant real footage for beat ${beat.index} — the adjacent shot covers it (never AI, never a repeated asset)`);
+  }
   if (strict) {
     log(runId, "warn", `Beat ${beat.index}: no real media found — waiting ${Math.round(STRICT_RETRY_DELAY_MS / 1000)}s and retrying (Real-footage-only, never AI)`, { stage: "visual" });
     await new Promise((r) => setTimeout(r, STRICT_RETRY_DELAY_MS));
@@ -4571,7 +4721,7 @@ export async function acquireVisual(
     const retry = await acquireReal(runId, beat, beatDurSec, outPath, usedIds, opts.resolution, opts.videoContext, false, opts.topicPool, true);
     if (retry) return retry;
     throw new Error(
-      `Real-footage-only: no real media reachable for beat ${beat.index} ("${stockQuery}") after retry — refusing to generate AI; the beat will reuse a neighbouring real visual`
+      `Real-footage-only: no real media reachable for beat ${beat.index} ("${stockQuery}") after retry — refusing to generate AI; the adjacent shot covers this beat`
     );
   }
 

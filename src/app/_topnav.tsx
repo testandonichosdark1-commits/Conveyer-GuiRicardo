@@ -8,6 +8,7 @@ type NavItem = { href: string; fr: string; en: string; exact?: boolean; beta?: b
 
 const NAV: NavItem[] = [
   { href: "/", fr: "Créer une vidéo", en: "Create a video", exact: true },
+  { href: "/factory", fr: "Fábrica", en: "Factory" },
   { href: "/avatars", fr: "Avatars", en: "Avatars" },
   { href: "/channels", fr: "Chaînes", en: "Channels" },
   { href: "/jobs", fr: "Jobs", en: "Jobs" },

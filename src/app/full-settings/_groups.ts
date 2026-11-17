@@ -167,8 +167,28 @@ export const ALL_GROUPS: Group[] = [
         examples: "12345678-abcdef…",
       },
       {
+        key: "SMITHSONIAN_API_KEY",
+        desc: "Smithsonian Open Access — museum photos, only CC0 items are used (no licence, no attribution). Free key, issued instantly at api.data.gov/signup. NASA (photos + video) needs no key and is always on.",
+        examples: "Leave empty to skip the Smithsonian",
+      },
+      {
+        key: "EUROPEANA_API_KEY",
+        desc: "Europeana — European museums and archives, incl. old newsreel video. Only Public Domain Mark / CC0 items are used. Free key at pro.europeana.eu/page/get-api.",
+        examples: "Leave empty to skip Europeana",
+      },
+      {
+        key: "FLICKR_API_KEY",
+        desc: "Flickr — only CC0, Public Domain Mark and Flickr Commons ('no known copyright restrictions') photos are used; everything else on Flickr is ignored. Free key at flickr.com/services/apps/create.",
+        examples: "Leave empty to skip Flickr",
+      },
+      {
+        key: "DVIDS_API_KEY",
+        desc: "DVIDS — US military photos and video (US government works, public domain). Free key at api.dvidshub.net.",
+        examples: "Leave empty to skip DVIDS",
+      },
+      {
         key: "OPENVERSE_TOKEN",
-        desc: "Optional Openverse bearer token for higher rate limits (Openverse also works anonymously). Openverse = huge Creative-Commons image pool; attribution is recorded automatically.",
+        desc: "Optional Openverse bearer token for higher rate limits (Openverse also works anonymously). Openverse = Creative-Commons image pool; only public-domain and CC0 images are used (no attribution needed).",
         examples: "Leave empty to use Openverse anonymously",
       },
       {
@@ -485,6 +505,21 @@ export const ALL_GROUPS: Group[] = [
         key: "VOICEBOX_VOICE_ID",
         desc: "Voicebox voice PROFILE id. Use “Load voices” on the Settings page to pick one of the profiles you created in Voicebox. The profile's own language and engine (Qwen, Chatterbox, …) are used. A channel profile's voice_id overrides it per channel.",
         examples: "3f2b9c1e-…",
+      },
+      {
+        key: "VOICESTUDIO_URL",
+        desc: "Address of your local VoiceStudio app (voicestudio.sh — free, runs on your own Mac). Leave EMPTY for http://127.0.0.1:3900. No API key. The VoiceStudio app must be open while a run narrates. Audio only, so word timing comes from Groq Whisper (set GROQ_API_KEY).",
+        examples: "(empty) = http://127.0.0.1:3900",
+      },
+      {
+        key: "VOICESTUDIO_MODEL",
+        desc: "VoiceStudio engine. Leave EMPTY for mlx-audio (Kokoro — fast on Apple Silicon, Apache-licensed). The app's default OmniVoice engine was much slower in testing and its model is non-commercial.",
+        examples: "(empty) = mlx-audio  /  kittentts  /  omnivoice",
+      },
+      {
+        key: "VOICESTUDIO_VOICE_ID",
+        desc: "VoiceStudio voice. With mlx-audio these are Kokoro presets: am_michael, am_adam, am_onyx (US male), bm_george, bm_lewis (UK male), af_heart, bf_emma (female). Leave EMPTY for am_michael.",
+        examples: "am_michael  /  bm_george  /  af_heart",
       },
     ],
   },

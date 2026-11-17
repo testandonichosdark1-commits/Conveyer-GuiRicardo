@@ -35,6 +35,7 @@ import { textGraphicFor } from "./services/graphic-fallback";
 import type { WordTiming } from "./services/elevenlabs-voiceover";
 import { resolveAnchorPlan, renderAnchorBeat } from "./services/anchor-images";
 import { visualWorldPath, readVisualWorld, withWorldAnchor, type VisualWorld } from "./services/visual-world";
+import { absorbFailedBeats } from "./services/beat-gap-fill";
 
 /**
  * How many beats are acquired at once (VISUAL_CONCURRENCY, default 3). With Google Flow as the AI
@@ -132,6 +133,9 @@ interface StudioConfig {
    *  edited AFTER the run was created still apply on Resume — unlike the avatar
    *  snapshot, these are account-config, not a billable choice that must stay pinned. */
   channelId: number | undefined;
+  /** Narration provider chosen for this run (config_json.voiceProvider) — beats the channel's
+   *  pinned provider. Only "voicestudio" exists; undefined = channel/global, as before. */
+  voiceProvider?: "voicestudio";
   /** Graphic beats (docs/SPEC-motion-graphics.md), snapshotted by /api/studio only when the
    *  run's channel (or the global default) turned them on. Undefined → the planner never
    *  runs the graphic pass and the run is byte-identical to before the feature. When set,
@@ -167,6 +171,7 @@ function readConfig(runId: string): StudioConfig {
     sceneTransitions: typeof cfg.sceneTransitions === "boolean" ? cfg.sceneTransitions : undefined,
     // Only "strict" opts in; anything else (missing, unknown, older runs) = today's AI fallback.
     realFallback: cfg.realFallback === "strict" ? "strict" : "ai",
+    voiceProvider: cfg.voiceProvider === "voicestudio" ? "voicestudio" : undefined,
     // Overlays default OFF: only an explicit `true` opts in. Missing/older runs → undefined,
     // which the pipeline treats exactly as OFF (byte-identical planning + assembly).
     overlays: cfg.overlays === true ? true : undefined,
@@ -287,6 +292,7 @@ function activateChannelOverrides(cfg: StudioConfig): void {
   const channel = cfg.channelId != null ? getChannel(cfg.channelId) : null;
   const overrides = channelSettingOverrides(channel);
   Object.assign(overrides, gptLtxOverrides(cfg));
+  if (cfg.voiceProvider) overrides.VOICEOVER_PROVIDER = cfg.voiceProvider;
   if (Object.keys(overrides).length) setChannelSettingOverrides(overrides);
   else clearChannelSettingOverrides();
 }
@@ -824,25 +830,10 @@ export async function runStudioPipeline(
     // 3b. No black screens: any non-avatar beat whose visual failed reuses the
     // NEAREST beat that has a visual (carry-over) instead of a dark placeholder.
     // Never a graphic: it is that beat's words on screen, wrong anywhere else.
-    const goodIdx = renderBeats.map((b, i) => (b.visualPath && b.layout !== "graphic" ? i : -1)).filter((i) => i >= 0);
-    let reused = 0;
-    for (let i = 0; i < renderBeats.length; i++) {
-      const b = renderBeats[i];
-      if (b.layout === "avatar" || b.visualPath) continue; // avatar-only beats need no visual
-      let best: string | null = null;
-      let bestDist = Infinity;
-      for (const gi of goodIdx) {
-        const d = Math.abs(gi - i);
-        if (d < bestDist) {
-          bestDist = d;
-          best = renderBeats[gi].visualPath;
-        }
-      }
-      b.visualPath = best ?? placeholder(brollDir, b, cfg.format); // placeholder only if nothing else exists
-      if (best) reused++;
-    }
+    // Never a repeated shot: the failed beat's time goes to the adjacent beat (see beat-gap-fill).
+    const reused = fillGapsWithoutRepeats(runId, renderBeats, brollDir, cfg.format);
     if (reused > 0) {
-      log(runId, "info", `${reused} beat(s) reused a neighbouring visual (no black screens)`, { stage: "visual" });
+      log(runId, "info", `${reused} beat(s) without a visual were absorbed by the adjacent shot (no repeated assets)`, { stage: "visual" });
     }
 
     // Footage provenance, written AFTER the carry-over above so a beat showing a
@@ -1242,23 +1233,7 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
     await fillFailedBeatsWithGraphics(runId, renderBeats, resumeWords.length ? resumeWords : readWordsJson(runDir), graphicsDir, cfg);
 
     // No black screens — same neighbour carry-over as the first-run pipeline (never a graphic).
-    const goodIdx = renderBeats.map((b, i) => (b.visualPath && b.layout !== "graphic" ? i : -1)).filter((i) => i >= 0);
-    let reusedNeighbour = 0;
-    for (let i = 0; i < renderBeats.length; i++) {
-      const b = renderBeats[i];
-      if (b.layout === "avatar" || b.visualPath) continue;
-      let best: string | null = null;
-      let bestDist = Infinity;
-      for (const gi of goodIdx) {
-        const d = Math.abs(gi - i);
-        if (d < bestDist) {
-          bestDist = d;
-          best = renderBeats[gi].visualPath;
-        }
-      }
-      b.visualPath = best ?? placeholder(brollDir, b, cfg.format);
-      if (best) reusedNeighbour++;
-    }
+    const reusedNeighbour = fillGapsWithoutRepeats(runId, renderBeats, brollDir, cfg.format);
 
     // Same provenance write as a first execution, on the map seeded from the previous one.
     writeCredits(
@@ -1327,6 +1302,22 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
 }
 
 /** Solid-color filler clip so a failed beat still holds its slot in the timeline. */
+/**
+ * Replaces the old nearest-neighbour fill IN PLACE (callers hold `renderBeats` as a const
+ * array). A beat with no visual is absorbed by the adjacent shot, which plays on through
+ * its time; only a beat with no possible host (e.g. between two avatar beats) gets a
+ * placeholder. Returns how many beats were absorbed.
+ */
+function fillGapsWithoutRepeats(runId: string, renderBeats: RenderBeat[], brollDir: string, format?: string): number {
+  const { beats, absorbed, orphans } = absorbFailedBeats(renderBeats);
+  for (const o of orphans) {
+    o.visualPath = placeholder(brollDir, o, format);
+    log(runId, "warn", `Beat ${o.index}: no visual and no adjacent shot to extend — placeholder`, { stage: "visual" });
+  }
+  renderBeats.splice(0, renderBeats.length, ...beats);
+  return absorbed.length;
+}
+
 function placeholder(dir: string, beat: Beat, resolution?: string): string {
   const out = path.join(dir, `ph_${String(beat.index).padStart(4, "0")}.mp4`);
   const res = resolution || getSetting("VIDEO_RESOLUTION") || "1920x1080";

@@ -140,6 +140,9 @@ export const ARCHIVE_STYLE_OVERRIDES: Readonly<Record<string, string>> = {
   SCENE_TRANSITION_MS: "400",
   KEN_BURNS_RANGE: "0.06",
   KEN_BURNS_MOTION: "varied",
+  // Show a still whole on a dark ground when a 16:9 crop would destroy it (portrait tablets,
+  // tall paintings) — how museum objects appear in the reference documentaries.
+  KEN_BURNS_FIT: "auto",
   REAL_MEDIA: "image",
   KIE_AI_MEDIA: "image",
   FALLBACK_AI_MEDIA: "image",

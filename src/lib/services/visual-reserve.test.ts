@@ -161,6 +161,7 @@ describe("acquireReal — the reserve is spent before AI", () => {
             url: `https://e.test/f/openverse${i}.jpg`,
             thumbnail: `https://e.test/t/openverse${i}.jpg`,
             foreign_landing_url: `https://openverse.test/colosseum-aerial-rome-${n(i)}`,
+            license: "cc0", // openverseSearch now keeps only pdm/cc0
           })),
         });
       }
