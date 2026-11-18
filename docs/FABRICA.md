@@ -83,6 +83,26 @@ Já vêm como padrão numa instalação nova (Settings → full settings):
 
 Cena sem asset bom **nunca repete** um clipe: a cena vizinha continua pelo tempo dela.
 
+## O estilo do vídeo (documentário no formato "7 Things")
+
+Já vem ligado numa instalação nova:
+
+| Chave | Padrão | O que faz |
+|---|---|---|
+| (a Fábrica liga os cartões) | — | cartão "NUMBER SEVEN", anos, tarjas de nome e frases de destaque, desenhados dentro de cada cena |
+| `VIDEO_GRADE` | `documentary` | cor mais apagada + vinheta em todas as cenas; `off` desliga |
+| `GRADE_ARCHIVAL_STOCK_BW` | `1` | vídeo de estoque que cobre um momento histórico vira preto e branco |
+| `SECONDS_PER_VISUAL` / `HOOK_SECONDS_PER_VISUAL` | `6` / `3` | cada cena dura ~6 s; no hook (40 s) ~3 s |
+| `ENCODE_PRESET` | `veryfast` | velocidade da compressão; `medium` é 2–3x mais lento |
+| `OVERLAYS_IN_SCENES` | `1` | cartões dentro da montagem de cada cena (paralelo); `0` = passada única antiga |
+| `VISION_SPECIFIC_SUBJECT` | `1` | cena que cita pessoa, unidade, lugar ou época recusa substituto genérico ou moderno; `0` volta ao avaliador antigo |
+| `PLANNER_FALLBACK_QUERY` | `1` | o planejador escreve uma segunda busca (lugar, mapa, objeto) para cenas com nome próprio; usada se a primeira não achar nada bom |
+| `REAL_STRICT_MIN_SCORE` | `50` | nota mínima para uma imagem entrar |
+| `VISUAL_CONCURRENCY` / `CHATGPT_VISION_CONCURRENCY` / `ASSEMBLE_CONCURRENCY` | `10` / `6` / `4` | quantas cenas, avaliações e montagens ao mesmo tempo (suba a montagem para o nº de núcleos do processador) |
+
+Ainda não existe: legenda com a palavra falada em destaque, música de fundo e som de impacto
+nos cartões, zoom de mapa de satélite.
+
 ## Se algo der errado
 
 - **"ChatGPT account is not set up"** → passo 5. A pasta `workspace` precisa estar vazia.

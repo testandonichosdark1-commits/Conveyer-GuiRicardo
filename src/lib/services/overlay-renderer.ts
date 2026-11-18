@@ -54,6 +54,50 @@ export interface OverlayPlan {
   inputs: string[];
   /** filter_complex body: base [0:v] + cards [1:v].. → single [vout]. */
   filter: string;
+  /** The same cards as data, so the assembler can draw each one inside its own scene's encode. */
+  cards: OverlayCard[];
+}
+
+/** Fade length for a card of this lifetime: short cards snap in/out, long cards ease. */
+export function cardFadeSec(startSec: number, endSec: number): number {
+  const th = DEFAULT_OVERLAY_THEME;
+  const dur = Math.max(0.001, endSec - startSec);
+  return Math.min(Math.min(th.fadeMaxSec, Math.max(th.fadeMinSec, dur * th.fadeRatio)), dur / 2);
+}
+
+/** One card as it lands inside ONE scene's clip: times are relative to that clip's first frame. */
+export interface SceneCard {
+  pngPath: string;
+  startSec: number;
+  endSec: number;
+  /** False when the card began in an earlier scene and simply continues here (no second fade-in). */
+  fadeIn: boolean;
+  /** False when the card goes on into the next scene. */
+  fadeOut: boolean;
+  fadeSec: number;
+  x: number;
+  y: number;
+}
+
+/**
+ * The part of the filter graph that draws a scene's cards over `baseLabel`, ending in `outLabel`.
+ * `firstInput` is the ffmpeg input index of the first card (each added with `-loop 1 -i`).
+ * Same fade + overlay recipe as buildOverlayFilter, so a card looks identical wherever it is drawn.
+ */
+export function buildSceneCardFilter(baseLabel: string, cards: SceneCard[], firstInput: number, outLabel: string): string {
+  const f = (n: number) => n.toFixed(3);
+  const parts: string[] = [];
+  let prev = baseLabel;
+  cards.forEach((c, i) => {
+    const fades =
+      (c.fadeIn ? `,fade=t=in:st=${f(c.startSec)}:d=${f(c.fadeSec)}:alpha=1` : "") +
+      (c.fadeOut ? `,fade=t=out:st=${f(Math.max(c.startSec, c.endSec - c.fadeSec))}:d=${f(c.fadeSec)}:alpha=1` : "");
+    parts.push(`[${firstInput + i}:v]format=rgba${fades}[sc${i}]`);
+    const out = i === cards.length - 1 ? outLabel : `[sb${i}]`;
+    parts.push(`${prev}[sc${i}]overlay=${c.x}:${c.y}:enable='between(t,${f(c.startSec)},${f(c.endSec)})'${out}`);
+    prev = `[sb${i}]`;
+  });
+  return parts.join(";");
 }
 
 /**
@@ -505,5 +549,5 @@ export async function buildOverlayPlan(
     cards.push({ pngPath: j.pngPath, startSec, endSec, x: geo.x, y: geo.y });
   }
   if (cards.length === 0) return null;
-  return { inputs: cards.map((c) => c.pngPath), filter: buildOverlayFilter(cards) };
+  return { inputs: cards.map((c) => c.pngPath), filter: buildOverlayFilter(cards), cards };
 }

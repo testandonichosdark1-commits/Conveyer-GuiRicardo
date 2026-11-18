@@ -2191,6 +2191,73 @@ function explainWeakPool(pool: ProviderHit[]): string {
   return `candidates=${pool.length}, videos=${videos}, bestScore=${best}, providers=[${providers.join(",")}]`;
 }
 
+/**
+ * The instructions every vision judge (Gemini, Claude, ChatGPT) receives for one scene.
+ * Exported so the wording can be tested against real candidates without running a video.
+ *
+ * VISION_SPECIFIC_SUBJECT ("0" = off): the original text told the judge NOT to penalize a wrong
+ * historical era and scored generic "same category" footage 75-84 ("strong supporting B-roll"). That
+ * suits a product video, and it is exactly what put a modern man in a uniform saluting over
+ * "British brigadier Mike Calvert, 1944" at 78/100. With the rule on, a scene that NAMES a person,
+ * unit, place, event or era no longer accepts a stand-in.
+ */
+export function buildVisionInstructions(videoContext: string | undefined, sceneText: string, sceneQuery: string, hasCatalogue: boolean): string {
+  const specific = (getSetting("VISION_SPECIFIC_SUBJECT") || "1") !== "0";
+  return (
+    `You are choosing the single best stock clip for ONE scene of a documentary video.\n` +
+        `OVERALL VIDEO TOPIC: "${(videoContext || sceneText).slice(0, 400)}"\n` +
+        `THIS SCENE (narration): "${sceneText.slice(0, 240)}"\n` +
+        `WANTED VISUAL: "${sceneQuery}"\n\n` +
+        `Below are numbered candidates (each: a title line saying whether it is a VIDEO or IMAGE, then its preview image). ` +
+        `For EACH, score 0-100 using these criteria in order:\n` +
+        `1. Semantic relevance [PRIMARY]: does it match THIS scene AND the overall video topic.\n` +
+        `2. Prefer moving VIDEO footage over static images when both fit equally well.\n` +
+        `3. Prefer cinematic documentary shots: wide shots, establishing shots, aerial shots, clean composition.\n` +
+        `4. Penalize: static portraits, single-subject snapshots, retro/dated stills, amateur quality, cluttered framing, low resolution.\n` +
+        `DOMAIN RULE: footage from a DIFFERENT real-world domain than the video topic is WRONG — score it 39 or below. ` +
+        `Example: for a laundry-detergent video, a bowl of food / whipped cream / baking ingredients, a random street, a person's face, or an unrelated product is OFF-TOPIC even if the colours or shapes match the wanted visual. ` +
+        `AUTHENTICITY RULE: this is a DOCUMENTARY — footage must look like a real photograph or real video, not a fabrication. ` +
+        `Score 39 or below if the candidate shows ANY of: (a) gibberish, garbled, misspelled, or nonsensical text/letters/numbers; ` +
+        `(b) fake, invented, or implausible brand names, labels, or logos; ` +
+        `(c) an OBVIOUS CGI / 3D-render / digital-illustration / animated depiction of a REAL-WORLD subject (e.g. a rendered "chip", a rendered building, a rendered person) when real footage is expected; ` +
+        `(d) other clearly synthetic artifacts (impossible geometry, plastic/over-smooth surfaces, melted or warped detail). ` +
+        `A polished or cinematic look does NOT excuse fabrication — authenticity OVERRIDES criterion 3. ` +
+        `Do NOT apply this rule to abstract motion-graphics that are clearly meant to be graphics, nor to real footage that merely contains coherent, correctly-spelled real-world text, signage, or logos. ` +
+        `NON-B-ROLL RULE (Patch 2.3b): score 39 or below when the candidate's PRIMARY content is a TALKING-HEAD / ` +
+        `PRESENTATION format rather than depictive B-roll — a person addressing the camera in an interview, podcast, ` +
+        `webcam/selfie shot, news-desk anchor, creator commentary, conference keynote or lecture-to-camera, or a ` +
+        `slide/presentation deck (commentary ABOUT the subject, not footage OF it). ` +
+        `CARVE-OUT: do NOT penalize when the person/event shown IS the wanted subject itself (a historical/newsworthy ` +
+        `figure giving the actual depicted address, or genuine archival broadcast of the real event). ` +
+        (specific
+          ? `BUT do NOT penalize footage merely for lacking the EXACT brand, SKU or on-pack label — stock libraries rarely have those, and generic SAME-CATEGORY footage is valid supporting B-roll for scenes about generic things (never for a scene that names a specific person, unit, place, event or era: see the SPECIFIC SUBJECT RULE). `
+          : `BUT do NOT penalize footage merely for lacking the EXACT brand, SKU, on-pack label, or historical era — stock libraries rarely have those, and generic SAME-CATEGORY footage is valid supporting B-roll `) +
+        (specific
+          ? `SPECIFIC SUBJECT RULE: when the scene names a specific person, unit, place, event or year/era, footage of a different, generic or modern person standing in for it is WRONG — score it 49 or below. That includes a modern soldier, a costume or reenactment, a model posing in a uniform, a child, or a "portrait" of someone who is not the person named. Generic footage is acceptable only for scenes about generic things (a landscape, the weather, a building, an object, a crowd). When the real person is not available, a map, a place, an object or a document that belongs to the subject is better than an unrelated person. ` +
+            `PRIVATE PERSON RULE: score 39 or below when the candidate is a close-up of an identifiable private individual posing in a costume or uniform, or in a role the narration gives to someone else (a historical figure, a victim, a perpetrator). Real archival photographs of the actual people the narration names are fine. `
+          : ``) +
+        `(this leniency NEVER excuses fabricated/gibberish text or fake labels, which are penalized by the AUTHENTICITY RULE above). ` +
+        `SCORING BANDS: 100 = exactly the wanted subject, perfect. ` +
+        `85-95 = exact domain AND highly usable (clearly on-topic, well shot). ` +
+        `75-84 = same product/subject CATEGORY — strong supporting B-roll (e.g. a generic washing-soda or detergent box / cleaning aisle when the wanted visual names a specific brand)${specific ? ", but only for a scene about a generic thing, never for a named person, unit, place, event or era" : ""}. ` +
+        `40-74 = only loosely related to the topic. ` +
+        `0-39 = wrong domain, misleading, low quality, OR fake/CGI/gibberish-text (see AUTHENTICITY RULE). ` +
+        `WATERMARK RULE: score 39 or below when the candidate shows a watermark, a stock-agency or archive logo, a TV-channel logo bug, ` +
+        `or a burned-in credit / caption / title slate over the picture — it cannot go on screen in someone else's video. ` +
+        `A small, unobtrusive date stamp on an old photograph, or a museum's colour chart beside an object, is NOT a watermark. ` +
+        `MEANING RULE: read every word in the sense THIS narration uses it. A candidate that shows the word's OTHER meaning is WRONG — score it 39 or below ` +
+        `(e.g. "SEALs" in a military script are US Navy special forces, never the animal; "Jaguar" in a car script is the car, never the cat). ` +
+        `Judge what you actually SEE, not the title. Return STRICTLY JSON: [{"i":<int>,"score":<int>}]. No markdown.` +
+        // Only when some candidate carries archive catalogue text — otherwise the prompt is unchanged.
+        (hasCatalogue
+          ? `\nIDENTITY RULE: some candidates include their museum/archive CATALOGUE text. When the scene names a specific ` +
+            `person, object or place, treat that text as evidence of WHO or WHAT the image really shows: a different person ` +
+            `who merely shares the name (other profession, other lifetime, e.g. died decades after the scene's events), or a ` +
+            `different object or place, is WRONG — score it 39 or below however well it looks.`
+          : "")
+  );
+}
+
 const noteVisionOff = new Set<string>(); // one notice per run, not one per beat
 async function scoreAndPick(
   runId: string,
@@ -2242,52 +2309,7 @@ async function scoreAndPick(
   // Build a single multimodal request: instructions + (title + image) per candidate.
   const parts: ({ text: string } | { inline_data: { mime_type: string; data: string } })[] = [
     {
-      text:
-        `You are choosing the single best stock clip for ONE scene of a documentary video.\n` +
-        `OVERALL VIDEO TOPIC: "${(videoContext || sceneText).slice(0, 400)}"\n` +
-        `THIS SCENE (narration): "${sceneText.slice(0, 240)}"\n` +
-        `WANTED VISUAL: "${sceneQuery}"\n\n` +
-        `Below are numbered candidates (each: a title line saying whether it is a VIDEO or IMAGE, then its preview image). ` +
-        `For EACH, score 0-100 using these criteria in order:\n` +
-        `1. Semantic relevance [PRIMARY]: does it match THIS scene AND the overall video topic.\n` +
-        `2. Prefer moving VIDEO footage over static images when both fit equally well.\n` +
-        `3. Prefer cinematic documentary shots: wide shots, establishing shots, aerial shots, clean composition.\n` +
-        `4. Penalize: static portraits, single-subject snapshots, retro/dated stills, amateur quality, cluttered framing, low resolution.\n` +
-        `DOMAIN RULE: footage from a DIFFERENT real-world domain than the video topic is WRONG — score it 39 or below. ` +
-        `Example: for a laundry-detergent video, a bowl of food / whipped cream / baking ingredients, a random street, a person's face, or an unrelated product is OFF-TOPIC even if the colours or shapes match the wanted visual. ` +
-        `AUTHENTICITY RULE: this is a DOCUMENTARY — footage must look like a real photograph or real video, not a fabrication. ` +
-        `Score 39 or below if the candidate shows ANY of: (a) gibberish, garbled, misspelled, or nonsensical text/letters/numbers; ` +
-        `(b) fake, invented, or implausible brand names, labels, or logos; ` +
-        `(c) an OBVIOUS CGI / 3D-render / digital-illustration / animated depiction of a REAL-WORLD subject (e.g. a rendered "chip", a rendered building, a rendered person) when real footage is expected; ` +
-        `(d) other clearly synthetic artifacts (impossible geometry, plastic/over-smooth surfaces, melted or warped detail). ` +
-        `A polished or cinematic look does NOT excuse fabrication — authenticity OVERRIDES criterion 3. ` +
-        `Do NOT apply this rule to abstract motion-graphics that are clearly meant to be graphics, nor to real footage that merely contains coherent, correctly-spelled real-world text, signage, or logos. ` +
-        `NON-B-ROLL RULE (Patch 2.3b): score 39 or below when the candidate's PRIMARY content is a TALKING-HEAD / ` +
-        `PRESENTATION format rather than depictive B-roll — a person addressing the camera in an interview, podcast, ` +
-        `webcam/selfie shot, news-desk anchor, creator commentary, conference keynote or lecture-to-camera, or a ` +
-        `slide/presentation deck (commentary ABOUT the subject, not footage OF it). ` +
-        `CARVE-OUT: do NOT penalize when the person/event shown IS the wanted subject itself (a historical/newsworthy ` +
-        `figure giving the actual depicted address, or genuine archival broadcast of the real event). ` +
-        `BUT do NOT penalize footage merely for lacking the EXACT brand, SKU, on-pack label, or historical era — stock libraries rarely have those, and generic SAME-CATEGORY footage is valid supporting B-roll ` +
-        `(this leniency NEVER excuses fabricated/gibberish text or fake labels, which are penalized by the AUTHENTICITY RULE above). ` +
-        `SCORING BANDS: 100 = exactly the wanted subject, perfect. ` +
-        `85-95 = exact domain AND highly usable (clearly on-topic, well shot). ` +
-        `75-84 = same product/subject CATEGORY — strong supporting B-roll (e.g. a generic washing-soda or detergent box / cleaning aisle when the wanted visual names a specific brand). ` +
-        `40-74 = only loosely related to the topic. ` +
-        `0-39 = wrong domain, misleading, low quality, OR fake/CGI/gibberish-text (see AUTHENTICITY RULE). ` +
-        `WATERMARK RULE: score 39 or below when the candidate shows a watermark, a stock-agency or archive logo, a TV-channel logo bug, ` +
-        `or a burned-in credit / caption / title slate over the picture — it cannot go on screen in someone else's video. ` +
-        `A small, unobtrusive date stamp on an old photograph, or a museum's colour chart beside an object, is NOT a watermark. ` +
-        `MEANING RULE: read every word in the sense THIS narration uses it. A candidate that shows the word's OTHER meaning is WRONG — score it 39 or below ` +
-        `(e.g. "SEALs" in a military script are US Navy special forces, never the animal; "Jaguar" in a car script is the car, never the cat). ` +
-        `Judge what you actually SEE, not the title. Return STRICTLY JSON: [{"i":<int>,"score":<int>}]. No markdown.` +
-        // Only when some candidate carries archive catalogue text — otherwise the prompt is unchanged.
-        (pool.some((h) => h.description)
-          ? `\nIDENTITY RULE: some candidates include their museum/archive CATALOGUE text. When the scene names a specific ` +
-            `person, object or place, treat that text as evidence of WHO or WHAT the image really shows: a different person ` +
-            `who merely shares the name (other profession, other lifetime, e.g. died decades after the scene's events), or a ` +
-            `different object or place, is WRONG — score it 39 or below however well it looks.`
-          : ""),
+      text: buildVisionInstructions(videoContext, sceneText, sceneQuery, pool.some((h) => !!h.description)),
     },
   ];
   pool.forEach((h, i) => {
@@ -3099,7 +3121,9 @@ async function acquireReal(
   youtubeFirst = false,
   topicPool?: TopicPool,
   strict = false,
-  report?: { belowFloor: boolean }
+  report?: { belowFloor: boolean },
+  /** Cap on the broaden ladder (the fallback search runs a short one). Omitted = the usual 3/4. */
+  attemptsCap?: number
 ): Promise<VisualResult | null> {
   const rawText = beat.visualQuery || beat.text;
   const query = visualPromptToQuery(rawText);
@@ -3162,7 +3186,7 @@ async function acquireReal(
   let weakSoFar = true;
 
   // Strict adds a 4th, maximally-broad attempt (broadenQuery level 3 = one token).
-  const maxAttempts = strict ? 4 : 3;
+  const maxAttempts = Math.min(attemptsCap ?? 99, strict ? 4 : 3);
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const searchQuery = broadenQuery(baseQuery, attempt);
     lastSearchQuery = searchQuery;
@@ -4697,6 +4721,20 @@ export async function acquireVisual(
       const real = await acquireReal(runId, beat, beatDurSec, outPath, usedIds, opts.resolution, opts.videoContext, youtubeFirst, opts.topicPool, strict, strictReport);
       if (real) return real;
       // Reason (poolIsWeak / exhausted-after-3-attempts) is logged inside acquireReal.
+
+      // The planner's safer second search (a place / map / object tied to the named subject, never a
+      // person), tried once — and briefly — before the beat is handed to its neighbour or to AI. It runs
+      // the same candidate path (same judge, same floor), on a per-beat pool: the topic cache is keyed to
+      // the FIRST query and must not answer for this one.
+      if (beat.fallbackQuery && beat.fallbackQuery.trim() && !beat.fallbackQuery.includes("\n")) {
+        log(runId, "info", `Beat ${beat.index}: the first search found nothing good — trying the fallback search "${beat.fallbackQuery}"`, { stage: "visual" });
+        const fbBeat: Beat = { ...beat, visualQuery: beat.fallbackQuery, topicKey: undefined, queryType: "generic" };
+        const fb = await acquireReal(runId, fbBeat, beatDurSec, outPath, usedIds, opts.resolution, opts.videoContext, false, opts.topicPool, strict, { belowFloor: false }, 2);
+        if (fb) {
+          log(runId, "info", `Beat ${beat.index}: the fallback search found a usable shot`, { stage: "visual" });
+          return fb;
+        }
+      }
     }
   }
 

@@ -92,6 +92,20 @@ const PRODUCT_LABEL_MAX_WORDS = 6;
  *
  * Exported for tests.
  */
+/**
+ * The planner's `fallback_query`, or undefined. Kept only when it is a real search (2-9 words,
+ * under 90 characters) that differs from the main query — an echo of it would just repeat a search
+ * that already failed.
+ */
+export function normalizeFallbackQuery(raw: unknown, mainQuery: string): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const q = raw.replace(/\s+/g, " ").replace(/["“”]/g, "").trim();
+  const words = q.split(" ").filter(Boolean);
+  if (words.length < 2 || words.length > 9 || q.length > 90) return undefined;
+  if (q.toLowerCase() === mainQuery.trim().toLowerCase()) return undefined;
+  return q;
+}
+
 export function normalizeProductLabel(raw: unknown): string | undefined {
   if (typeof raw !== "string") return undefined;
   // Models like to wrap the value in quotes; they are punctuation, not part of the label.
@@ -1215,6 +1229,11 @@ export interface Beat {
    * packaging. Undefined on every other beat — which is most of them — and that is what
    * keeps their generation prompt byte-identical to before this existed. */
   productLabel?: string;
+  /** A second, safer stock search for the same moment — a place, map, landscape, object or
+   * document tied to a NAMED person/unit/event, never a person. Tried only when `visualQuery`
+   * finds nothing good (visual-source.ts), so a scene about "Brigadier Calvert" can still show
+   * Kamaing instead of being absorbed by its neighbour. Undefined on most beats. */
+  fallbackQuery?: string;
   /** Planner's per-beat AI media verdict (Patch 2 producer). Undefined → the
    * resolver in visual-source falls back to keyword heuristic, then global mode. */
   aiMedia?: "image" | "video";
@@ -1381,6 +1400,8 @@ export interface GeminiQuery {
   /** Wording that should be legible on the product's packaging. Empty/absent on every
    * non-product shot, which is the majority — see normalizeProductLabel. */
   product_label?: string;
+  /** See Beat.fallbackQuery. Empty/absent on generic scenes — the normal case. */
+  fallback_query?: string;
   /** Overlays Stage 1 — present in the response only when overlays are enabled for
    * the run. `null` (the model's "no card") or malformed → dropped by normalizeOverlay. */
   overlay?: { type?: string; title?: string; subtitle?: string } | null;
@@ -1395,6 +1416,8 @@ export interface PlannedVisual {
   aiPrompt?: string;
   /** Packaging wording for a product shot. Undefined when absent/invalid/not a product. */
   productLabel?: string;
+  /** Validated fallback search (see Beat.fallbackQuery). Undefined when absent/invalid. */
+  fallbackQuery?: string;
   /** Planner's per-beat AI media verdict. Undefined when absent/invalid. */
   aiMedia?: "image" | "video";
   /** Planner's per-beat source-routing class (Patch 1: diagnostics only — NOT
@@ -1564,6 +1587,22 @@ export function buildPlanPrompt(
       `Keep "title" terse (ideally ≤ 4 words); never a full sentence. Use "subtitle" only to add essential context (e.g. title "Apollo 11", subtitle "First Moon Landing"). ` +
       `Return null for ordinary narration, transitions, or anything without a concrete on-screen-worthy fact. Do NOT invent facts not present in the line. Most lines should be null.\n`
     : "";
+  // PLANNER_FALLBACK_QUERY=1 only (default OFF here, so every existing prompt stays byte-identical —
+  // the setting's seeded default turns it on for the app). A scene that names a person, unit or event
+  // gets a second, safer search that is a PLACE / MAP / OBJECT / DOCUMENT, never a stand-in person.
+  const fallbackOn = getSetting("PLANNER_FALLBACK_QUERY") === "1";
+  const fallbackInstr = fallbackOn
+    ? `- "fallback_query": a SECOND, safer stock search for the SAME moment, used only if the first one finds nothing good. ` +
+      `Fill it ONLY when the line names a specific person, unit, event or date; for any other line leave it "" (empty is the normal case). ` +
+      `It must NOT ask for a person: give a PLACE, MAP, LANDSCAPE, BUILDING, OBJECT or DOCUMENT that belongs to that subject and that photo libraries really hold, ` +
+      `3-7 words, always with the era or region. Prefer the BROAD scenery of that region or setting over one exact building or town: ` +
+      `a library holds "Nepal terraced hills landscape" or "Burma jungle river aerial", almost never "Gorakhpur recruiting depot". ` +
+      `e.g. "Calvert went to the American headquarters at Kamaing" -> "Burma jungle river valley aerial"; ` +
+      `"Rifleman Tulbahadur Pun" -> "Nepal mountain village terraced hills"; "the court-martial" -> "1940s military courtroom interior"; ` +
+      `"the Ranger Assessment and Selection Program" -> "Fort Benning pine forest training ground". ` +
+      `Fill it for a named unit or program as well as for a person. Never generic modern footage of a person standing in for the named one.\n`
+    : "";
+  const fallbackField = fallbackOn ? `, "fallback_query": "<string or empty>"` : "";
   const overlayField = overlays
     ? `, "overlay": {"type": "<date|title|person|fact|quote|section>", "title": "<short string>", "subtitle": "<optional short string>"} OR null`
     : "";
@@ -1647,10 +1686,11 @@ export function buildPlanPrompt(
     `"contemporary" = a MODERN real-world subject whose footage is present-day B-roll on stock libraries (e.g. data centers, NVIDIA chips, office workers, trading floors, factories, city streets, products) — even if a modern brand/person is named. ` +
     `"conceptual" = no real footage exists; a scientific/microscopic/abstract/process visual better generated by AI (e.g. "molecules colliding", "neural network visualization", "energy waves") — typically aligns with query_type "abstract". ` +
     `Judge by the ERA and AVAILABILITY of real footage, NOT the topic: a modern company is "contemporary", a 20th-century event is "archival". When unsure between archival and contemporary, prefer "contemporary".\n\n` +
+    fallbackInstr +
     overlayInstr +
     (overlays && archive ? ARCHIVE_OVERLAY_RULE : "") +
     (overlays ? structureHint : "") +
-    `Return STRICTLY a JSON array, one object per line IN ORDER: {"index": <int>, "visual_query": "<string>", "youtube_query": "<string>", "ai_prompt": "<string>", "ai_media": "<image|video>", "query_type": "<entity|generic|abstract>", "footage_kind": "<archival|contemporary|conceptual>"${overlayField}}. No markdown.`
+    `Return STRICTLY a JSON array, one object per line IN ORDER: {"index": <int>, "visual_query": "<string>", "youtube_query": "<string>", "ai_prompt": "<string>", "ai_media": "<image|video>", "query_type": "<entity|generic|abstract>", "footage_kind": "<archival|contemporary|conceptual>"${fallbackField}${overlayField}}. No markdown.`
   );
 }
 
@@ -1779,10 +1819,12 @@ const PLAN_RESPONSE_SCHEMA = {
       // returns wording only for a product shot and an empty string otherwise, and an
       // empty value must cost nothing — it restores the pre-feature prompt verbatim.
       product_label: { type: "STRING" },
+      // Optional like product_label: only read when PLANNER_FALLBACK_QUERY=1, never required.
+      fallback_query: { type: "STRING" },
     },
     required: ["index", "visual_query", "youtube_query", "ai_prompt", "ai_media", "query_type", "footage_kind"],
     // Deterministic field order for stable, diffable output (Gemini-specific hint).
-    propertyOrdering: ["index", "visual_query", "youtube_query", "ai_prompt", "ai_media", "query_type", "footage_kind", "product_label"],
+    propertyOrdering: ["index", "visual_query", "youtube_query", "ai_prompt", "ai_media", "query_type", "footage_kind", "product_label", "fallback_query"],
   },
 } as const;
 
@@ -1963,7 +2005,9 @@ async function planVisualQueries(
           // when overlays are enabled; normalizeOverlay fail-closes on null/garbage.
           const overlay = overlays ? normalizeOverlay(q.overlay) : undefined;
           if (overlay) log(runId, "debug", `Beat ${q.index}: overlay type=${overlay.type} title="${overlay.title}"`, { stage: "plan" });
-          out.set(q.index, { query: q.visual_query.trim(), youtubeQuery, aiPrompt: q.ai_prompt?.trim() || undefined, productLabel, aiMedia, queryType, footageKind, overlay });
+          const fallbackQuery = getSetting("PLANNER_FALLBACK_QUERY") === "1" ? normalizeFallbackQuery(q.fallback_query, q.visual_query) : undefined;
+          if (fallbackQuery) log(runId, "debug", `Beat ${q.index}: planner fallback_query="${fallbackQuery}"`, { stage: "plan" });
+          out.set(q.index, { query: q.visual_query.trim(), youtubeQuery, aiPrompt: q.ai_prompt?.trim() || undefined, productLabel, fallbackQuery, aiMedia, queryType, footageKind, overlay });
         }
       }
     }
@@ -2391,7 +2435,7 @@ export async function planBeats(
     if (visualQuery !== rawQuery) log(opts.runId, "debug", `Beat ${b.index}: query-trim "${rawQuery}" → "${visualQuery}"`, { stage: "plan" });
     // Patch 2.3a — diagnostic domain from visualQuery + narration ONLY (no aiPrompt).
     const domain = classifyDomain(`${visualQuery} ${b.text}`);
-    return { ...b, layout, visualQuery, youtubeQuery: planned?.youtubeQuery, aiPrompt: planned?.aiPrompt, productLabel: planned?.productLabel, aiMedia: planned?.aiMedia, queryType: planned?.queryType, source: "ai", domain, footageKind: planned?.footageKind ?? coarseFootageKind(domain, `${visualQuery} ${b.text}`), overlay: planned?.overlay };
+    return { ...b, layout, visualQuery, youtubeQuery: planned?.youtubeQuery, aiPrompt: planned?.aiPrompt, productLabel: planned?.productLabel, ...(planned?.fallbackQuery ? { fallbackQuery: planned.fallbackQuery } : {}), aiMedia: planned?.aiMedia, queryType: planned?.queryType, source: "ai", domain, footageKind: planned?.footageKind ?? coarseFootageKind(domain, `${visualQuery} ${b.text}`), overlay: planned?.overlay };
   });
 
   // 4. Assign real vs AI across the visual beats (broll + split). SMART_ASSIGN=1

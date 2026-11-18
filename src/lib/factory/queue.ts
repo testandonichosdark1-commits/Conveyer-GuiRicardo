@@ -146,6 +146,9 @@ async function stepVideo(job: FactoryJob, signal: AbortSignal) {
         visualMode: opts.free ? "real" : opts.visualMode,
         realPercent: !opts.free && opts.visualMode === "mix" ? opts.realPercent : undefined,
         ...(opts.free ? { realFallback: "strict" } : {}),
+        // Countdown cards ("NUMBER 7"), name lower-thirds, year stamps and pull-quotes — the look of the
+        // reference channel. The planner marks them; they are drawn as images (no font needed in ffmpeg).
+        overlays: true,
         avatarPercent: opts.avatarPercent,
         ...(opts.voice === "voicestudio" ? { voiceProvider: "voicestudio" } : {}),
       }),

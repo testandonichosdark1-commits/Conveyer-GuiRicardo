@@ -136,7 +136,7 @@ export const SETTING_KEYS = [
   "VOICESTUDIO_MODEL",         // VoiceStudio engine id. Blank = mlx-audio (Kokoro on Apple MLX — fast; OmniVoice stalled and is non-commercial).
   "VOICESTUDIO_VOICE_ID",      // VoiceStudio voice: an engine preset/profile, e.g. am_michael, bm_george. Blank = am_michael.         // Voicebox voice PROFILE id (GET /profiles). The engine (qwen, chatterbox, …) is the profile's own default.
   "COST_HUME_USD_PER_1K_CHARS", // Hume Octave TTS list price per 1,000 characters ($0.15 entry tier, $0.05 on Business).
-  "SECONDS_PER_VISUAL",        // seconds each image/clip stays on screen (default 4.5)
+  "SECONDS_PER_VISUAL",        // seconds each image/clip stays on screen after the hook (default 6; the reference channel runs 4–8 s)
   // Longest voiceover an operator may upload, in minutes. The binding constraint is Groq's
   // 25 MB transcription limit: our mono/16 kHz/64 kbps downmix is ~8 kB/s, so 25 MB ≈ 54 min.
   // 50 leaves margin. Raising this past ~54 makes Whisper fail and the timings unusable.
@@ -153,11 +153,18 @@ export const SETTING_KEYS = [
   "FOOTAGE_SOURCES",           // CSV priority list: pexels,pixabay,openverse,wikimedia
   "REAL_MATCH_THRESHOLD",      // 0–100. >0 = Gemini scores how well each stock hit matches the query; hits below the bar are skipped (falls back to AI). 0 = off.
   "VISION_SCORING",            // "" = Gemini scores the candidate images (default) · "claude" = Claude scores them (claude -p) · "chatgpt" = ChatGPT scores them (codex exec, your ChatGPT account) · "off" = no image check, local lexical ranking.
+  "PLANNER_FALLBACK_QUERY",    // "1" (default) = the planner also writes a safer second search (a place/map/object, never a person) for scenes that name a person, unit or event; used when the first search finds nothing good.
+  "VISION_SPECIFIC_SUBJECT",   // "1" (default) = a scene naming a person/unit/place/event/era rejects generic or modern stand-ins; "0" = the original, era-lenient judge prompt.
+  "CHATGPT_VISION_CONCURRENCY", // How many image checks run on the ChatGPT account at once (default 3, max 12).
   "CHATGPT_VISION_MODEL",      // Model for VISION_SCORING=chatgpt (blank = the ChatGPT account's default). `codex debug models` lists them.
   "VISION_CLAUDE_MODEL",       // Claude alias for VISION_SCORING=claude (default "haiku").
   "PLANNER_ENGINE",            // "gemini" (default) | "claude" — who writes the plan (visual world, search queries). Image scoring always stays on Gemini.
   "PLANNER_CLAUDE_MODEL",      // Claude model alias for PLANNER_ENGINE=claude (default "haiku").
   "REAL_STRICT_MIN_SCORE",     // Real-footage-only: lowest vision score still put on screen (default 50); below it the adjacent shot covers the beat.
+  "OVERLAYS_IN_SCENES",        // "1" (default) = cards are drawn inside each scene's own parallel encode; "0" = the old single pass over the finished video.
+  "ENCODE_PRESET",             // x264 speed preset for every rendered beat and the overlay pass: ultrafast … slow (default veryfast).
+  "VIDEO_GRADE",               // "documentary" (default: slightly desaturated + vignette) | "off".
+  "GRADE_ARCHIVAL_STOCK_BW",   // "1" (default) = a stock video standing in for an archival moment goes black and white.
   "HOOK_SECONDS_PER_VISUAL",   // Shot length during the opening hook (default 3s; 0 = same as SECONDS_PER_VISUAL).
   "HOOK_SEC",                  // How long the opening hook lasts, in seconds (default 40).
   "REAL_MEDIA",                // image (photos only) | video (videos only) | auto (photos + video — DEFAULT). Filters real-footage candidates by media kind. Surfaced on the Run page.
@@ -656,7 +663,7 @@ export const DEFAULTS: Record<SettingKey, string> = {
   VOICESTUDIO_URL: "",
   VOICESTUDIO_MODEL: "",
   VOICESTUDIO_VOICE_ID: "",
-  SECONDS_PER_VISUAL: "4.5",
+  SECONDS_PER_VISUAL: "6",
   UPLOAD_MAX_MINUTES: "50",
   BEAT_MIN_SEC: "3",
   BEAT_MAX_SEC: "10",
@@ -670,11 +677,18 @@ export const DEFAULTS: Record<SettingKey, string> = {
   FOOTAGE_SOURCES: "youtube,storyblocks,pexels,pixabay,openverse,wikimedia,archive,web,wigolo,nasa,smithsonian,europeana,flickr,dvids",
   REAL_MATCH_THRESHOLD: "85",
   VISION_SCORING: "chatgpt",
+  PLANNER_FALLBACK_QUERY: "1",
+  VISION_SPECIFIC_SUBJECT: "1",
+  CHATGPT_VISION_CONCURRENCY: "6",
   CHATGPT_VISION_MODEL: "",
   VISION_CLAUDE_MODEL: "haiku",
   PLANNER_ENGINE: "claude",
   PLANNER_CLAUDE_MODEL: "haiku",
   REAL_STRICT_MIN_SCORE: "50",
+  OVERLAYS_IN_SCENES: "1",
+  ENCODE_PRESET: "veryfast",
+  VIDEO_GRADE: "documentary",
+  GRADE_ARCHIVAL_STOCK_BW: "1",
   HOOK_SECONDS_PER_VISUAL: "3",
   HOOK_SEC: "40",
   REAL_MEDIA: "auto",
@@ -716,7 +730,7 @@ export const DEFAULTS: Record<SettingKey, string> = {
   WIGOLO_MIN_PX: "700",
   WIGOLO_BIN: "",
   AVATAR_BACKGROUND: "",
-  VISUAL_CONCURRENCY: "3",
+  VISUAL_CONCURRENCY: "10",
   AVATAR_CONCURRENCY: "2",
   YT_DLP_ENABLED: "1",
   YT_DLP_PATH: "",

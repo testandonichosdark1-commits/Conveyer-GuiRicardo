@@ -884,6 +884,13 @@ export async function runStudioPipeline(
     );
 
     // 4. Composite over the master voiceover.
+    for (const b of renderBeats) {
+      const c = credits.get(b.index);
+      if (c) {
+        b.visualProvider = c.provider;
+        b.visualKind = c.kind;
+      }
+    }
     const finalPath = await assembleStudioVideo(runId, voiceover.filePath, renderBeats, runDir, cfg.format, cfg.sceneTransitions, cfg.overlays);
     const tAssemble = Date.now();
     try { setDuration.run(voiceover.durationSec, runId); } catch {} // Cost Monitoring — fail-open
@@ -1258,6 +1265,13 @@ export async function resumeStudioPipeline(runId: string): Promise<void> {
       { stage: "pipeline" }
     );
 
+    for (const b of renderBeats) {
+      const c = credits.get(b.index);
+      if (c) {
+        b.visualProvider = c.provider;
+        b.visualKind = c.kind;
+      }
+    }
     const finalPath = await assembleStudioVideo(runId, voiceoverPath, renderBeats, runDir, cfg.format, cfg.sceneTransitions, cfg.overlays);
     const durationSec = Math.max(...beats.map((b) => b.endMs)) / 1000;
     try {

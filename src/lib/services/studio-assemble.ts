@@ -6,7 +6,7 @@ import { getSetting } from "../settings";
 import { resolveFfmpeg, resolveFfprobe, STRIP_TOOLCHAIN_TAGS } from "../ffmpeg-bin";
 import { log } from "../logger";
 import { masterLoudness } from "./audio-loudness";
-import { buildOverlayPlan } from "./overlay-renderer";
+import { buildOverlayPlan, buildSceneCardFilter, cardFadeSec, type OverlayPlan, type SceneCard } from "./overlay-renderer";
 import { pLimit } from "../plimit";
 import type { Beat } from "./studio-plan";
 
@@ -37,6 +37,35 @@ export interface RenderBeat extends Beat {
   visualPath: string | null;
   /** Per-beat HeyGen talking-head clip for avatar/split beats; null otherwise. */
   avatarClipPath: string | null;
+  /** Where the visual came from (stock library, museum, web…) and whether it is a clip or a still.
+   *  Only the colour grade reads these; absent = graded like any other shot. */
+  visualProvider?: string;
+  visualKind?: string;
+  /** Cards ("NUMBER 7", years, name tags…) drawn INSIDE this scene's own encode. Set by
+   *  assembleStudioVideo; absent = nothing to draw here. */
+  overlayCards?: SceneCard[];
+}
+
+/**
+ * The documentary look: slightly desaturated, a touch more contrast, a soft vignette. One grade over
+ * every full-screen shot is also what makes generic modern stock sit next to archive photographs —
+ * the reference channel does the same. A STOCK VIDEO that stands in for an ARCHIVAL moment goes
+ * black and white outright, the other trick of that look.
+ *
+ * VIDEO_GRADE: "documentary" (default) | "off". GRADE_ARCHIVAL_STOCK_BW: "1" (default) | "0".
+ * Only core libavfilter filters (eq, hue, vignette): the target ffmpeg builds may lack
+ * libfreetype/libass, and these never need them. Empty string when off → the ffmpeg command is
+ * byte-identical to before.
+ */
+export function gradeFilter(beat: Pick<RenderBeat, "footageKind" | "visualProvider" | "visualKind">): string {
+  if ((getSetting("VIDEO_GRADE") || "documentary").trim().toLowerCase() === "off") return "";
+  const bw =
+    (getSetting("GRADE_ARCHIVAL_STOCK_BW") || "1") === "1" &&
+    beat.footageKind === "archival" &&
+    beat.visualKind === "video" &&
+    /^(pexels|pixabay|storyblocks|coverr)$/.test(beat.visualProvider ?? "");
+  const eq = bw ? "hue=s=0,eq=contrast=1.08:brightness=-0.03" : "eq=saturation=0.8:contrast=1.05:brightness=-0.02";
+  return `,${eq},vignette=angle=PI/5`;
 }
 
 function dims(resolution?: string): { w: number; h: number; fps: number } {
@@ -126,11 +155,21 @@ function probeDurationSec(clipPath: string): number | null {
  * crf, and veryfast discards the most. crf 18 at `medium` is the usual
  * visually-transparent point. Costs roughly 1.5x the bytes and a few seconds per beat.
  */
+/**
+ * x264 speed preset (ENCODE_PRESET, default "veryfast"). "medium" was 3-5x slower for a file
+ * only slightly smaller at the same CRF 18; the overlay pass alone took 4 minutes for a 3.5-minute
+ * video, which would be most of an hour on a 28-minute one.
+ */
+function encodePreset(): string {
+  const p = (getSetting("ENCODE_PRESET") || "veryfast").trim().toLowerCase();
+  return ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"].includes(p) ? p : "veryfast";
+}
+
 function encodeV(fps: number): string[] {
   return [
     "-r", String(fps),
     "-c:v", "libx264",
-    "-preset", "medium",
+    "-preset", encodePreset(),
     "-crf", "18",
     "-pix_fmt", "yuv420p",
     "-an",
@@ -497,14 +536,16 @@ async function renderBeat(
   if (beat.visualPath && xfade && xfade.sec > 0) {
     const d = Math.min(xfade.sec, beatDurSec / 3);
     if (d > 0) {
+      const cards = beat.overlayCards ?? [];
       await runFfmpegAsync([
         "-stream_loop", "-1", "-i", beat.visualPath,
         "-i", xfade.prevPath,
+        ...cards.flatMap((c) => ["-loop", "1", "-i", c.pngPath]),
         "-filter_complex",
-        `[0:v]${fit},${pad},format=yuv420p,settb=AVTB[cur];` +
+        `[0:v]${fit}${gradeFilter(beat)},${pad},format=yuv420p,settb=AVTB[cur];` +
           `[1:v]setpts=PTS-STARTPTS,${fit},tpad=stop_mode=clone:stop_duration=${(d + 2).toFixed(3)},` +
           `trim=start=${xfade.prevDurSec.toFixed(3)}:duration=${d.toFixed(3)},setpts=PTS-STARTPTS,format=yuv420p,settb=AVTB[prev];` +
-          `[prev][cur]xfade=transition=fade:duration=${d.toFixed(3)}:offset=0[v]`,
+          `[prev][cur]xfade=transition=fade:duration=${d.toFixed(3)}:offset=0${cards.length ? "[xf];" + buildSceneCardFilter("[xf]", cards, 2, "[v]") : "[v]"}`,
         "-map", "[v]", "-frames:v", String(frames),
         ...encodeV(fps), outPath,
       ]);
@@ -514,9 +555,22 @@ async function renderBeat(
 
   // Full-screen B-roll (loops if shorter than the beat).
   if (beat.visualPath) {
+    const cards = beat.overlayCards ?? [];
+    if (cards.length > 0) {
+      // The cards are drawn here, in this scene's own encode — which already runs in parallel with
+      // the others — instead of in one extra pass that re-encoded the whole finished video.
+      await runFfmpegAsync([
+        "-stream_loop", "-1", "-i", beat.visualPath,
+        ...cards.flatMap((c) => ["-loop", "1", "-i", c.pngPath]),
+        "-filter_complex", `[0:v]${fit}${gradeFilter(beat)}${fadeFx}[bs];${buildSceneCardFilter("[bs]", cards, 1, "[v]")}`,
+        "-map", "[v]", "-frames:v", String(frames),
+        ...encodeV(fps), outPath,
+      ]);
+      return;
+    }
     await runFfmpegAsync([
       "-stream_loop", "-1", "-i", beat.visualPath,
-      "-vf", fit + fadeFx, "-map", "0:v:0", "-frames:v", String(frames),
+      "-vf", fit + gradeFilter(beat) + fadeFx, "-map", "0:v:0", "-frames:v", String(frames),
       ...encodeV(fps), outPath,
     ]);
     return;
@@ -580,6 +634,53 @@ export async function assembleStudioVideo(
   const crossfadeSec = crossfade ? Math.min(1.5, Math.max(0, Number(getSetting("SCENE_TRANSITION_MS") || "400") / 1000)) : 0;
   if (crossfade) log(runId, "info", `Scene transitions — crossfade ${Math.round(crossfadeSec * 1000)}ms between full-screen visuals`, { stage: "assemble" });
 
+  // Overlay cards. Drawn inside each scene's own encode when every scene that carries one is a plain
+  // full-screen shot (the Factory case) — no extra pass over the finished video. Otherwise (avatar or
+  // split scenes) the original single pass further down still does the work.
+  let overlayPlan: OverlayPlan | null = null;
+  let cardsInScenes = false;
+  if (overlays === true) {
+    try {
+      overlayPlan = await buildOverlayPlan(beats, dim, path.join(beatsDir, "overlays"), runId, (getSetting("EDIT_STYLE") || "").trim().toLowerCase() || undefined);
+    } catch (e) {
+      log(runId, "error", `Overlay plan FAILED — delivering the video WITHOUT overlays: ${(e as Error).message.slice(0, 180)}`, { stage: "assemble" });
+    }
+    if (overlayPlan && (getSetting("OVERLAYS_IN_SCENES") || "1") !== "0") {
+      const spans = beats.map((b) => {
+        const start = Math.round((b.startMs * dim.fps) / 1000) / dim.fps;
+        return { start, end: start + beatFrames(b, dim.fps) / dim.fps };
+      });
+      const eps = 1e-6;
+      const perBeat = beats.map((_, i) => {
+        const out: SceneCard[] = [];
+        for (const c of overlayPlan!.cards) {
+          const a = Math.max(c.startSec, spans[i].start);
+          const z = Math.min(c.endSec, spans[i].end);
+          if (z - a < 1 / dim.fps) continue;
+          out.push({
+            pngPath: c.pngPath,
+            startSec: a - spans[i].start,
+            endSec: z - spans[i].start,
+            fadeIn: c.startSec >= spans[i].start - eps,
+            fadeOut: c.endSec <= spans[i].end + eps,
+            fadeSec: cardFadeSec(c.startSec, c.endSec),
+            x: c.x,
+            y: c.y,
+          });
+        }
+        return out;
+      });
+      const hosts = beats.filter((_, i) => perBeat[i].length > 0);
+      if (hosts.length > 0 && hosts.every(isFullBroll)) {
+        beats.forEach((b, i) => {
+          b.overlayCards = perBeat[i].length ? perBeat[i] : undefined;
+        });
+        cardsInScenes = true;
+        log(runId, "info", `Overlays: ${overlayPlan.cards.length} card(s) drawn inside their own scenes`, { stage: "assemble" });
+      }
+    }
+  }
+
   // Each beat's own ffmpeg encode is fully independent (own input, own output file),
   // so this pass runs `assembleConcurrency()` of them at once instead of one at a time
   // — the loop used to be a plain sequential `for`, which left a multi-core machine
@@ -603,7 +704,14 @@ export async function assembleStudioVideo(
             ? { prevPath: prev.visualPath, prevDurSec: beatFrames(prev, dim.fps) / dim.fps, sec: crossfadeSec }
             : undefined;
         try {
-          await renderBeat(beat, clip, dim, fade, runId, xfade);
+          try {
+            await renderBeat(beat, clip, dim, fade, runId, xfade);
+          } catch (e) {
+            // A card must never cost the scene: draw it again without its cards before giving up.
+            if (!beat.overlayCards?.length) throw e;
+            log(runId, "warn", `Beat ${beat.index}: render with overlay cards failed (${(e as Error).message.slice(0, 100)}) — rendering it without them`, { stage: "assemble" });
+            await renderBeat({ ...beat, overlayCards: undefined }, clip, dim, fade, runId, xfade);
+          }
           // A source that decodes just enough to pass retrieval (freeze probe ok) can
           // still exhaust/error mid-encode and yield a SHORT clip — which would slide
           // every later beat off the narration. Verify the exact frame count; if it's
@@ -693,9 +801,9 @@ export async function assembleStudioVideo(
   // never fail a render. Recomputed on every assemble/resume from beats.json, so no
   // per-beat clip is touched and nothing is re-billed.
   let videoForMux = silentPath;
-  if (overlays === true) {
+  if (overlays === true && !cardsInScenes) {
     try {
-      const plan = await buildOverlayPlan(beats, dim, path.join(beatsDir, "overlays"), runId, (getSetting("EDIT_STYLE") || "").trim().toLowerCase() || undefined);
+      const plan = overlayPlan;
       if (plan) {
         const overlaidPath = path.join(beatsDir, "video_overlaid.mp4");
         // The card inputs are looped (`-loop 1`) and therefore INFINITE, while the base video

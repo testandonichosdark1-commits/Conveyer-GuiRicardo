@@ -39,8 +39,10 @@ const SCHEMA = {
 const g = globalThis as unknown as { __facelessChatgptVision?: { active: number; waiters: (() => void)[] } };
 const gate = (g.__facelessChatgptVision ??= { active: 0, waiters: [] });
 function limit(): number {
-  const n = Number(process.env.CHATGPT_VISION_CONCURRENCY);
-  return Number.isFinite(n) && n >= 1 ? Math.min(Math.floor(n), 6) : 3;
+  // A setting (Full settings), with the env var as a fallback. Measured: six simultaneous checks
+  // finished in 22 s, against 8 s for one on its own — the account handles parallel calls well.
+  const n = Number(getSetting("CHATGPT_VISION_CONCURRENCY") || process.env.CHATGPT_VISION_CONCURRENCY);
+  return Number.isFinite(n) && n >= 1 ? Math.min(Math.floor(n), 12) : 3;
 }
 async function acquire() {
   if (gate.active >= limit()) await new Promise<void>((r) => gate.waiters.push(r));

@@ -131,7 +131,7 @@ describe("requestPlanChunk — malformed body retries instead of losing the chun
     expect(schema?.items?.type).toBe("OBJECT");
     // Encodes the planner object exactly — the same fields the prompt asks for.
     expect(Object.keys(schema?.items?.properties ?? {}).sort()).toEqual(
-      ["ai_media", "ai_prompt", "footage_kind", "index", "product_label", "query_type", "visual_query", "youtube_query"]
+      ["ai_media", "ai_prompt", "fallback_query", "footage_kind", "index", "product_label", "query_type", "visual_query", "youtube_query"]
     );
     expect(schema?.items?.required).toContain("index");
     // product_label is the only optional one: most shots are not product shots, and a
